@@ -493,7 +493,7 @@ const Index = () => {
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel - Chat */}
-        <div className="w-80 min-w-[320px] border-r border-border/50 flex flex-col">
+        <div className="w-80 min-w-[320px] border-r border-border/50 flex flex-col min-h-0">
           <ChatPanel
             messages={chatMessages}
             reasoningFeed={simulation.reasoningFeed}

@@ -11,8 +11,7 @@ influence susceptibility and random noise.
 from __future__ import annotations
 
 import random
-from collections import defaultdict
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ..models.schemas import InteractionRuleModel
 from .agent import Agent
@@ -36,7 +35,7 @@ def compute_pairwise_influences(agents: List[Agent], dataset: Dataset) -> Dict[s
         A mapping from agent_id to a dictionary mapping opinion strings
         ('accept', 'neutral', 'reject') to cumulative influence weights.
     """
-    # Initialize influence accumulators for each agent
+    # Initialise influence accumulators for each agent
     accum: Dict[str, Dict[str, float]] = {
         agent.agent_id: {"accept": 0.0, "neutral": 0.0, "reject": 0.0} for agent in agents
     }

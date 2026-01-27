@@ -49,7 +49,7 @@ class Dataset:
             self.rules_by_pair[(r.from_category, r.to_category)] = r
 
 
-def load_json_file(path: str) -> List[Dict]:
+def _load_json_file(path: str) -> List[Dict]:
     """Helper to load a JSON file and return its content.
 
     Args:
@@ -82,6 +82,7 @@ def load_dataset(data_dir: str) -> Dataset:
     templates_path = os.path.join(data_dir, "persona_templates.json")
     rules_path = os.path.join(data_dir, "interaction_rules.json")
 
+    # Ensure all files exist
     missing_files = [p for p in [categories_path, templates_path, rules_path] if not os.path.isfile(p)]
     if missing_files:
         raise RuntimeError(
@@ -89,9 +90,9 @@ def load_dataset(data_dir: str) -> Dataset:
         )
 
     try:
-        raw_categories = load_json_file(categories_path)
-        raw_templates = load_json_file(templates_path)
-        raw_rules = load_json_file(rules_path)
+        raw_categories = _load_json_file(categories_path)
+        raw_templates = _load_json_file(templates_path)
+        raw_rules = _load_json_file(rules_path)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Dataset loading failed: invalid JSON ({exc})")
 
@@ -102,16 +103,13 @@ def load_dataset(data_dir: str) -> Dataset:
     except ValidationError as exc:
         raise RuntimeError(f"Dataset validation failed: {exc}")
 
-    # Additional sanity checks can be implemented here (e.g. dangling references)
-    # Validate that every template references a valid category
+    # Additional consistency checks
     category_ids = {c.category_id for c in categories}
     for tpl in templates:
         if tpl.category_id not in category_ids:
             raise RuntimeError(
                 f"Template '{tpl.template_id}' references unknown category '{tpl.category_id}'"
             )
-
-    # Validate that every rule references valid categories
     for rule in rules:
         if rule.from_category not in category_ids:
             raise RuntimeError(

@@ -1,7 +1,8 @@
 """
 LLM endpoints backed by a local Ollama server.
 
-Includes free-form generation and schema extraction.
+Includes free‑form generation and schema extraction. These endpoints
+provide simple wrappers around the local LLM for use by the frontend.
 """
 
 from __future__ import annotations
@@ -28,6 +29,11 @@ class GenerateRequest(BaseModel):
 
 @router.post("/generate")
 async def generate_text(payload: GenerateRequest) -> dict:
+    """Generate arbitrary text from the local LLM.
+
+    If the LLM service is unavailable or an error occurs, a 502
+    response is returned to the caller.
+    """
     try:
         text = await generate_ollama(
             prompt=payload.prompt,
@@ -39,7 +45,7 @@ async def generate_text(payload: GenerateRequest) -> dict:
     return {"text": text}
 
 
-# --- Schema extraction (chat-first flow) ---
+# --- Schema extraction (chat‑first flow) ---
 
 class ExtractRequest(BaseModel):
     message: str = Field(..., min_length=1)
@@ -106,6 +112,7 @@ COUNTRY_ALIASES = {
     "الإمارات": "United Arab Emirates",
 }
 
+
 CITY_ALIASES = {
     "cairo": "Cairo",
     "القاهرة": "Cairo",
@@ -141,7 +148,7 @@ def _normalize_city(value: Optional[str]) -> Optional[str]:
 
 def _extract_from_message(message: str) -> Dict[str, Optional[str]]:
     # Simple "City, Country" heuristic
-    match = re.search(r"in\s+([a-zA-Z\u0600-\u06FF\\s]+?),\s*([a-zA-Z\u0600-\u06FF\\s]+?)([\\.!]|$)", message)
+    match = re.search(r"in\s+([a-zA-Z\u0600-\u06FF\s]+?),\s*([a-zA-Z\u0600-\u06FF\s]+?)([\.!]|$)", message)
     if match:
         return {"city": _normalize_city(match.group(1)), "country": _normalize_country(match.group(2))}
     return {}
@@ -149,7 +156,6 @@ def _extract_from_message(message: str) -> Dict[str, Optional[str]]:
 
 def _safe_json_loads(raw: str) -> Dict[str, Any]:
     from json import loads, JSONDecodeError
-
     try:
         return loads(raw)
     except JSONDecodeError:
@@ -163,7 +169,13 @@ def _safe_json_loads(raw: str) -> Dict[str, Any]:
 
 @router.post("/extract", response_model=ExtractResponse)
 async def extract_schema(payload: ExtractRequest) -> ExtractResponse:
-    from json import dumps, loads
+    """Extract structured fields from a free‑form chat message using the LLM.
+
+    This endpoint uses a prompt to instruct the LLM to return a JSON
+    object containing the desired fields. The result is normalised and
+    some heuristic fallbacks are applied for country/city extraction.
+    """
+    from json import dumps
 
     logger.info("extract_schema: message_len=%s", len(payload.message or ""))
     logger.info("extract_schema: schema_in=%s", payload.schema)
@@ -179,7 +191,7 @@ async def extract_schema(payload: ExtractRequest) -> ExtractResponse:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"LLM extraction failed: {exc}")
 
-    # Normalize scalars
+    # Normalise scalars
     idea = _norm_text(data.get("idea"))
     country = _normalize_country(data.get("country"))
     city = _normalize_city(data.get("city"))
@@ -198,23 +210,11 @@ async def extract_schema(payload: ExtractRequest) -> ExtractResponse:
         risk_appetite = None
 
     # Heuristic fallback from message if LLM omitted
-    inferred = _extract_from_message(payload.message)
-    country = country or inferred.get("country") or _normalize_country(payload.schema.get("country"))
-    city = city or inferred.get("city") or _normalize_city(payload.schema.get("city"))
-    idea = idea or _norm_text(payload.schema.get("idea"))
-    category = category or _norm_text(payload.schema.get("category"))
-    idea_maturity = idea_maturity or _norm_text(payload.schema.get("idea_maturity"))
-    if not target_audience and isinstance(payload.schema.get("target_audience"), list):
-        target_audience = payload.schema.get("target_audience") or []
-    if not goals and isinstance(payload.schema.get("goals"), list):
-        goals = payload.schema.get("goals") or []
-    if risk_appetite is None:
-        ra = payload.schema.get("risk_appetite")
-        if isinstance(ra, (int, float)):
-            risk_appetite = ra
+    fallback = _extract_from_message(payload.message)
+    country = country or fallback.get("country")
+    city = city or fallback.get("city")
 
-    # Compute missing required fields deterministically
-    missing = []
+    missing: list[str] = []
     if not idea:
         missing.append("idea")
     if not country:
@@ -227,20 +227,6 @@ async def extract_schema(payload: ExtractRequest) -> ExtractResponse:
         missing.append("target_audience")
     if not goals:
         missing.append("goals")
-    if not missing:
-        question = None
-
-    logger.info(
-        "extract_schema: parsed idea=%s country=%s city=%s category=%s target_audience=%s goals=%s missing=%s question=%s",
-        idea,
-        country,
-        city,
-        category,
-        target_audience,
-        goals,
-        missing,
-        question,
-    )
 
     return ExtractResponse(
         idea=idea,

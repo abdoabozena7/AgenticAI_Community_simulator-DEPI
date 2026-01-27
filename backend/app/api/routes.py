@@ -3,7 +3,9 @@ REST API routes for the social simulation backend.
 
 This module defines endpoints to start a simulation and retrieve final
 metrics. The simulation runs asynchronously in the background and
-emits events over WebSocket as it progresses.
+emits events over WebSocket as it progresses. State is cached in
+memory so clients can poll the REST API for the latest snapshot when
+WebSocket connectivity is unavailable.
 """
 
 from __future__ import annotations
@@ -26,11 +28,12 @@ _simulation_tasks: Dict[str, asyncio.Task] = {}
 _simulation_results: Dict[str, Dict[str, Any]] = {}
 _simulation_state: Dict[str, Dict[str, Any]] = {}
 
-# Reference to the loaded dataset (set in main module)
+# Reference to the loaded dataset (set in main module at startup)
 dataset: Optional[Dataset] = None
 
 
 def _init_state(simulation_id: str) -> None:
+    """Initialise the in-memory state container for a new simulation."""
     _simulation_state[simulation_id] = {
         "agents": [],
         "reasoning": [],
@@ -39,6 +42,12 @@ def _init_state(simulation_id: str) -> None:
 
 
 def _store_event(simulation_id: str, event_type: str, data: Dict[str, Any]) -> None:
+    """Update the cached state for the given simulation.
+
+    Depending on the event type, the relevant portion of the state is
+    updated. For reasoning steps, only the most recent 200 entries are
+    retained to bound memory usage.
+    """
     state = _simulation_state.setdefault(
         simulation_id,
         {"agents": [], "reasoning": [], "metrics": None},
@@ -50,16 +59,18 @@ def _store_event(simulation_id: str, event_type: str, data: Dict[str, Any]) -> N
     elif event_type == "reasoning_step":
         reasoning = state["reasoning"]
         reasoning.append(data)
+        # Trim to last 200 events
         if len(reasoning) > 200:
             state["reasoning"] = reasoning[-200:]
 
 
 @router.post("/start")
 async def start_simulation(user_context: Dict[str, Any]) -> Dict[str, Any]:
-    """Initialize a new simulation.
+    """Initialise a new simulation.
 
     Accepts user-provided context (structured data) and kicks off a
-    background simulation. Returns a unique simulation identifier.
+    background simulation. Returns a unique simulation identifier so
+    clients can subscribe to WebSocket updates or poll the REST API.
     """
     global dataset
     if dataset is None:
@@ -73,7 +84,9 @@ async def start_simulation(user_context: Dict[str, Any]) -> Dict[str, Any]:
     async def emitter(event_type: str, data: Dict[str, Any]) -> None:
         """Broadcast events and store a snapshot for polling."""
         payload = {"type": event_type, **data}
+        # Broadcast to all connected WebSocket clients
         await manager.broadcast_json(payload)
+        # Persist state for REST polling
         _store_event(simulation_id, event_type, data)
 
     # Define a coroutine that runs the simulation and stores results
@@ -94,7 +107,8 @@ async def get_result(simulation_id: str) -> Dict[str, Any]:
     """Retrieve final aggregated metrics for a completed simulation.
 
     If the simulation is still running or unknown, returns an
-    appropriate status message.
+    appropriate status message. The final metrics are taken from the
+    result stored after the simulation coroutine completes.
     """
     # Check if we have a stored result
     if simulation_id in _simulation_results:

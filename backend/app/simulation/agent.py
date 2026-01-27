@@ -27,15 +27,18 @@ class Agent:
         category: CategoryModel,
         initial_opinion: str = "neutral",
     ) -> None:
+        # Assign a unique identifier for the runtime instance
         self.agent_id: str = str(uuid.uuid4())
         self.category_id: str = template.category_id
         self.template_id: str = template.template_id
+        # Copy trait values from the persona template
         self.traits: Dict[str, float] = dict(template.traits)
-        # baseline influence weight derived from category and template
+        # Compute baseline influence weight combining category base weight and susceptibility
         self.influence_weight: float = category.base_influence_weight * template.influence_susceptibility
+        # Set initial opinion and moderate starting confidence
         self.current_opinion: str = initial_opinion
-        # Start with a moderate confidence (could be tuned). We'll use 0.5.
         self.confidence: float = 0.5
+        # History of reasoning steps captured during the simulation
         self.history: List[ReasoningStep] = []
 
     def to_model(self) -> AgentInstanceModel:
@@ -52,7 +55,11 @@ class Agent:
         )
 
     def record_reasoning_step(
-        self, iteration: int, message: str, triggered_by: str, opinion_change: Optional[Dict[str, str]] = None
+        self,
+        iteration: int,
+        message: str,
+        triggered_by: str,
+        opinion_change: Optional[Dict[str, str]] = None,
     ) -> None:
         """Append a new reasoning step to the agent's history."""
         step = ReasoningStep(

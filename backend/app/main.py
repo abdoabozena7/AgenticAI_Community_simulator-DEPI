@@ -2,8 +2,16 @@
 Entry point for the FastAPI social simulation backend.
 
 This module constructs the FastAPI application, loads the dataset at
-startup and registers API and WebSocket routes. It ensures that the
-dataset is validated before the server begins accepting requests.
+startup and registers API, WebSocket and LLM routes. It ensures that
+the dataset is validated before the server begins accepting requests.
+
+The application is organised around a simple hybrid multi‑agent
+simulation engine. A JSON dataset defines persona categories,
+templates and interaction rules. On startup the dataset is loaded
+exactly once and stored globally. Each simulation run spawns a small
+population of agents from the templates and executes several
+iterations of pairwise influence. Results are streamed to the
+frontend via WebSockets and summarised via REST endpoints.
 """
 
 from __future__ import annotations
@@ -19,29 +27,51 @@ from .api import llm as llm_routes
 
 
 def create_app() -> FastAPI:
+    """Create and configure the FastAPI application instance.
+
+    The app mounts REST routes under the ``/simulation`` prefix for
+    simulation management and exposes a WebSocket endpoint at
+    ``/ws/simulation`` for streaming live updates. LLM routes are
+    grouped under ``/llm``. CORS is configured to allow the
+    accompanying frontend to communicate with this backend in a
+    development environment. In production you should restrict the
+    allowed origins.
+
+    Returns:
+        FastAPI: Configured application instance.
+    """
     app = FastAPI(title="Social Simulation Backend")
-    # Allow frontend to access the backend (adjust origins as needed)
+    # Allow all origins in development. For production, set
+    # appropriate allowed origins.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # In production, set specific origins
+        allow_origins=["*"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    # Include API routes
+    # Register API routers
     app.include_router(simulation_routes.router)
     app.include_router(websocket_module.router)
     app.include_router(llm_routes.router)
 
     @app.on_event("startup")
     async def startup_event() -> None:
-        """Load dataset at application startup."""
+        """Load the dataset once at application startup.
+
+        If the dataset is missing or invalid the server startup will
+        fail, preventing requests from being served in an invalid
+        state.
+        """
         data_dir = os.path.join(os.path.dirname(__file__), "data")
-        # Load dataset and store reference in routes
-        from .api import routes  # import here to avoid circular import issues
+        # Load dataset and store reference in routes module. Importing
+        # here avoids circular import issues.
+        from .api import routes  # local import to avoid circular dependency
         routes.dataset = load_dataset(data_dir)
 
     return app
 
+
+# Create a default application instance for uvicorn to discover.
 app = create_app()

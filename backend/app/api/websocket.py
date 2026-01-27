@@ -4,12 +4,13 @@ WebSocket endpoint and connection manager.
 This module exposes a single WebSocket endpoint that clients can
 subscribe to in order to receive live updates from simulations.
 Connections are maintained in a simple manager that broadcasts
-messages to all active subscribers.
+messages to all active subscribers. In this implementation, all
+simulations broadcast on the same channel; clients should filter
+events client‑side based on simulation IDs if necessary.
 """
 
 from __future__ import annotations
 
-import json
 from typing import List
 
 from fastapi import WebSocket, WebSocketDisconnect, APIRouter
@@ -30,7 +31,7 @@ class ConnectionManager:
             self.active_connections.remove(websocket)
 
     async def broadcast_json(self, message: dict) -> None:
-        """Send a JSON-serialisable message to all active connections."""
+        """Send a JSON‑serialisable message to all active connections."""
         for connection in list(self.active_connections):
             try:
                 await connection.send_json(message)
@@ -45,7 +46,7 @@ manager = ConnectionManager()
 
 @router.websocket("/ws/simulation")
 async def websocket_endpoint(websocket: WebSocket) -> None:
-    """WebSocket endpoint that streams live simulation events."""
+    """WebSocket endpoint that streams live simulation events to connected clients."""
     await manager.connect(websocket)
     try:
         while True:

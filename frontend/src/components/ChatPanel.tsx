@@ -2,7 +2,6 @@ import { useState, useRef, useEffect } from 'react';
 import { Send, Bot, User, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { ChatMessage, ReasoningMessage } from '@/types/simulation';
 import { cn } from '@/lib/utils';
 
@@ -44,7 +43,7 @@ export function ChatPanel({
   };
 
   return (
-    <div className="glass-panel h-full flex flex-col">
+    <div className="glass-panel h-full flex flex-col min-h-0">
       {/* Tab Header */}
       <div className="flex border-b border-border/50">
         <button
@@ -87,7 +86,7 @@ export function ChatPanel({
       </div>
 
       {/* Messages Area */}
-      <ScrollArea className="flex-1 p-4" ref={scrollRef}>
+      <div className="flex-1 p-4 overflow-y-auto scrollbar-thin" ref={scrollRef}>
         {activeTab === 'chat' ? (
           <div className="space-y-4">
             {messages.length === 0 ? (
@@ -162,7 +161,7 @@ export function ChatPanel({
             )}
           </div>
         )}
-      </ScrollArea>
+      </div>
 
       {/* Input Area */}
       <div className="p-4 border-t border-border/50">

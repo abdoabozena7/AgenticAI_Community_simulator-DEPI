@@ -1,0 +1,15 @@
+9 while a local LLM (via Ollama) occasionally generates human\u2011readable
+35     mathematical rules with occasional LLM\u2011generated explanations.
+48         """Invoke the LLM to produce a short explanation for an opinion change.
+51         the influence weights for each opinion category. The LLM is asked
+70             f"accept={influence_weights.get('accept',0.0):.3f}, neutral={influence_weights.get('neutral',0.0):.3f}, "
+71             f"reject={influence_weights.get('reject',0.0):.3f}. "
+75             response = await generate_ollama(prompt=prompt, temperature=0.3)
+84             # Fallback deterministic explanation
+108         # Determine number of agents (19\u201324 inclusive)
+169         # Determine number of iterations (3\u20136 inclusive)
+170         num_iterations = random.randint(3, 6)
+198             # Phase 3: Apply opinion updates
+217                     agent.confidence = max(0.3, agent.confidence - 0.1)
+218                     # Generate an LLM explanation for the opinion change
+266                         agent.confidence = max(0.3, agent.confidence - 0.1)
