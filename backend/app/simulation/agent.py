@@ -31,6 +31,8 @@ class Agent:
         self.agent_id: str = str(uuid.uuid4())
         self.category_id: str = template.category_id
         self.template_id: str = template.template_id
+        self.archetype_name: str = template.archetype_name
+        self.biases: List[str] = list(template.biases)
         # Copy trait values from the persona template
         self.traits: Dict[str, float] = dict(template.traits)
         # Compute baseline influence weight combining category base weight and susceptibility

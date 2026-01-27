@@ -9,6 +9,7 @@ interface SimulationState {
   agents: Map<string, Agent>;
   metrics: SimulationMetrics;
   reasoningFeed: ReasoningMessage[];
+  summary: string | null;
 }
 
 type SimulationAction =
@@ -18,6 +19,7 @@ type SimulationAction =
   | { type: 'UPDATE_AGENTS'; payload: AgentsEvent }
   | { type: 'SET_REASONING'; payload: ReasoningMessage[] }
   | { type: 'ADD_REASONING'; payload: ReasoningStepEvent }
+  | { type: 'SET_SUMMARY'; payload: string | null }
   | { type: 'RESET' };
 
 const initialMetrics: SimulationMetrics = {
@@ -37,6 +39,7 @@ const initialState: SimulationState = {
   agents: new Map(),
   metrics: initialMetrics,
   reasoningFeed: [],
+  summary: null,
 };
 
 const hashString = (value: string) => {
@@ -139,6 +142,13 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
         reasoningFeed: action.payload.slice(-99),
       };
     }
+
+    case 'SET_SUMMARY': {
+      return {
+        ...state,
+        summary: action.payload,
+      };
+    }
     
     case 'RESET':
       return initialState;
@@ -234,6 +244,9 @@ export function useSimulation() {
           }));
           dispatch({ type: 'SET_REASONING', payload: reasoningMessages });
         }
+        if (prime.summary) {
+          dispatch({ type: 'SET_SUMMARY', payload: prime.summary });
+        }
       } catch (primeErr) {
         console.warn('Initial state prime failed', primeErr);
       }
@@ -288,6 +301,9 @@ export function useSimulation() {
               iteration: step.iteration,
             }));
             dispatch({ type: 'SET_REASONING', payload: reasoningMessages });
+          }
+          if (stateResponse?.summary) {
+            dispatch({ type: 'SET_SUMMARY', payload: stateResponse.summary });
           }
 
           const res = await apiService.getSimulationResult(response.simulation_id);
@@ -364,6 +380,9 @@ export function useSimulation() {
               iteration: step.iteration,
             }));
             dispatch({ type: 'SET_REASONING', payload: reasoningMessages });
+          }
+          if (stateResponse.summary) {
+            dispatch({ type: 'SET_SUMMARY', payload: stateResponse.summary });
           }
 
           if (stateResponse.status === 'completed') {

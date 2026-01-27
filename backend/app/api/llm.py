@@ -80,6 +80,8 @@ Hard requirements:
 - Do NOT ask for a field that you can reliably extract from the message.
 - If category/target_audience/goals are not explicit, infer the best-fit options from the idea and choose from the list above.
 - If a required field is missing or unclear, include its name in "missing" and provide a brief, human, context-rich follow-up in "question" (Arabic allowed).
+- Use the current schema to keep known values unless the user clearly changes them.
+- If multiple fields are missing, ask ONLY the single most critical question (priority: country/city, then idea).
 - Prefer proper names (e.g., "Egypt", "Cairo", "Giza"). Handle "City, Country" patterns.
 - Return JSON only, no prose.
 
@@ -198,6 +200,12 @@ async def extract_schema(payload: ExtractRequest) -> ExtractResponse:
     category = _norm_text(data.get("category"))
     idea_maturity = _norm_text(data.get("idea_maturity"))
     question = _norm_text(data.get("question"))
+    schema = payload.schema or {}
+    schema_idea = _norm_text(schema.get("idea"))
+    schema_country = _normalize_country(schema.get("country"))
+    schema_city = _normalize_city(schema.get("city"))
+    schema_category = _norm_text(schema.get("category"))
+    schema_maturity = _norm_text(schema.get("idea_maturity"))
     # Lists
     target_audience = data.get("target_audience") if isinstance(data.get("target_audience"), list) else []
     goals = data.get("goals") if isinstance(data.get("goals"), list) else []
@@ -208,6 +216,23 @@ async def extract_schema(payload: ExtractRequest) -> ExtractResponse:
             risk_appetite = risk_appetite / 100.0
     else:
         risk_appetite = None
+
+    if not idea:
+        idea = schema_idea
+    if not country:
+        country = schema_country
+    if not city:
+        city = schema_city
+    if not category:
+        category = schema_category
+    if not target_audience and isinstance(schema.get("target_audience"), list):
+        target_audience = schema.get("target_audience")
+    if not goals and isinstance(schema.get("goals"), list):
+        goals = schema.get("goals")
+    if risk_appetite is None and isinstance(schema.get("risk_appetite"), (int, float)):
+        risk_appetite = schema.get("risk_appetite")
+    if not idea_maturity:
+        idea_maturity = schema_maturity
 
     # Heuristic fallback from message if LLM omitted
     fallback = _extract_from_message(payload.message)
@@ -228,6 +253,18 @@ async def extract_schema(payload: ExtractRequest) -> ExtractResponse:
     if not goals:
         missing.append("goals")
 
+    # Enforce a single critical follow-up question
+    if "country" in missing and "city" in missing:
+        question = "ما هي الدولة والمدينة المستهدفة؟"
+    elif "city" in missing:
+        question = "ما هي المدينة المستهدفة؟"
+    elif "country" in missing:
+        question = "ما هي الدولة المستهدفة؟"
+    elif "idea" in missing:
+        question = "ما هي الفكرة التي تريد إطلاقها؟"
+    else:
+        question = None
+
     return ExtractResponse(
         idea=idea,
         country=country,
@@ -240,3 +277,30 @@ async def extract_schema(payload: ExtractRequest) -> ExtractResponse:
         missing=missing,
         question=question,
     )
+
+
+class IntentRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+    context: Optional[str] = None
+
+
+class IntentResponse(BaseModel):
+    start: bool
+    reason: Optional[str] = None
+
+
+@router.post("/intent", response_model=IntentResponse)
+async def detect_intent(payload: IntentRequest) -> IntentResponse:
+    prompt = (
+        "Determine whether the user wants to start the simulation now. "
+        "Return JSON only: {\"start\": true/false, \"reason\": \"...\"}. "
+        "Use context if provided.\n"
+        f"Context: {payload.context or ''}\n"
+        f"Message: {payload.message}"
+    )
+    try:
+        raw = await generate_ollama(prompt=prompt, temperature=0.2, response_format="json")
+        data = _safe_json_loads(raw)
+        return IntentResponse(start=bool(data.get("start")), reason=data.get("reason"))
+    except Exception:
+        return IntentResponse(start=False, reason=None)

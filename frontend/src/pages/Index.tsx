@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Header } from '@/components/Header';
 import {
   TopBar,
@@ -155,6 +155,7 @@ const Index = () => {
   const [isWaitingForCountry, setIsWaitingForCountry] = useState(false);
   const [hasStarted, setHasStarted] = useState(false);
   const [lastSuggestionKey, setLastSuggestionKey] = useState<string | null>(null);
+  const summaryRef = useRef<string | null>(null);
 
   const inferLocation = useCallback((text: string): { country?: string; city?: string } => {
     const matchComma = /in\s+([a-zA-Z\s]+?),\s*([a-zA-Z\s]+?)([\.!]|$)/i.exec(text);
@@ -186,12 +187,17 @@ const Index = () => {
   };
 
   const getAssistantMessage = useCallback(async (prompt: string) => {
+    const context = chatMessages
+      .slice(-6)
+      .map((msg) => `${msg.type === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
+      .join('\n');
+    const fullPrompt = context ? `Conversation:\n${context}\nUser: ${prompt}\nAssistant:` : prompt;
     const text = await apiService.generateMessage(
-      prompt,
+      fullPrompt,
       'You are a concise assistant for a product simulation UI. Avoid markdown formatting like **bold**.'
     );
     return text.replace(/\*\*/g, '').trim();
-  }, []);
+  }, [chatMessages]);
 
   const addSystemMessage = useCallback((content: string) => {
     const message: ChatMessage = {
@@ -202,6 +208,13 @@ const Index = () => {
     };
     setChatMessages((prev) => [...prev, message]);
   }, []);
+
+  useEffect(() => {
+    if (!simulation.summary) return;
+    if (simulation.summary === summaryRef.current) return;
+    addSystemMessage(simulation.summary);
+    summaryRef.current = simulation.summary;
+  }, [simulation.summary, addSystemMessage]);
 
   const buildConfig = useCallback((input: UserInput) => {
     return {
@@ -308,6 +321,22 @@ const Index = () => {
 
       void (async () => {
         try {
+          if (simulation.status === 'running' || simulation.status === 'completed') {
+            const nextIdea = userInput.idea
+              ? `${userInput.idea}\nUpdate: ${trimmed}`
+              : trimmed;
+            setUserInput((prev) => ({ ...prev, idea: nextIdea }));
+            const prompt = [
+              'The user sent an update to the project idea while a simulation is active.',
+              'Acknowledge the update, mention how it affects assumptions, and ask if they want to re-run the simulation.',
+              `Current idea summary: ${userInput.idea || 'Not set'}.`,
+              `Update: ${trimmed}.`,
+            ].join(' ');
+            const reply = await getAssistantMessage(prompt);
+            addSystemMessage(reply);
+            return;
+          }
+
           const inferred = inferLocation(trimmed);
           const schemaPayload = {
             idea: userInput.idea,
@@ -469,7 +498,7 @@ const Index = () => {
   }, [simulation.status]);
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
+    <div className="h-screen bg-background flex flex-col overflow-hidden">
       {/* Header */}
       <Header
         simulationStatus={simulation.status}
@@ -491,7 +520,7 @@ const Index = () => {
       />
 
       {/* Main Content */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex overflow-hidden min-h-0">
         {/* Left Panel - Chat */}
         <div className="w-80 min-w-[320px] border-r border-border/50 flex flex-col min-h-0">
           <ChatPanel
@@ -504,7 +533,7 @@ const Index = () => {
         </div>
 
         {/* Center - Simulation Arena */}
-        <div className="flex-1 flex flex-col p-4 gap-4 overflow-hidden">
+        <div className="flex-1 flex flex-col p-4 gap-4 overflow-hidden min-h-0">
           <div className="flex-1">
             <SimulationArena
               agents={simulation.agents}
@@ -523,7 +552,7 @@ const Index = () => {
         </div>
 
         {/* Right Panel - Metrics */}
-        <div className="w-80 min-w-[320px] border-l border-border/50">
+        <div className="w-80 min-w-[320px] border-l border-border/50 flex flex-col min-h-0">
           <MetricsPanel metrics={simulation.metrics} />
         </div>
       </div>

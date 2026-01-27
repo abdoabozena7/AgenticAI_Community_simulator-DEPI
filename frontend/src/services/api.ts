@@ -11,6 +11,8 @@ export interface SimulationConfig {
   goals: string[];
   agentCount?: number;
   iterations?: number;
+  research_summary?: string;
+  research_sources?: SearchResult[];
 }
 
 export interface SimulationResponse {
@@ -56,7 +58,24 @@ export interface SimulationStateResponse {
     iteration: number;
     message: string;
   }[];
+  summary?: string;
   error?: string;
+}
+
+export interface SearchResult {
+  title: string;
+  url: string;
+  domain?: string;
+  snippet?: string;
+  score?: number | null;
+  reason?: string;
+}
+
+export interface SearchResponse {
+  provider: string;
+  is_live: boolean;
+  answer: string;
+  results: SearchResult[];
 }
 
 class ApiService {
@@ -118,6 +137,20 @@ class ApiService {
     return this.request('/llm/extract', {
       method: 'POST',
       body: JSON.stringify({ message, schema }),
+    });
+  }
+
+  async detectStartIntent(message: string, context?: string): Promise<{ start: boolean; reason?: string | null }> {
+    return this.request('/llm/intent', {
+      method: 'POST',
+      body: JSON.stringify({ message, context }),
+    });
+  }
+
+  async searchWeb(query: string, language = 'en', maxResults = 5): Promise<SearchResponse> {
+    return this.request('/search/web', {
+      method: 'POST',
+      body: JSON.stringify({ query, language, max_results: maxResults }),
     });
   }
 }

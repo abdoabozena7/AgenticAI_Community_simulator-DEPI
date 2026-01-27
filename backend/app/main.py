@@ -24,6 +24,7 @@ from .core.dataset_loader import load_dataset
 from .api import routes as simulation_routes
 from .api import websocket as websocket_module
 from .api import llm as llm_routes
+from .api import search as search_routes
 
 
 def create_app() -> FastAPI:
@@ -55,6 +56,7 @@ def create_app() -> FastAPI:
     app.include_router(simulation_routes.router)
     app.include_router(websocket_module.router)
     app.include_router(llm_routes.router)
+    app.include_router(search_routes.router)
 
     @app.on_event("startup")
     async def startup_event() -> None:

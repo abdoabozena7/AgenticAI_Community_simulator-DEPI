@@ -63,6 +63,7 @@ async def generate_ollama(
     model: Optional[str] = None,
     base_url: Optional[str] = None,
     response_format: Optional[str] = None,
+    options: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Generate a single response from Ollama.
 
@@ -104,6 +105,8 @@ async def generate_ollama(
         "stream": False,
         "options": {"temperature": temperature},
     }
+    if options:
+        payload["options"].update(options)
     if system:
         payload["system"] = system
     if response_format:

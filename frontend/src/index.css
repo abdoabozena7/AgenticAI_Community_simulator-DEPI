@@ -80,6 +80,14 @@
     font-family: 'Inter', sans-serif;
   }
 
+  html, body, #root {
+    height: 100%;
+  }
+
+  body {
+    overflow: hidden;
+  }
+
   .font-mono {
     font-family: 'JetBrains Mono', monospace;
   }

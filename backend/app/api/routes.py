@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, status
 
 from ..core.dataset_loader import Dataset
 from ..simulation.engine import SimulationEngine
+from ..core.ollama_client import generate_ollama
 from ..api.websocket import manager
 
 
@@ -38,6 +39,7 @@ def _init_state(simulation_id: str) -> None:
         "agents": [],
         "reasoning": [],
         "metrics": None,
+        "summary": None,
     }
 
 
@@ -50,7 +52,7 @@ def _store_event(simulation_id: str, event_type: str, data: Dict[str, Any]) -> N
     """
     state = _simulation_state.setdefault(
         simulation_id,
-        {"agents": [], "reasoning": [], "metrics": None},
+        {"agents": [], "reasoning": [], "metrics": None, "summary": None},
     )
     if event_type == "agents":
         state["agents"] = data.get("agents", [])
@@ -62,6 +64,47 @@ def _store_event(simulation_id: str, event_type: str, data: Dict[str, Any]) -> N
         # Trim to last 200 events
         if len(reasoning) > 200:
             state["reasoning"] = reasoning[-200:]
+
+
+async def _build_summary(user_context: Dict[str, Any], metrics: Dict[str, Any], reasoning: list[Dict[str, Any]]) -> str:
+    idea = user_context.get("idea", "")
+    research_summary = user_context.get("research_summary", "")
+    accepted = metrics.get("accepted", 0)
+    rejected = metrics.get("rejected", 0)
+    neutral = metrics.get("neutral", 0)
+    acceptance_rate = metrics.get("acceptance_rate", 0.0)
+    per_category = metrics.get("per_category", {})
+    sample_reasoning = " | ".join([step.get("message", "") for step in reasoning[-6:]])
+
+    prompt = (
+        "You are summarising a multi-agent market simulation. "
+        "Write 3-5 short sentences in a friendly, human tone. "
+        "Mention acceptance rate and key concerns. "
+        "Give a realistic recommendation (e.g., improve, validate, or proceed). "
+        f"Idea: {idea}\n"
+        f"Research context: {research_summary}\n"
+        f"Metrics: accepted={accepted}, rejected={rejected}, neutral={neutral}, "
+        f"acceptance_rate={acceptance_rate:.2f}\n"
+        f"Category acceptance counts: {per_category}\n"
+        f"Sample reasoning: {sample_reasoning}\n"
+    )
+    try:
+        return await generate_ollama(prompt=prompt, temperature=0.3)
+    except Exception:
+        if acceptance_rate >= 0.6:
+            return (
+                "Overall feedback is positive. People see value in the idea, but a few still need proof. "
+                "If you proceed, validate with a small pilot and tighten the risk/ethics boundaries."
+            )
+        if acceptance_rate >= 0.35:
+            return (
+                "Feedback is mixed. Some agents like the idea, but risk and practicality are common concerns. "
+                "Refine the scope, add safeguards, and test with a narrow user segment before scaling."
+            )
+        return (
+            "Most agents are skeptical right now. Concerns around risk, feasibility, or trust outweigh the benefits. "
+            "Consider simplifying the promise and building credibility before investing further."
+        )
 
 
 @router.post("/start")
@@ -94,6 +137,12 @@ async def start_simulation(user_context: Dict[str, Any]) -> Dict[str, Any]:
         try:
             result = await engine.run_simulation(user_context=user_context, emitter=emitter)
             _simulation_results[simulation_id] = result
+            summary = await _build_summary(
+                user_context=user_context,
+                metrics=result,
+                reasoning=_simulation_state.get(simulation_id, {}).get("reasoning", []),
+            )
+            _simulation_state.setdefault(simulation_id, {})["summary"] = summary
         except Exception as exc:  # noqa: BLE001
             _simulation_state.setdefault(simulation_id, {})["error"] = str(exc)
     # Launch simulation in background

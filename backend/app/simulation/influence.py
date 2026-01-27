@@ -65,7 +65,7 @@ def compute_pairwise_influences(agents: List[Agent], dataset: Dataset) -> Dict[s
             target_template = dataset.template_by_id.get(target.template_id)
             susceptibility = target_template.influence_susceptibility if target_template else 1.0
             # Random noise to preserve stochastic behaviour
-            noise = random.uniform(-0.05, 0.05)
+            noise = random.uniform(-0.03, 0.03)
             # Compute final influence weight
             weight = base_weight * homophily * skepticism_factor * susceptibility
             weight += noise
