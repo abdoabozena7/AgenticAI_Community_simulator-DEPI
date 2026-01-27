@@ -1,0 +1,32 @@
+[
+  {
+    "category_id": "engineers",
+    "description": "Technical professionals with analytical mindset",
+    "base_influence_weight": 1.0,
+    "typical_contexts": ["tech", "innovation", "projects"]
+  },
+  {
+    "category_id": "doctors",
+    "description": "Healthcare professionals concerned with risk and ethics",
+    "base_influence_weight": 0.9,
+    "typical_contexts": ["health", "regulation", "safety"]
+  },
+  {
+    "category_id": "small_business",
+    "description": "Entrepreneurs and small business owners",
+    "base_influence_weight": 1.1,
+    "typical_contexts": ["finance", "market", "profit"]
+  },
+  {
+    "category_id": "employees",
+    "description": "Corporate employees from various industries",
+    "base_influence_weight": 0.8,
+    "typical_contexts": ["company culture", "job stability"]
+  },
+  {
+    "category_id": "students",
+    "description": "Individuals engaged in academic pursuits",
+    "base_influence_weight": 0.7,
+    "typical_contexts": ["education", "career planning", "social trends"]
+  }
+]

@@ -1,0 +1,5 @@
+# This file ensures that the data directory exists in version control.
+# The actual dataset JSON files (categories.json, persona_templates.json,
+# interaction_rules.json) should be placed here. They are loaded
+# at application startup by the dataset loader. Do not modify or
+# regenerate these files in code.

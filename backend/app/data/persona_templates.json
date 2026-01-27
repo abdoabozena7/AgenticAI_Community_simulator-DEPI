@@ -1,0 +1,99 @@
+[
+  {
+    "template_id": "engineer_1",
+    "category_id": "engineers",
+    "archetype_name": "Optimistic Techie",
+    "traits": {
+      "optimism": 0.9,
+      "risk_tolerance": 0.6,
+      "openness_to_change": 0.8,
+      "skepticism": 0.2,
+      "emotional_reactivity": 0.3
+    },
+    "decision_style": "analytical",
+    "biases": ["tech_bias", "innovation_bias"],
+    "reaction_variability": 0.2,
+    "influence_susceptibility": 0.7
+  },
+  {
+    "template_id": "doctor_1",
+    "category_id": "doctors",
+    "archetype_name": "Cautious Professional",
+    "traits": {
+      "optimism": 0.4,
+      "risk_tolerance": 0.2,
+      "openness_to_change": 0.3,
+      "skepticism": 0.8,
+      "emotional_reactivity": 0.5
+    },
+    "decision_style": "conservative",
+    "biases": ["health_bias", "regulation_bias"],
+    "reaction_variability": 0.1,
+    "influence_susceptibility": 0.5
+  },
+  {
+    "template_id": "business_1",
+    "category_id": "small_business",
+    "archetype_name": "Pragmatic Entrepreneur",
+    "traits": {
+      "optimism": 0.7,
+      "risk_tolerance": 0.8,
+      "openness_to_change": 0.6,
+      "skepticism": 0.4,
+      "emotional_reactivity": 0.3
+    },
+    "decision_style": "pragmatic",
+    "biases": ["profit_bias", "market_bias"],
+    "reaction_variability": 0.25,
+    "influence_susceptibility": 0.8
+  },
+    {
+    "template_id": "employee_1",
+    "category_id": "employees",
+    "archetype_name": "Steady Worker",
+    "traits": {
+      "optimism": 0.5,
+      "risk_tolerance": 0.4,
+      "openness_to_change": 0.5,
+      "skepticism": 0.5,
+      "emotional_reactivity": 0.4
+    },
+    "decision_style": "balanced",
+    "biases": ["company_loyalty_bias", "stability_bias"],
+    "reaction_variability": 0.15,
+    "influence_susceptibility": 0.6
+  },
+  {
+    "template_id": "engineer_2",
+    "category_id": "engineers",
+    "archetype_name": "Skeptical Developer",
+    "traits": {
+      "optimism": 0.5,
+      "risk_tolerance": 0.4,
+      "openness_to_change": 0.6,
+      "skepticism": 0.7,
+      "emotional_reactivity": 0.4
+    },
+    "decision_style": "critical",
+    "biases": ["tech_bias", "skepticism_bias"],
+    "reaction_variability": 0.3,
+    "influence_susceptibility": 0.5
+  },
+  {
+    "template_id": "doctor_2",
+    "category_id": "doctors",
+    "archetype_name": "Progressive Healer",
+    "traits": {
+      "optimism": 0.7,
+      "risk_tolerance": 0.5,
+      "openness_to_change": 0.7,
+      "skepticism": 0.4,
+      "emotional_reactivity": 0.3
+    },
+    "decision_style": "innovative",
+    "biases": ["health_bias", "innovation_bias"],
+    "reaction_variability": 0.2,
+    "influence_susceptibility": 0.6
+  }
+
+]
