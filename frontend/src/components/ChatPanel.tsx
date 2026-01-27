@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Sparkles, Search, Settings } from 'lucide-react';
+import { Send, Bot, User, Sparkles, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ChatMessage, ReasoningMessage } from '@/types/simulation';
@@ -10,6 +10,7 @@ interface ChatPanelProps {
   messages: ChatMessage[];
   reasoningFeed: ReasoningMessage[];
   onSendMessage: (message: string) => void;
+  onSelectOption?: (field: 'category' | 'audience' | 'goals' | 'maturity', value: string) => void;
   isWaitingForCity?: boolean;
   isWaitingForCountry?: boolean;
   searchState?: {
@@ -25,24 +26,24 @@ interface ChatPanelProps {
     theme: string;
     autoFocusInput: boolean;
   };
-  onUpdateSettings: (next: Partial<ChatPanelProps['settings']>) => void;
 }
 
 export function ChatPanel({
   messages,
   reasoningFeed,
   onSendMessage,
+  onSelectOption,
   isWaitingForCity = false,
   isWaitingForCountry = false,
   searchState,
   settings,
-  onUpdateSettings,
 }: ChatPanelProps) {
   const [inputValue, setInputValue] = useState('');
-  const [activeTab, setActiveTab] = useState<'chat' | 'reasoning' | 'settings'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'reasoning'>('chat');
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const [expandedSources, setExpandedSources] = useState<Record<number, boolean>>({});
+  const [searchDetailsOpen, setSearchDetailsOpen] = useState(false);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -50,11 +51,15 @@ export function ChatPanel({
     }
   }, [messages, reasoningFeed, activeTab]);
 
+  const lastMessageCount = useRef(0);
   useEffect(() => {
-    if (settings.autoFocusInput && activeTab === 'chat') {
+    if (!settings.autoFocusInput) return;
+    if (activeTab !== 'chat') return;
+    if (messages.length !== lastMessageCount.current) {
+      lastMessageCount.current = messages.length;
       inputRef.current?.focus();
     }
-  }, [activeTab, settings.autoFocusInput]);
+  }, [messages.length, settings.autoFocusInput, activeTab]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -83,10 +88,11 @@ export function ChatPanel({
               ? "text-primary"
               : "text-muted-foreground hover:text-foreground"
           )}
+          data-testid="tab-chat"
         >
           <span className="flex items-center justify-center gap-2">
             <User className="w-4 h-4" />
-            Chat
+            {settings.language === 'ar' ? 'الدردشة' : 'Chat'}
           </span>
           {activeTab === 'chat' && (
             <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />
@@ -100,10 +106,11 @@ export function ChatPanel({
               ? "text-primary"
               : "text-muted-foreground hover:text-foreground"
           )}
+          data-testid="tab-reasoning"
         >
           <span className="flex items-center justify-center gap-2">
             <Bot className="w-4 h-4" />
-            Agent Reasoning
+            {settings.language === 'ar' ? 'تفكير الوكلاء' : 'Agent Reasoning'}
             {reasoningFeed.length > 0 && (
               <span className="w-2 h-2 rounded-full bg-primary animate-pulse" />
             )}
@@ -112,41 +119,64 @@ export function ChatPanel({
             <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />
           )}
         </button>
-        <button
-          onClick={() => setActiveTab('settings')}
-          className={cn(
-            "flex-1 px-4 py-3 text-sm font-medium transition-all relative",
-            activeTab === 'settings'
-              ? "text-primary"
-              : "text-muted-foreground hover:text-foreground"
-          )}
-        >
-          <span className="flex items-center justify-center gap-2">
-            <Settings className="w-4 h-4" />
-            Settings
-          </span>
-          {activeTab === 'settings' && (
-            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />
-          )}
-        </button>
       </div>
 
       {/* Messages Area */}
-      <div className="flex-1 p-4 overflow-y-auto scrollbar-thin" ref={scrollRef}>
+      <div
+        className="flex-1 p-4 overflow-y-auto scrollbar-thin"
+        ref={scrollRef}
+        data-testid={activeTab === 'chat' ? 'chat-messages' : 'reasoning-messages'}
+      >
         {activeTab === 'chat' ? (
           <div className="space-y-4">
             {searchState && searchState.status !== 'idle' && (
               <div className="p-3 rounded-lg border border-border/50 bg-secondary/30 space-y-2">
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Search className="w-4 h-4 text-primary" />
-                  {searchState.status === 'searching' ? 'Searching the web...' : 'Research results'}
+                  {searchState.status === 'searching'
+                    ? (settings.language === 'ar' ? 'جار البحث في الويب...' : 'Searching the web...')
+                    : (settings.language === 'ar' ? 'نتائج البحث' : 'Research results')}
                   {searchState.isLive === false && (
-                    <span className="text-xs text-warning">LLM fallback</span>
+                    <span className="text-xs text-warning">
+                      {settings.language === 'ar' ? 'محاكاة بالـ LLM' : 'LLM fallback'}
+                    </span>
                   )}
                 </div>
+                {searchState.status === 'searching' && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchDetailsOpen((prev) => !prev)}
+                    className="text-xs text-primary underline"
+                  >
+                    {settings.language === 'ar' ? 'تفاصيل البحث' : 'Search details'}
+                  </button>
+                )}
+                {searchState.status === 'searching' && searchDetailsOpen && (
+                  <div className="text-xs text-muted-foreground space-y-1">
+                    <div>
+                      {settings.language === 'ar'
+                        ? `الاستعلام: ${searchState.query || ''}`
+                        : `Query: ${searchState.query || ''}`}
+                    </div>
+                    <div>
+                      {settings.language === 'ar'
+                        ? 'الحد الأقصى للبحث: 6 ثواني ثم نكمل بالـ LLM'
+                        : 'Max search time: 6s, then continue with LLM'}
+                    </div>
+                  </div>
+                )}
                 {searchState.answer && (
                   <p className="text-sm text-foreground/90">{searchState.answer}</p>
                 )}
+                {searchState.status === 'done' &&
+                  !searchState.answer &&
+                  (!searchState.results || searchState.results.length === 0) && (
+                    <p className="text-xs text-muted-foreground">
+                      {settings.language === 'ar'
+                        ? 'لم يتم العثور على مصادر كافية.'
+                        : 'No sufficient sources found.'}
+                    </p>
+                  )}
                 {searchState.results && searchState.results.length > 0 && (
                   <div className="space-y-2">
                     {searchState.results.map((result, index) => {
@@ -156,14 +186,25 @@ export function ChatPanel({
                         <button
                           key={`${domain}-${index}`}
                           type="button"
-                          className="w-full text-left p-2 rounded-md border border-border/40 bg-background/40 hover:border-primary/40 transition"
+                          className={cn(
+                            "w-full p-2 rounded-md border border-border/40 bg-background/40 hover:border-primary/40 transition",
+                            settings.language === 'ar' ? 'text-right' : 'text-left'
+                          )}
                           onClick={() =>
                             setExpandedSources((prev) => ({ ...prev, [index]: !expanded }))
                           }
                         >
                           <div className="flex items-center gap-2">
-                            <div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center text-xs text-primary">
-                              {domain.slice(0, 1).toUpperCase()}
+                            <div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center text-xs text-primary overflow-hidden">
+                              <img
+                                src={`https://www.google.com/s2/favicons?domain=${domain}&sz=32`}
+                                alt={domain}
+                                className="w-4 h-4"
+                                onError={(e) => {
+                                  (e.currentTarget as HTMLImageElement).style.display = 'none';
+                                }}
+                              />
+                              <span className="leading-none">{domain.slice(0, 1).toUpperCase()}</span>
                             </div>
                             <div className="flex-1">
                               <p className="text-xs text-muted-foreground">{domain}</p>
@@ -173,7 +214,12 @@ export function ChatPanel({
                           {expanded ? (
                             <div className="mt-2 text-xs text-muted-foreground space-y-1">
                               {result.snippet && <p>{result.snippet}</p>}
-                              {result.reason && <p>Reasoning: {result.reason}</p>}
+                              {result.reason && (
+                                <p>
+                                  {settings.language === 'ar' ? 'المنطق: ' : 'Reasoning: '}
+                                  {result.reason}
+                                </p>
+                              )}
                             </div>
                           ) : (
                             result.snippet && (
@@ -192,9 +238,13 @@ export function ChatPanel({
             {messages.length === 0 ? (
               <div className="text-center py-8">
                 <Sparkles className="w-12 h-12 mx-auto text-primary/50 mb-4" />
-                <h3 className="text-lg font-medium text-foreground mb-2">Start Your Simulation</h3>
+                <h3 className="text-lg font-medium text-foreground mb-2">
+                  {settings.language === 'ar' ? 'ابدأ المحاكاة' : 'Start Your Simulation'}
+                </h3>
                 <p className="text-sm text-muted-foreground max-w-[250px] mx-auto">
-                  Describe your idea and the system will guide you through the configuration
+                  {settings.language === 'ar'
+                    ? 'اكتب فكرتك وسيقوم النظام بتجهيز الإعدادات تلقائيًا'
+                    : 'Describe your idea and the system will guide you through the configuration'}
                 </p>
               </div>
             ) : (
@@ -217,12 +267,35 @@ export function ChatPanel({
                         <Bot className="w-4 h-4 text-muted-foreground" />
                       )}
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm text-foreground whitespace-pre-wrap">{msg.content}</p>
-                      <span className="text-xs text-muted-foreground mt-1 block">
-                        {formatTimestamp(msg.timestamp)}
-                      </span>
-                    </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-foreground whitespace-pre-wrap">{msg.content}</p>
+                    {msg.options && msg.options.items.length > 0 && (
+                      <div className="mt-3 space-y-2">
+                        {msg.options.items.map((opt) => (
+                          <button
+                            key={`${msg.options?.field}-${opt.value}`}
+                            type="button"
+                            onClick={() => onSelectOption?.(msg.options!.field, opt.value)}
+                            className={cn(
+                              "w-full rounded-lg border border-border/40 px-3 py-2 text-sm text-foreground/90",
+                              "hover:border-primary/50 hover:bg-primary/5 transition text-right"
+                            )}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="font-medium">{opt.label}</span>
+                              <span className="text-xs text-muted-foreground">✓</span>
+                            </div>
+                            {opt.description && (
+                              <p className="text-xs text-muted-foreground mt-1">{opt.description}</p>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <span className="text-xs text-muted-foreground mt-1 block">
+                      {formatTimestamp(msg.timestamp)}
+                    </span>
+                  </div>
                   </div>
                 </div>
               ))
@@ -230,13 +303,14 @@ export function ChatPanel({
 
           </div>
         ) : (
-          activeTab === 'reasoning' ? (
-            <div className="space-y-3">
+          <div className="space-y-3">
             {reasoningFeed.length === 0 ? (
               <div className="text-center py-8">
                 <Bot className="w-12 h-12 mx-auto text-muted-foreground/30 mb-4" />
                 <p className="text-sm text-muted-foreground">
-                  Agent reasoning will appear here during simulation
+                  {settings.language === 'ar'
+                    ? 'تفكير الوكلاء سيظهر هنا أثناء المحاكاة'
+                    : 'Agent reasoning will appear here during simulation'}
                 </p>
               </div>
             ) : (
@@ -260,51 +334,7 @@ export function ChatPanel({
                 </div>
               ))
             )}
-            </div>
-          ) : (
-            <div className="space-y-4 text-sm">
-              <div>
-                <label className="text-xs text-muted-foreground">Language</label>
-                <div className="mt-2 flex gap-2">
-                  <Button
-                    type="button"
-                    variant={settings.language === 'ar' ? 'default' : 'secondary'}
-                    onClick={() => onUpdateSettings({ language: 'ar' })}
-                  >
-                    عربي
-                  </Button>
-                  <Button
-                    type="button"
-                    variant={settings.language === 'en' ? 'default' : 'secondary'}
-                    onClick={() => onUpdateSettings({ language: 'en' })}
-                  >
-                    English
-                  </Button>
-                </div>
-              </div>
-              <div>
-                <label className="text-xs text-muted-foreground">Theme</label>
-                <select
-                  className="mt-2 w-full rounded-md bg-secondary border border-border/50 p-2"
-                  value={settings.theme}
-                  onChange={(e) => onUpdateSettings({ theme: e.target.value })}
-                >
-                  <option value="ocean">Ocean</option>
-                  <option value="sand">Sand</option>
-                  <option value="forest">Forest</option>
-                  <option value="rose">Rose</option>
-                </select>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-muted-foreground">Auto focus input</span>
-                <input
-                  type="checkbox"
-                  checked={settings.autoFocusInput}
-                  onChange={(e) => onUpdateSettings({ autoFocusInput: e.target.checked })}
-                />
-              </div>
-            </div>
-          )
+          </div>
         )}
       </div>
 
@@ -315,25 +345,23 @@ export function ChatPanel({
             ref={inputRef}
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
+            dir={settings.language === 'ar' ? 'rtl' : 'ltr'}
             placeholder={
               isWaitingForCountry
-                ? "Enter country..."
+                ? (settings.language === 'ar' ? "اكتب الدولة..." : "Enter country...")
                 : isWaitingForCity
-                ? "Enter city..."
-                : "Describe your idea..."
+                ? (settings.language === 'ar' ? "اكتب المدينة..." : "Enter city...")
+                : (settings.language === 'ar' ? "اكتب فكرتك..." : "Describe your idea...")
             }
             className="flex-1 bg-secondary border-border/50 focus:border-primary/50"
-            onBlur={() => {
-              if (settings.autoFocusInput) {
-                setTimeout(() => inputRef.current?.focus(), 0);
-              }
-            }}
+            data-testid="chat-input"
           />
           <Button
             type="submit"
             size="icon"
             disabled={!inputValue.trim()}
             className="bg-primary hover:bg-primary/90 text-primary-foreground"
+            data-testid="chat-send"
           >
             <Send className="w-4 h-4" />
           </Button>

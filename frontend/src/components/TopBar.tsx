@@ -16,6 +16,7 @@ interface TopBarProps {
   selectedGoals?: string[];
   riskLevel?: number;
   maturity?: string;
+  language: 'ar' | 'en';
   onCategoryChange: (value: string) => void;
   onAudienceChange: (value: string[]) => void;
   onRiskChange: (value: number) => void;
@@ -51,6 +52,7 @@ export function TopBar({
   selectedGoals,
   riskLevel,
   maturity,
+  language,
   onCategoryChange,
   onAudienceChange,
   onRiskChange,
@@ -82,6 +84,11 @@ export function TopBar({
   };
 
   const getRiskLabel = (value: number) => {
+    if (language === 'ar') {
+      if (value < 30) return 'محافظ';
+      if (value < 70) return 'متوسط';
+      return 'مغامر';
+    }
     if (value < 30) return 'Conservative';
     if (value < 70) return 'Moderate';
     return 'Aggressive';
@@ -95,21 +102,34 @@ export function TopBar({
 
   return (
     <div className="glass-panel border-b border-border/50 px-6 py-4">
-      <div className="flex items-center gap-6 overflow-x-auto scrollbar-thin">
+      <div className="flex flex-wrap items-center gap-6">
         {/* Category Select */}
-        <div className="flex items-center gap-3 min-w-[200px]">
+        <div className="flex items-center gap-3 min-w-[220px]">
           <div className="flex items-center gap-2 text-muted-foreground">
             <Lightbulb className="w-4 h-4" />
-            <span className="text-sm font-medium">Category</span>
+            <span className="text-sm font-medium">{language === 'ar' ? 'الفئة' : 'Category'}</span>
           </div>
           <Select value={activeCategory} onValueChange={onCategoryChange}>
-            <SelectTrigger className="w-[160px] bg-secondary border-border/50">
-              <SelectValue placeholder="Select..." />
+            <SelectTrigger className="w-[200px] bg-secondary border-border/50 h-10 text-sm">
+              <SelectValue placeholder={language === 'ar' ? 'اختر...' : 'Select...'} />
             </SelectTrigger>
             <SelectContent className="bg-popover border-border">
               {CATEGORY_OPTIONS.map((cat) => (
                 <SelectItem key={cat} value={cat.toLowerCase()}>
-                  {cat}
+                  {language === 'ar'
+                    ? ({
+                      Technology: 'تكنولوجيا',
+                      Healthcare: 'رعاية صحية',
+                      Finance: 'تمويل',
+                      Education: 'تعليم',
+                      'E-commerce': 'تجارة إلكترونية',
+                      Entertainment: 'ترفيه',
+                      Social: 'اجتماعي',
+                      'B2B SaaS': 'برمجيات أعمال',
+                      'Consumer Apps': 'تطبيقات مستهلكين',
+                      Hardware: 'أجهزة',
+                    } as Record<string, string>)[cat] || cat
+                    : cat}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -119,14 +139,14 @@ export function TopBar({
         <div className="w-px h-8 bg-border/50" />
 
         {/* Target Audience Multi-select */}
-        <div className="flex items-center gap-3 min-w-[280px]">
+        <div className="flex items-center gap-3 min-w-[300px]">
           <div className="flex items-center gap-2 text-muted-foreground">
             <Target className="w-4 h-4" />
-            <span className="text-sm font-medium">Audience</span>
+            <span className="text-sm font-medium">{language === 'ar' ? 'الجمهور' : 'Audience'}</span>
           </div>
-          <div className="flex flex-wrap gap-1.5 max-w-[200px]">
+          <div className="flex flex-wrap gap-1.5 max-w-[220px]">
             {activeAudiences.length === 0 ? (
-              <span className="text-sm text-muted-foreground">None selected</span>
+              <span className="text-sm text-muted-foreground">{language === 'ar' ? 'غير محدد' : 'None selected'}</span>
             ) : (
               activeAudiences.slice(0, 2).map((aud) => (
                 <Badge
@@ -135,7 +155,20 @@ export function TopBar({
                   className="bg-primary/20 text-primary border-primary/30 text-xs cursor-pointer hover:bg-primary/30"
                   onClick={() => toggleAudience(aud)}
                 >
-                  {aud.split(' ')[0]}
+                  {language === 'ar'
+                    ? ({
+                      'Gen Z (18-24)': 'جيل Z',
+                      'Millennials (25-40)': 'جيل الألفية',
+                      'Gen X (41-56)': 'جيل X',
+                      'Boomers (57-75)': 'الطفرة',
+                      Developers: 'مطوّرون',
+                      Enterprises: 'شركات كبرى',
+                      SMBs: 'شركات صغيرة',
+                      Consumers: 'مستهلكون',
+                      Students: 'طلاب',
+                      Professionals: 'محترفون',
+                    } as Record<string, string>)[aud] || aud
+                    : aud.split(' ')[0]}
                 </Badge>
               ))
             )}
@@ -146,7 +179,7 @@ export function TopBar({
             )}
           </div>
           <Select onValueChange={(val) => toggleAudience(val)}>
-            <SelectTrigger className="w-8 h-8 p-0 bg-secondary border-border/50">
+            <SelectTrigger className="w-10 h-10 p-0 bg-secondary border-border/50">
               <ChevronDown className="w-4 h-4" />
             </SelectTrigger>
             <SelectContent className="bg-popover border-border max-h-[300px]">
@@ -156,7 +189,20 @@ export function TopBar({
                   value={aud}
                   className={cn(activeAudiences.includes(aud) && "bg-primary/10")}
                 >
-                  {aud}
+                  {language === 'ar'
+                    ? ({
+                      'Gen Z (18-24)': 'جيل Z (18-24)',
+                      'Millennials (25-40)': 'جيل الألفية (25-40)',
+                      'Gen X (41-56)': 'جيل X (41-56)',
+                      'Boomers (57-75)': 'الطفرة (57-75)',
+                      Developers: 'مطوّرون',
+                      Enterprises: 'شركات كبرى',
+                      SMBs: 'شركات صغيرة',
+                      Consumers: 'مستهلكون',
+                      Students: 'طلاب',
+                      Professionals: 'محترفون',
+                    } as Record<string, string>)[aud] || aud
+                    : aud}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -166,10 +212,10 @@ export function TopBar({
         <div className="w-px h-8 bg-border/50" />
 
         {/* Risk Appetite Slider */}
-        <div className="flex items-center gap-3 min-w-[200px]">
+        <div className="flex items-center gap-3 min-w-[220px]">
           <div className="flex items-center gap-2 text-muted-foreground">
             <AlertTriangle className="w-4 h-4" />
-            <span className="text-sm font-medium">Risk</span>
+            <span className="text-sm font-medium">{language === 'ar' ? 'المخاطرة' : 'Risk'}</span>
           </div>
           <div className="flex items-center gap-3">
             <Slider
@@ -188,12 +234,12 @@ export function TopBar({
         <div className="w-px h-8 bg-border/50" />
 
         {/* Idea Maturity */}
-        <div className="flex items-center gap-3 min-w-[220px]">
+        <div className="flex items-center gap-3 min-w-[260px]">
           <div className="flex items-center gap-2 text-muted-foreground">
             <Zap className="w-4 h-4" />
-            <span className="text-sm font-medium">Maturity</span>
+            <span className="text-sm font-medium">{language === 'ar' ? 'النضج' : 'Maturity'}</span>
           </div>
-          <div className="flex gap-1">
+          <div className="flex gap-1 flex-wrap">
             {MATURITY_LEVELS.map((level) => (
               <button
                 key={level.value}
@@ -201,14 +247,16 @@ export function TopBar({
                   onMaturityChange(level.value);
                 }}
                 className={cn(
-                  "px-3 py-1.5 rounded-md text-xs font-medium transition-all",
+                  "px-3 py-2 rounded-md text-xs font-medium transition-all",
                   activeMaturity === level.value
                     ? "bg-primary text-primary-foreground"
                     : "bg-secondary text-muted-foreground hover:bg-secondary/80 hover:text-foreground"
                 )}
               >
                 <span className="mr-1">{level.icon}</span>
-                {level.label}
+                {language === 'ar'
+                  ? ({ Concept: 'فكرة', Prototype: 'نموذج', MVP: 'نسخة أولية', Launched: 'أُطلق' } as Record<string, string>)[level.label] || level.label
+                  : level.label}
               </button>
             ))}
           </div>
@@ -217,14 +265,14 @@ export function TopBar({
         <div className="w-px h-8 bg-border/50" />
 
         {/* Goals Multi-select */}
-        <div className="flex items-center gap-3 min-w-[200px]">
+        <div className="flex items-center gap-3 min-w-[240px]">
           <div className="flex items-center gap-2 text-muted-foreground">
             <Flag className="w-4 h-4" />
-            <span className="text-sm font-medium">Goals</span>
+            <span className="text-sm font-medium">{language === 'ar' ? 'الأهداف' : 'Goals'}</span>
           </div>
-          <div className="flex flex-wrap gap-1.5 max-w-[150px]">
+          <div className="flex flex-wrap gap-1.5 max-w-[180px]">
             {activeGoals.length === 0 ? (
-              <span className="text-sm text-muted-foreground">None</span>
+              <span className="text-sm text-muted-foreground">{language === 'ar' ? 'لا يوجد' : 'None'}</span>
             ) : (
               activeGoals.slice(0, 1).map((goal) => (
                 <Badge
@@ -233,7 +281,16 @@ export function TopBar({
                   className="bg-accent/20 text-accent border-accent/30 text-xs cursor-pointer"
                   onClick={() => toggleGoal(goal)}
                 >
-                  {goal.split(' ')[0]}
+                  {language === 'ar'
+                    ? ({
+                      'Market Validation': 'تحقق السوق',
+                      'Funding Readiness': 'جاهزية التمويل',
+                      'User Acquisition': 'اكتساب المستخدمين',
+                      'Product-Market Fit': 'ملاءمة المنتج',
+                      'Competitive Analysis': 'تحليل المنافسين',
+                      'Growth Strategy': 'استراتيجية النمو',
+                    } as Record<string, string>)[goal] || goal
+                    : goal.split(' ')[0]}
                 </Badge>
               ))
             )}
@@ -244,7 +301,7 @@ export function TopBar({
             )}
           </div>
           <Select onValueChange={(val) => toggleGoal(val)}>
-            <SelectTrigger className="w-8 h-8 p-0 bg-secondary border-border/50">
+            <SelectTrigger className="w-10 h-10 p-0 bg-secondary border-border/50">
               <ChevronDown className="w-4 h-4" />
             </SelectTrigger>
             <SelectContent className="bg-popover border-border">
@@ -254,7 +311,16 @@ export function TopBar({
                   value={goal}
                   className={cn(activeGoals.includes(goal) && "bg-primary/10")}
                 >
-                  {goal}
+                  {language === 'ar'
+                    ? ({
+                      'Market Validation': 'تحقق السوق',
+                      'Funding Readiness': 'جاهزية التمويل',
+                      'User Acquisition': 'اكتساب المستخدمين',
+                      'Product-Market Fit': 'ملاءمة المنتج للسوق',
+                      'Competitive Analysis': 'تحليل المنافسين',
+                      'Growth Strategy': 'استراتيجية النمو',
+                    } as Record<string, string>)[goal] || goal
+                    : goal}
                 </SelectItem>
               ))}
             </SelectContent>

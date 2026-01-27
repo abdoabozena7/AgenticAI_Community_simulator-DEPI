@@ -20,6 +20,8 @@ from ..core.dataset_loader import Dataset
 from ..simulation.engine import SimulationEngine
 from ..core.ollama_client import generate_ollama
 from ..api.websocket import manager
+from pathlib import Path
+import hashlib
 
 
 router = APIRouter(prefix="/simulation")
@@ -69,6 +71,7 @@ def _store_event(simulation_id: str, event_type: str, data: Dict[str, Any]) -> N
 async def _build_summary(user_context: Dict[str, Any], metrics: Dict[str, Any], reasoning: list[Dict[str, Any]]) -> str:
     idea = user_context.get("idea", "")
     research_summary = user_context.get("research_summary", "")
+    language = str(user_context.get("language") or "ar").lower()
     accepted = metrics.get("accepted", 0)
     rejected = metrics.get("rejected", 0)
     neutral = metrics.get("neutral", 0)
@@ -76,6 +79,7 @@ async def _build_summary(user_context: Dict[str, Any], metrics: Dict[str, Any], 
     per_category = metrics.get("per_category", {})
     sample_reasoning = " | ".join([step.get("message", "") for step in reasoning[-6:]])
 
+    response_language = "Arabic" if language == "ar" else "English"
     prompt = (
         "You are summarising a multi-agent market simulation. "
         "Write 3-5 short sentences in a friendly, human tone. "
@@ -87,10 +91,26 @@ async def _build_summary(user_context: Dict[str, Any], metrics: Dict[str, Any], 
         f"acceptance_rate={acceptance_rate:.2f}\n"
         f"Category acceptance counts: {per_category}\n"
         f"Sample reasoning: {sample_reasoning}\n"
+        f"Respond in {response_language}.\n"
     )
     try:
         return await generate_ollama(prompt=prompt, temperature=0.3)
     except Exception:
+        if language == "ar":
+            if acceptance_rate >= 0.6:
+                return (
+                    "الانطباع العام إيجابي. هناك تقدير للفكرة لكن بعض الأشخاص يحتاجون أدلة أكثر. "
+                    "إن قررت المتابعة، اختبر بنموذج صغير ووضّح حدود المخاطر والالتزام."
+                )
+            if acceptance_rate >= 0.35:
+                return (
+                    "الآراء متباينة. بعض الوكلاء رأوا قيمة، لكن المخاطر والجدوى العملية ما زالت محل نقاش. "
+                    "خفّض نطاق الفكرة وضع ضمانات واختبر شريحة محددة قبل التوسع."
+                )
+            return (
+                "معظم الوكلاء متحفظون حالياً. المخاوف حول المخاطر أو الثقة تطغى على الفوائد. "
+                "فكّر في تبسيط الفكرة وبناء مصداقية أكبر قبل الاستثمار."
+            )
         if acceptance_rate >= 0.6:
             return (
                 "Overall feedback is positive. People see value in the idea, but a few still need proof. "
@@ -188,3 +208,15 @@ async def get_state(simulation_id: str) -> Dict[str, Any]:
         if task is None or task.done():
             status_value = "completed"
     return {"simulation_id": simulation_id, "status": status_value, **state}
+
+
+@router.get("/debug/version")
+async def debug_version() -> Dict[str, Any]:
+    """Return a signature of the running engine code for diagnostics."""
+    engine_path = Path(__file__).resolve().parents[1] / "simulation" / "engine.py"
+    try:
+        content = engine_path.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()[:12]
+        return {"engine_sha": digest, "engine_path": str(engine_path)}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to read engine.py: {exc}")

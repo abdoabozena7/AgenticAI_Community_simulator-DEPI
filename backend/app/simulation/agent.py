@@ -40,8 +40,11 @@ class Agent:
         # Set initial opinion and moderate starting confidence
         self.current_opinion: str = initial_opinion
         self.confidence: float = 0.5
+        self.neutral_streak: int = 0
         # History of reasoning steps captured during the simulation
         self.history: List[ReasoningStep] = []
+        # Short memory for last few reasoning messages
+        self.short_memory: List[str] = []
 
     def to_model(self) -> AgentInstanceModel:
         """Convert this agent into a Pydantic model for API responses or logging."""
@@ -71,3 +74,7 @@ class Agent:
             opinion_change=opinion_change,
         )
         self.history.append(step)
+        if message:
+            self.short_memory.append(message)
+            if len(self.short_memory) > 3:
+                self.short_memory = self.short_memory[-3:]

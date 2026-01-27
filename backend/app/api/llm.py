@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Optional, Dict, Any
+import asyncio
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -82,6 +83,7 @@ Hard requirements:
 - If a required field is missing or unclear, include its name in "missing" and provide a brief, human, context-rich follow-up in "question" (Arabic allowed).
 - Use the current schema to keep known values unless the user clearly changes them.
 - If multiple fields are missing, ask ONLY the single most critical question (priority: country/city, then idea).
+- If the message includes a known city, infer the country (e.g., Cairo/New Cairo -> Egypt).
 - Prefer proper names (e.g., "Egypt", "Cairo", "Giza"). Handle "City, Country" patterns.
 - Return JSON only, no prose.
 
@@ -93,6 +95,10 @@ Output:
 Input: "I want to launch an AI app in Egypt"
 Output:
 {{"idea":"AI app","country":"Egypt","city":null,"category":"technology","target_audience":["Consumers"],"goals":["Market Validation"],"risk_appetite":0.5,"idea_maturity":"concept","missing":["city"],"question":"Which city in Egypt should we focus on? Location changes market culture and behavior."}}
+
+Input: "أريد إطلاق مبادرة في القاهرة الجديدة"
+Output:
+{{"idea":"مبادرة","country":"Egypt","city":"Cairo","category":"technology","target_audience":["Consumers"],"goals":["Market Validation"],"risk_appetite":0.5,"idea_maturity":"concept","missing":[],"question":null}}
 
 Current schema (may be partial):
 {schema_json}
@@ -118,10 +124,12 @@ COUNTRY_ALIASES = {
 CITY_ALIASES = {
     "cairo": "Cairo",
     "القاهرة": "Cairo",
+    "القاهرة الجديدة": "Cairo",
     "giza": "Giza",
     "الجيزة": "Giza",
     "alexandria": "Alexandria",
     "الإسكندرية": "Alexandria",
+    "الاسكندرية": "Alexandria",
 }
 
 
@@ -148,14 +156,6 @@ def _normalize_city(value: Optional[str]) -> Optional[str]:
     return CITY_ALIASES.get(key, v.title())
 
 
-def _extract_from_message(message: str) -> Dict[str, Optional[str]]:
-    # Simple "City, Country" heuristic
-    match = re.search(r"in\s+([a-zA-Z\u0600-\u06FF\s]+?),\s*([a-zA-Z\u0600-\u06FF\s]+?)([\.!]|$)", message)
-    if match:
-        return {"city": _normalize_city(match.group(1)), "country": _normalize_country(match.group(2))}
-    return {}
-
-
 def _safe_json_loads(raw: str) -> Dict[str, Any]:
     from json import loads, JSONDecodeError
     try:
@@ -167,6 +167,30 @@ def _safe_json_loads(raw: str) -> Dict[str, Any]:
         if start != -1 and end != -1 and end > start:
             return loads(raw[start : end + 1])
         raise
+
+
+def _contains_arabic(text: str) -> bool:
+    return bool(re.search(r"[\u0600-\u06FF]", text))
+
+
+async def _extract_location_only(message: str, schema: Dict[str, Any]) -> Dict[str, Any]:
+    from json import dumps
+    lang_hint = "Arabic" if _contains_arabic(message) else "English"
+    prompt = (
+        "Extract ONLY city and country from the user message. "
+        "If a known city is mentioned, infer the country. "
+        f"Message language: {lang_hint}. Return JSON only with keys: city, country.\n"
+        f"Current schema: {dumps(schema, ensure_ascii=False)}\n"
+        f"Message: {message}"
+    )
+    try:
+        raw = await asyncio.wait_for(
+            generate_ollama(prompt, temperature=0.1, response_format="json"),
+            timeout=6.0,
+        )
+        return _safe_json_loads(raw)
+    except Exception:
+        return {}
 
 
 @router.post("/extract", response_model=ExtractResponse)
@@ -187,7 +211,10 @@ async def extract_schema(payload: ExtractRequest) -> ExtractResponse:
         message=payload.message,
     )
     try:
-        raw = await generate_ollama(prompt, temperature=0.2, response_format="json")
+        raw = await asyncio.wait_for(
+            generate_ollama(prompt, temperature=0.2, response_format="json"),
+            timeout=8.0,
+        )
         logger.info("extract_schema: raw_llm=%s", raw)
         data = _safe_json_loads(raw)
     except Exception as exc:
@@ -234,10 +261,16 @@ async def extract_schema(payload: ExtractRequest) -> ExtractResponse:
     if not idea_maturity:
         idea_maturity = schema_maturity
 
-    # Heuristic fallback from message if LLM omitted
-    fallback = _extract_from_message(payload.message)
-    country = country or fallback.get("country")
-    city = city or fallback.get("city")
+    # If still missing, run a focused LLM pass for location only
+    if (not country or not city) and payload.message:
+        location_data = await _extract_location_only(payload.message, payload.schema)
+        country = country or _normalize_country(location_data.get("country"))
+        city = city or _normalize_city(location_data.get("city"))
+
+    # If city is Egyptian and country missing, infer Egypt
+    if city and not country:
+        if city in {"Cairo", "Giza", "Alexandria"}:
+            country = "Egypt"
 
     missing: list[str] = []
     if not idea:
@@ -294,7 +327,7 @@ async def detect_intent(payload: IntentRequest) -> IntentResponse:
     prompt = (
         "Determine whether the user wants to start the simulation now. "
         "Return JSON only: {\"start\": true/false, \"reason\": \"...\"}. "
-        "Use context if provided.\n"
+        "Use context if provided. Accept Arabic confirmations like: نعم, أيوه, تمام, جاهز, ابدأ.\n"
         f"Context: {payload.context or ''}\n"
         f"Message: {payload.message}"
     )

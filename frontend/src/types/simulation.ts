@@ -32,6 +32,11 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   agentId?: string;
+  options?: {
+    field: 'category' | 'audience' | 'goals' | 'maturity';
+    kind: 'single' | 'multi';
+    items: { value: string; label: string; description?: string }[];
+  };
 }
 
 export interface UserInput {

@@ -13,6 +13,7 @@ export interface SimulationConfig {
   iterations?: number;
   research_summary?: string;
   research_sources?: SearchResult[];
+  language?: 'ar' | 'en';
 }
 
 export interface SimulationResponse {

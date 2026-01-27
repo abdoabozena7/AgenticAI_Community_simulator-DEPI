@@ -14,11 +14,53 @@ import { IterationTimeline } from '@/components/IterationTimeline';
 import { useSimulation } from '@/hooks/useSimulation';
 import { ChatMessage, UserInput } from '@/types/simulation';
 import { websocketService } from '@/services/websocket';
-import { apiService } from '@/services/api';
+import { apiService, SearchResponse } from '@/services/api';
 
 const CATEGORY_LABEL_BY_VALUE = new Map(
   CATEGORY_OPTIONS.map((label) => [label.toLowerCase(), label])
 );
+
+const CATEGORY_DESCRIPTIONS: Record<string, { ar: string; en: string }> = {
+  Technology: { ar: 'حلول تقنية وبرمجيات ومنتجات رقمية', en: 'Software and digital technology products' },
+  Healthcare: { ar: 'خدمات صحية، رعاية، وتكنولوجيا طبية', en: 'Healthcare services and medical tech' },
+  Finance: { ar: 'خدمات مالية، مدفوعات، واستثمارات', en: 'Financial services, payments, and investing' },
+  Education: { ar: 'تعليم، تدريب، ومنصات تعلم', en: 'Learning, training, and education platforms' },
+  'E-commerce': { ar: 'متاجر رقمية وتجربة شراء', en: 'Online commerce and shopping experiences' },
+  Entertainment: { ar: 'تجربة ترفيهية ومحتوى', en: 'Entertainment and content products' },
+  Social: { ar: 'مجتمعات وتواصل اجتماعي', en: 'Social communities and networks' },
+  'B2B SaaS': { ar: 'برمجيات للشركات وخدمات SaaS', en: 'B2B SaaS tools for companies' },
+  'Consumer Apps': { ar: 'تطبيقات مباشرة للمستخدمين', en: 'Direct-to-consumer apps' },
+  Hardware: { ar: 'أجهزة ومنتجات مادية', en: 'Hardware and physical products' },
+};
+
+const AUDIENCE_DESCRIPTIONS: Record<string, { ar: string; en: string }> = {
+  'Gen Z (18-24)': { ar: 'جيل صغير ومتفاعل مع التقنية', en: 'Young digital-native audience' },
+  'Millennials (25-40)': { ar: 'شريحة نشطة اقتصادياً', en: 'Economically active cohort' },
+  'Gen X (41-56)': { ar: 'خبرة عملية وقرارات محسوبة', en: 'Experienced, pragmatic decision-makers' },
+  'Boomers (57-75)': { ar: 'يميلون للثقة والاستقرار', en: 'Trust and stability focused' },
+  Developers: { ar: 'مطورون ومهندسو برمجيات', en: 'Software developers and engineers' },
+  Enterprises: { ar: 'شركات كبيرة وقرارات مؤسسية', en: 'Large enterprises with formal buying' },
+  SMBs: { ar: 'شركات صغيرة ومتوسطة', en: 'Small & medium-sized businesses' },
+  Consumers: { ar: 'مستخدمون نهائيون للأفراد', en: 'End consumers' },
+  Students: { ar: 'طلبة وباحثون عن تعليم', en: 'Students and learners' },
+  Professionals: { ar: 'محترفون في مجالات مختلفة', en: 'Professionals across sectors' },
+};
+
+const GOAL_DESCRIPTIONS: Record<string, { ar: string; en: string }> = {
+  'Market Validation': { ar: 'اختبار اهتمام السوق بالفكرة', en: 'Validate demand and interest' },
+  'Funding Readiness': { ar: 'تجهيز الفكرة لجذب تمويل', en: 'Prepare to raise funding' },
+  'User Acquisition': { ar: 'زيادة قاعدة المستخدمين', en: 'Grow user acquisition' },
+  'Product-Market Fit': { ar: 'ضبط المنتج مع احتياج السوق', en: 'Achieve product-market fit' },
+  'Competitive Analysis': { ar: 'فهم المنافسين والتميّز', en: 'Understand competitors and differentiation' },
+  'Growth Strategy': { ar: 'خطة نمو واستراتيجية توسع', en: 'Growth and expansion strategy' },
+};
+
+const MATURITY_DESCRIPTIONS: Record<string, { ar: string; en: string }> = {
+  concept: { ar: 'الفكرة في مرحلة التصوّر', en: 'Idea stage' },
+  prototype: { ar: 'نموذج أولي قيد التجربة', en: 'Prototype being tested' },
+  mvp: { ar: 'نسخة أولية قابلة للاستخدام', en: 'Minimum viable product' },
+  launched: { ar: 'منتج مطلق بالفعل في السوق', en: 'Already launched' },
+};
 
 const CATEGORY_KEYWORDS: Record<string, string> = {
   ai: 'technology',
@@ -114,7 +156,12 @@ const normalizeMaturityValue = (value?: string): UserInput['ideaMaturity'] | und
   return undefined;
 };
 
-const getRiskLabel = (value: number) => {
+const getRiskLabel = (value: number, language: 'ar' | 'en' = 'en') => {
+  if (language === 'ar') {
+    if (value < 30) return 'محافظ';
+    if (value < 70) return 'متوسط';
+    return 'مغامر';
+  }
   if (value < 30) return 'Conservative';
   if (value < 70) return 'Moderate';
   return 'Aggressive';
@@ -156,35 +203,38 @@ const Index = () => {
   const [hasStarted, setHasStarted] = useState(false);
   const [lastSuggestionKey, setLastSuggestionKey] = useState<string | null>(null);
   const summaryRef = useRef<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [leftWidth, setLeftWidth] = useState(320);
+  const [rightWidth, setRightWidth] = useState(320);
+  const dragRef = useRef<{ side: 'left' | 'right' | null; startX: number; startLeft: number; startRight: number }>({
+    side: null,
+    startX: 0,
+    startLeft: 320,
+    startRight: 320,
+  });
+  const [settings, setSettings] = useState({
+    language: 'ar' as 'ar' | 'en',
+    theme: 'dark',
+    autoFocusInput: true,
+  });
+  const [searchState, setSearchState] = useState<{
+    status: 'idle' | 'searching' | 'done';
+    query?: string;
+    answer?: string;
+    provider?: string;
+    isLive?: boolean;
+    results?: SearchResponse['results'];
+  }>({ status: 'idle' });
+  const [researchContext, setResearchContext] = useState<{ summary: string; sources: SearchResponse['results'] }>({
+    summary: '',
+    sources: [],
+  });
 
-  const inferLocation = useCallback((text: string): { country?: string; city?: string } => {
-    const matchComma = /in\s+([a-zA-Z\s]+?),\s*([a-zA-Z\s]+?)([\.!]|$)/i.exec(text);
-    if (matchComma) return { city: matchComma[1].trim(), country: matchComma[2].trim() };
-    const matchInIn = /in\s+([a-zA-Z\s]+?)\s+in\s+([a-zA-Z\s]+?)([\.!]|$)/i.exec(text);
-    if (matchInIn) return { city: matchInIn[1].trim(), country: matchInIn[2].trim() };
-    const lower = text.toLowerCase();
-    if (lower.includes('egypt')) return { country: 'Egypt' };
-    if (lower.includes('cairo')) return { city: 'Cairo' };
+  const inferLocation = useCallback((_text: string): { country?: string; city?: string } => {
     return {};
   }, []);
 
-  const isStartCommand = (text: string) => {
-    const t = text.trim().toLowerCase();
-    return t === 'go'
-      || t === 'start'
-      || t === 'run'
-      || t === 'ok'
-      || t === 'okay'
-      || t === 'yes'
-      || t === 'y'
-      || t === 'ابدأ'
-      || t === 'ابدء'
-      || t === 'شغل'
-      || t === 'شغّل'
-      || t === 'تمام'
-      || t === 'حاضر'
-      || t === 'ماشي';
-  };
+  
 
   const getAssistantMessage = useCallback(async (prompt: string) => {
     const context = chatMessages
@@ -192,19 +242,30 @@ const Index = () => {
       .map((msg) => `${msg.type === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
       .join('\n');
     const fullPrompt = context ? `Conversation:\n${context}\nUser: ${prompt}\nAssistant:` : prompt;
-    const text = await apiService.generateMessage(
-      fullPrompt,
-      'You are a concise assistant for a product simulation UI. Avoid markdown formatting like **bold**.'
-    );
-    return text.replace(/\*\*/g, '').trim();
-  }, [chatMessages]);
+    const system = settings.language === 'ar'
+      ? 'أنت مساعد موجز لواجهة محاكاة منتجات. أجب بالعربية وبدون تنسيق Markdown.'
+      : 'You are a concise assistant for a product simulation UI. Avoid markdown formatting like **bold**.';
+    try {
+      const timeoutMs = 6000;
+      const text = await Promise.race([
+        apiService.generateMessage(fullPrompt, system),
+        new Promise<string>((_, reject) =>
+          setTimeout(() => reject(new Error('LLM timeout')), timeoutMs)
+        ),
+      ]);
+      return String(text).replace(/\*\*/g, '').trim();
+    } catch {
+      return '';
+    }
+  }, [chatMessages, settings.language]);
 
-  const addSystemMessage = useCallback((content: string) => {
+  const addSystemMessage = useCallback((content: string, options?: ChatMessage['options']) => {
     const message: ChatMessage = {
       id: `sys-${Date.now()}`,
       type: 'system',
       content,
       timestamp: Date.now(),
+      options,
     };
     setChatMessages((prev) => [...prev, message]);
   }, []);
@@ -216,6 +277,43 @@ const Index = () => {
     summaryRef.current = simulation.summary;
   }, [simulation.summary, addSystemMessage]);
 
+  useEffect(() => {
+    const saved = localStorage.getItem('appSettings');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        setSettings((prev) => ({ ...prev, ...parsed }));
+      } catch {
+        // ignore
+      }
+    }
+    const savedLayout = localStorage.getItem('layoutWidths');
+    if (savedLayout) {
+      try {
+        const parsed = JSON.parse(savedLayout);
+        if (parsed.left) setLeftWidth(parsed.left);
+        if (parsed.right) setRightWidth(parsed.right);
+      } catch {
+        // ignore
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('appSettings', JSON.stringify(settings));
+    const root = document.documentElement;
+    root.lang = settings.language;
+    root.dir = settings.language === 'ar' ? 'rtl' : 'ltr';
+    root.classList.toggle('rtl', settings.language === 'ar');
+    root.classList.toggle('lang-ar', settings.language === 'ar');
+    root.classList.remove('theme-dark', 'theme-light');
+    root.classList.add(`theme-${settings.theme}`);
+  }, [settings]);
+
+  useEffect(() => {
+    localStorage.setItem('layoutWidths', JSON.stringify({ left: leftWidth, right: rightWidth }));
+  }, [leftWidth, rightWidth]);
+
   const buildConfig = useCallback((input: UserInput) => {
     return {
       idea: input.idea.trim(),
@@ -226,8 +324,11 @@ const Index = () => {
       riskAppetite: (input.riskAppetite ?? 50) / 100,
       ideaMaturity: input.ideaMaturity ?? 'concept',
       goals: input.goals,
+      research_summary: researchContext.summary,
+      research_sources: researchContext.sources,
+      language: settings.language,
     };
-  }, []);
+  }, [researchContext, settings.language]);
 
   const getMissingForStart = useCallback((input: UserInput) => {
     const missing: string[] = [];
@@ -240,25 +341,116 @@ const Index = () => {
     return missing;
   }, []);
 
+  const getMaturityLabelLocalized = useCallback((value: string | undefined, language: 'ar' | 'en') => {
+    if (language === 'ar') {
+      return ({
+        concept: 'فكرة',
+        prototype: 'نموذج',
+        mvp: 'نسخة أولية',
+        launched: 'أُطلق',
+      } as Record<string, string>)[value || 'concept'] || 'فكرة';
+    }
+    return getMaturityLabel(value);
+  }, []);
+
   const buildSuggestionMessage = useCallback((input: UserInput) => {
     const locationLine = input.city && input.country
-      ? `Location detected: ${input.city}, ${input.country}.`
-      : 'Location detected: (missing)';
-    const categoryLabel = input.category ? getCategoryLabel(input.category) : 'Not set';
-    const audienceLabel = input.targetAudience.length ? input.targetAudience.join(', ') : 'Not set';
-    const goalsLabel = input.goals.length ? input.goals.join(', ') : 'Not set';
-    const lines = [
-      locationLine,
-      'I pre-filled the top bar based on your idea. Adjust if needed, then type "go" to start.',
-      '',
-      `1) Category: ${categoryLabel}`,
-      `3) Audience: ${audienceLabel}`,
-      `5) Goals: ${goalsLabel}`,
-      `7) Risk: ${getRiskLabel(input.riskAppetite)}`,
-      `9) Maturity: ${getMaturityLabel(input.ideaMaturity)}`,
-    ];
+      ? (settings.language === 'ar'
+        ? `الموقع: ${input.city}, ${input.country}.`
+        : `Location detected: ${input.city}, ${input.country}.`)
+      : (settings.language === 'ar' ? 'الموقع: (غير محدد)' : 'Location detected: (missing)');
+    const categoryLabel = input.category ? getCategoryLabel(input.category) : (settings.language === 'ar' ? 'غير محدد' : 'Not set');
+    const audienceLabel = input.targetAudience.length ? input.targetAudience.join(', ') : (settings.language === 'ar' ? 'غير محدد' : 'Not set');
+    const goalsLabel = input.goals.length ? input.goals.join(', ') : (settings.language === 'ar' ? 'غير محدد' : 'Not set');
+    const lines = settings.language === 'ar'
+      ? [
+        locationLine,
+        'تم ملء الشريط العلوي بناءً على فكرتك. عدّل إن احتجت ثم أخبرني أنك جاهز للبدء.',
+        '',
+        `1) الفئة: ${categoryLabel}`,
+        `3) الجمهور: ${audienceLabel}`,
+        `5) الهدف: ${goalsLabel}`,
+        `7) المخاطرة: ${getRiskLabel(input.riskAppetite, 'ar')}`,
+        `9) النضج: ${getMaturityLabelLocalized(input.ideaMaturity, 'ar')}`,
+      ]
+      : [
+        locationLine,
+        'I pre-filled the top bar based on your idea. Adjust if needed, then tell me you are ready to start.',
+        '',
+        `1) Category: ${categoryLabel}`,
+        `3) Audience: ${audienceLabel}`,
+        `5) Goals: ${goalsLabel}`,
+        `7) Risk: ${getRiskLabel(input.riskAppetite, 'en')}`,
+        `9) Maturity: ${getMaturityLabelLocalized(input.ideaMaturity, 'en')}`,
+      ];
     return lines.join('\n');
-  }, []);
+  }, [getMaturityLabelLocalized, settings.language]);
+
+  const addOptionsMessage = useCallback((
+    field: 'category' | 'audience' | 'goals' | 'maturity',
+    intro?: string
+  ) => {
+    const language = settings.language;
+    if (field === 'category') {
+      const items = CATEGORY_OPTIONS.map((cat) => ({
+        value: cat.toLowerCase(),
+        label: language === 'ar'
+          ? (CATEGORY_DESCRIPTIONS[cat]?.ar ? `${cat} — ${CATEGORY_DESCRIPTIONS[cat].ar}` : cat)
+          : cat,
+        description: language === 'ar' ? CATEGORY_DESCRIPTIONS[cat]?.ar : CATEGORY_DESCRIPTIONS[cat]?.en,
+      }));
+      addSystemMessage(intro || (language === 'ar' ? 'اختر الفئة المناسبة لفكرتك:' : 'Pick the closest category:'), {
+        field: 'category',
+        kind: 'single',
+        items,
+      });
+      return true;
+    }
+    if (field === 'audience') {
+      const items = AUDIENCE_OPTIONS.map((aud) => ({
+        value: aud,
+        label: language === 'ar' ? aud : aud,
+        description: language === 'ar' ? AUDIENCE_DESCRIPTIONS[aud]?.ar : AUDIENCE_DESCRIPTIONS[aud]?.en,
+      }));
+      addSystemMessage(intro || (language === 'ar' ? 'مين الجمهور المستهدف؟ اختر واحد أو أكثر:' : 'Who is the target audience? Choose one or more:'), {
+        field: 'audience',
+        kind: 'multi',
+        items,
+      });
+      return true;
+    }
+    if (field === 'goals') {
+      const items = GOAL_OPTIONS.map((goal) => ({
+        value: goal,
+        label: language === 'ar' ? goal : goal,
+        description: language === 'ar' ? GOAL_DESCRIPTIONS[goal]?.ar : GOAL_DESCRIPTIONS[goal]?.en,
+      }));
+      addSystemMessage(intro || (language === 'ar' ? 'ما الهدف الأساسي؟ اختر هدفًا أو أكثر:' : 'Select the primary goal(s):'), {
+        field: 'goals',
+        kind: 'multi',
+        items,
+      });
+      return true;
+    }
+    if (field === 'maturity') {
+      const items = MATURITY_LEVELS.map((level) => ({
+        value: level.value,
+        label: language === 'ar'
+          ? (MATURITY_DESCRIPTIONS[level.value]?.ar || level.label)
+          : level.label,
+        description: language === 'ar'
+          ? MATURITY_DESCRIPTIONS[level.value]?.ar
+          : MATURITY_DESCRIPTIONS[level.value]?.en,
+      }));
+      addSystemMessage(intro || (language === 'ar' ? 'ما مرحلة النضج الحالية؟' : 'What is the current maturity stage?'), {
+        field: 'maturity',
+        kind: 'single',
+        items,
+      });
+      return true;
+    }
+    return false;
+  }, [addSystemMessage, settings.language]);
 
   const requestLocationIfNeeded = useCallback(async (missing: string[]) => {
     const needsCountry = missing.includes('country');
@@ -266,40 +458,63 @@ const Index = () => {
     if (!needsCountry && !needsCity) return false;
     const prompt = `Ask the user for the missing location fields: ${needsCountry ? 'country' : ''}${needsCountry && needsCity ? ' and ' : ''}${needsCity ? 'city' : ''}. Keep it short and natural.`;
     const question = await getAssistantMessage(prompt);
-    addSystemMessage(question);
+    if (question) {
+      addSystemMessage(question);
+    } else {
+      const fallback = needsCountry && needsCity
+        ? (settings.language === 'ar' ? 'ما هي الدولة والمدينة المستهدفة؟' : 'Which country and city should we focus on?')
+        : needsCity
+        ? (settings.language === 'ar' ? 'ما هي المدينة المستهدفة؟' : 'Which city should we focus on?')
+        : (settings.language === 'ar' ? 'ما هي الدولة المستهدفة؟' : 'Which country should we focus on?');
+      addSystemMessage(fallback);
+    }
     setIsWaitingForCountry(needsCountry);
     setIsWaitingForCity(needsCity);
     return true;
-  }, [addSystemMessage, getAssistantMessage]);
+  }, [addSystemMessage, getAssistantMessage, settings.language]);
 
   const handleStart = useCallback(async () => {
     const missing = getMissingForStart(userInput);
-    if (missing.length > 0) {
-      if (missing.includes('idea')) {
-        const prompt = 'Ask the user to describe their idea in one clear sentence.';
+      if (missing.length > 0) {
+        if (missing.includes('idea')) {
+          const prompt = 'Ask the user to describe their idea in one clear sentence.';
+          const message = await getAssistantMessage(prompt);
+          addSystemMessage(message || (settings.language === 'ar'
+            ? 'من فضلك اكتب الفكرة في جملة واحدة.'
+            : 'Please describe the idea in one clear sentence.'));
+          return;
+        }
+        const asked = await requestLocationIfNeeded(missing);
+        if (asked) return;
+        if (missing.includes('category')) {
+          if (addOptionsMessage('category')) return;
+        }
+        if (missing.includes('target_audience')) {
+          if (addOptionsMessage('audience')) return;
+        }
+        if (missing.includes('goals')) {
+          if (addOptionsMessage('goals')) return;
+        }
+        if (missing.includes('idea_maturity')) {
+          if (addOptionsMessage('maturity')) return;
+        }
+        const prompt = `Tell the user to review the top bar and fill these fields: ${missing.join(', ')}. Do not ask questions; just instruct them to adjust the top bar and say they are ready to start.`;
         const message = await getAssistantMessage(prompt);
-        addSystemMessage(message);
+        addSystemMessage(message || buildSuggestionMessage(userInput));
         return;
       }
-      const asked = await requestLocationIfNeeded(missing);
-      if (asked) return;
-      const prompt = `Tell the user to review the top bar and fill these fields: ${missing.join(', ')}. Do not ask questions; just instruct them to adjust the top bar and type "go" when ready.`;
-      const message = await getAssistantMessage(prompt);
-      addSystemMessage(message);
-      return;
-    }
 
     if (hasStarted || simulation.status === 'running') return;
     setHasStarted(true);
     try {
+      await simulation.startSimulation(buildConfig(userInput));
       const startMessage = await getAssistantMessage('Confirm you are starting the simulation now in one short sentence.');
-      addSystemMessage(startMessage);
+      addSystemMessage(startMessage || (settings.language === 'ar' ? 'تم بدء المحاكاة.' : 'Starting simulation...'));
     } catch (err) {
-      console.warn('LLM start message failed, using fallback.', err);
-      addSystemMessage('Starting simulation...');
+      console.warn('Simulation start failed.', err);
+      addSystemMessage(settings.language === 'ar' ? 'تعذر بدء المحاكاة. تحقق من الباك إند.' : 'Failed to start simulation. Check the backend.');
     }
-    await simulation.startSimulation(buildConfig(userInput));
-  }, [addSystemMessage, buildConfig, getAssistantMessage, getMissingForStart, hasStarted, requestLocationIfNeeded, simulation, userInput]);
+  }, [addOptionsMessage, addSystemMessage, buildConfig, getAssistantMessage, getMissingForStart, hasStarted, requestLocationIfNeeded, simulation, userInput]);
 
   const handleSendMessage = useCallback(
     (content: string) => {
@@ -314,26 +529,159 @@ const Index = () => {
       };
       setChatMessages((prev) => [...prev, userMessage]);
 
-      if (isStartCommand(trimmed)) {
-        void handleStart();
-        return;
-      }
-
       void (async () => {
         try {
+          // If we're explicitly waiting for location, handle it directly without search.
+          if (isWaitingForCountry || isWaitingForCity) {
+            const schemaPayload = {
+              idea: userInput.idea,
+              country: userInput.country,
+              city: userInput.city,
+              category: userInput.category,
+              target_audience: userInput.targetAudience,
+              goals: userInput.goals,
+              risk_appetite: (userInput.riskAppetite ?? 50) / 100,
+              idea_maturity: userInput.ideaMaturity,
+            };
+            let extraction = null;
+            try {
+              extraction = await Promise.race([
+                apiService.extractSchema(trimmed, schemaPayload),
+                new Promise<ReturnType<typeof apiService.extractSchema>>((_, reject) =>
+                  setTimeout(() => reject(new Error('Extract timeout')), 6000)
+                ),
+              ]);
+            } catch {
+              extraction = {
+                country: null,
+                city: null,
+                question: null,
+              } as any;
+            }
+
+            const nextInput: UserInput = {
+              ...userInput,
+              country: isWaitingForCountry ? (extraction.country || userInput.country) : userInput.country,
+              city: isWaitingForCity ? (extraction.city || userInput.city) : userInput.city,
+            };
+            setUserInput(nextInput);
+            setIsWaitingForCountry(false);
+            setIsWaitingForCity(false);
+
+            const missing = getMissingForStart(nextInput);
+            if (missing.length > 0) {
+              if (missing.includes('city')) {
+                addSystemMessage(extraction.question || (settings.language === 'ar'
+                  ? 'ما هي المدينة المستهدفة؟'
+                  : 'Which city should we focus on?'));
+                setIsWaitingForCity(true);
+                return;
+              }
+              if (missing.includes('country')) {
+                addSystemMessage(extraction.question || (settings.language === 'ar'
+                  ? 'ما هي الدولة المستهدفة؟'
+                  : 'Which country should we focus on?'));
+                setIsWaitingForCountry(true);
+                return;
+              }
+              if (missing.includes('category')) {
+                if (addOptionsMessage('category')) return;
+              }
+              if (missing.includes('target_audience')) {
+                if (addOptionsMessage('audience')) return;
+              }
+              if (missing.includes('goals')) {
+                if (addOptionsMessage('goals')) return;
+              }
+              if (missing.includes('idea_maturity')) {
+                if (addOptionsMessage('maturity')) return;
+              }
+            }
+
+            const prompt = [
+              `Summarize the inferred settings and tell the user to adjust the top bar if needed, then say they are ready to start.`,
+              `Location: ${nextInput.city}, ${nextInput.country}.`,
+              `Category: ${getCategoryLabel(nextInput.category)}.`,
+              `Audience: ${nextInput.targetAudience.join(', ') || 'Not set'}.`,
+              `Goals: ${nextInput.goals.join(', ') || 'Not set'}.`,
+              `Risk: ${getRiskLabel(nextInput.riskAppetite, settings.language)}.`,
+              `Maturity: ${getMaturityLabelLocalized(nextInput.ideaMaturity, settings.language)}.`,
+              `Use a short intro and a numbered list with items 1,3,5,7,9 (odd numbers only).`,
+            ].join(' ');
+            const assistantMessage = await getAssistantMessage(prompt);
+            addSystemMessage(assistantMessage || buildSuggestionMessage(nextInput));
+            return;
+          }
+
+          // If user is likely confirming readiness, detect intent before search.
+          if (userInput.idea && userInput.country && userInput.city) {
+            const intentContext = `Idea: ${userInput.idea}. Location: ${userInput.city}, ${userInput.country}.`;
+            try {
+              const intent = await Promise.race([
+                apiService.detectStartIntent(trimmed, intentContext),
+                new Promise<{ start: boolean }>((_, reject) =>
+                  setTimeout(() => reject(new Error('Intent timeout')), 3000)
+                ),
+              ]);
+              if (intent.start) {
+                await handleStart();
+                return;
+              }
+            } catch {
+              // ignore intent failure
+            }
+            const quickYes = ['yes', 'ok', 'okay', 'go', 'start', 'run', 'y', 'تمام', 'حاضر', 'ماشي', 'ايوه', 'نعم', 'ايوا'];
+            if (trimmed.length <= 5 && quickYes.includes(trimmed.toLowerCase())) {
+              await handleStart();
+              return;
+            }
+          }
+
+          const socialBoost = '(site:twitter.com OR site:reddit.com OR site:tiktok.com OR site:facebook.com OR site:linkedin.com)';
+          const searchQuery = `${trimmed} ${socialBoost}`;
+          setSearchState({ status: 'searching', query: trimmed });
+          let search: SearchResponse | null = null;
+          try {
+            const timeoutMs = 6000;
+            search = await Promise.race([
+              apiService.searchWeb(searchQuery, settings.language === 'ar' ? 'ar' : 'en', 5),
+              new Promise<SearchResponse>((_, reject) =>
+                setTimeout(() => reject(new Error('Search timeout')), timeoutMs)
+              ),
+            ]);
+          } catch (searchErr) {
+            console.warn('Search failed, continuing without live sources.', searchErr);
+          }
+          if (search) {
+            setSearchState({
+              status: 'done',
+              query: trimmed,
+              answer: search.answer,
+              provider: search.provider,
+              isLive: search.is_live,
+              results: search.results,
+            });
+            const summary = search.answer || search.results.map((r) => r.snippet).filter(Boolean).slice(0, 3).join(' ');
+            setResearchContext({ summary, sources: search.results });
+          } else {
+            setSearchState({ status: 'done', query: trimmed, answer: '', provider: 'none', isLive: false, results: [] });
+            setResearchContext({ summary: '', sources: [] });
+            addSystemMessage(settings.language === 'ar'
+              ? 'لم أجد معلومات كافية سريعًا، سأستخدم الـ LLM مباشرة.'
+              : 'Not enough information quickly; asking the LLM directly.');
+          }
+
           if (simulation.status === 'running' || simulation.status === 'completed') {
             const nextIdea = userInput.idea
               ? `${userInput.idea}\nUpdate: ${trimmed}`
               : trimmed;
-            setUserInput((prev) => ({ ...prev, idea: nextIdea }));
-            const prompt = [
-              'The user sent an update to the project idea while a simulation is active.',
-              'Acknowledge the update, mention how it affects assumptions, and ask if they want to re-run the simulation.',
-              `Current idea summary: ${userInput.idea || 'Not set'}.`,
-              `Update: ${trimmed}.`,
-            ].join(' ');
-            const reply = await getAssistantMessage(prompt);
-            addSystemMessage(reply);
+            const nextInput = { ...userInput, idea: nextIdea };
+            setUserInput(nextInput);
+            addSystemMessage(settings.language === 'ar'
+              ? 'تم استلام التحديث. سيتم الاستمرار بنفس مجموعة الوكلاء.'
+              : 'Update received. Continuing the simulation with the same agent pool.');
+            await simulation.stopSimulation();
+            await simulation.startSimulation(buildConfig(nextInput));
             return;
           }
 
@@ -349,7 +697,30 @@ const Index = () => {
             idea_maturity: userInput.ideaMaturity,
             ...inferred,
           };
-          const extraction = await apiService.extractSchema(trimmed, schemaPayload);
+          let extraction = null;
+          try {
+            const timeoutMs = 6000;
+            extraction = await Promise.race([
+              apiService.extractSchema(trimmed, schemaPayload),
+              new Promise<ReturnType<typeof apiService.extractSchema>>((_, reject) =>
+                setTimeout(() => reject(new Error('Extract timeout')), timeoutMs)
+              ),
+            ]);
+          } catch (extractErr) {
+            console.warn('Schema extraction timed out, using heuristic fallback.', extractErr);
+            extraction = {
+              idea: trimmed,
+              country: inferred.country || userInput.country,
+              city: inferred.city || userInput.city,
+              category: userInput.category,
+              target_audience: userInput.targetAudience,
+              goals: userInput.goals,
+              risk_appetite: (userInput.riskAppetite ?? 50) / 100,
+              idea_maturity: userInput.ideaMaturity,
+              missing: [],
+              question: null,
+            };
+          }
 
           const normalizedCategory = normalizeCategoryValue(extraction.category);
           const normalizedAudiences = normalizeOptionList(extraction.target_audience, AUDIENCE_OPTIONS);
@@ -419,39 +790,59 @@ const Index = () => {
 
           if (suggestionKey !== lastSuggestionKey) {
             const prompt = [
-              `Summarize the inferred settings and tell the user to adjust the top bar if needed, then type \"go\" to start.`,
+              `Summarize the inferred settings and tell the user to adjust the top bar if needed, then say they are ready to start.`,
               `Location: ${nextInput.city}, ${nextInput.country}.`,
               `Category: ${getCategoryLabel(nextInput.category)}.`,
               `Audience: ${nextInput.targetAudience.join(', ') || 'Not set'}.`,
               `Goals: ${nextInput.goals.join(', ') || 'Not set'}.`,
-              `Risk: ${getRiskLabel(nextInput.riskAppetite)}.`,
+              `Risk: ${getRiskLabel(nextInput.riskAppetite, settings.language)}.`,
               `Maturity: ${getMaturityLabel(nextInput.ideaMaturity)}.`,
               `Use a short intro and a numbered list with items 1,3,5,7,9 (odd numbers only).`,
             ].join(' ');
             try {
               const assistantMessage = await getAssistantMessage(prompt);
-              addSystemMessage(assistantMessage);
+              addSystemMessage(assistantMessage || buildSuggestionMessage(nextInput));
             } catch (err) {
               console.warn('LLM suggestion message failed, using fallback.', err);
               addSystemMessage(buildSuggestionMessage(nextInput));
             }
             setLastSuggestionKey(suggestionKey);
           }
+          const intentContext = `Idea: ${nextInput.idea}. Location: ${nextInput.city}, ${nextInput.country}.`;
+          try {
+            const intent = await Promise.race([
+              apiService.detectStartIntent(trimmed, intentContext),
+              new Promise<{ start: boolean }>((_, reject) =>
+                setTimeout(() => reject(new Error('Intent timeout')), 4000)
+              ),
+            ]);
+            if (intent.start) {
+              await handleStart();
+            }
+          } catch {
+            // ignore intent failure
+          }
         } catch (err) {
           console.error('Schema extraction failed', err);
-          addSystemMessage('LLM unavailable. Please restart the backend.');
+          addSystemMessage(settings.language === 'ar'
+            ? 'الـ LLM غير متاح. رجاءً أعد تشغيل الباك إند.'
+            : 'LLM unavailable. Please restart the backend.');
         }
       })();
     },
-    [
-      addSystemMessage,
-      buildSuggestionMessage,
-      getAssistantMessage,
-      getMissingForStart,
+      [
+        addOptionsMessage,
+        addSystemMessage,
+        buildConfig,
+        buildSuggestionMessage,
+        getAssistantMessage,
+        getMissingForStart,
       handleStart,
       inferLocation,
       lastSuggestionKey,
       requestLocationIfNeeded,
+      settings.language,
+      simulation,
       touched,
       userInput,
     ]
@@ -487,6 +878,80 @@ const Index = () => {
     setLastSuggestionKey(null);
   }, []);
 
+  const handleOptionSelect = useCallback(
+    (field: 'category' | 'audience' | 'goals' | 'maturity', value: string) => {
+      if (field === 'category') {
+        handleCategoryChange(value);
+        addSystemMessage(settings.language === 'ar' ? `تم اختيار الفئة: ${value}` : `Category selected: ${value}`);
+        return;
+      }
+      if (field === 'maturity') {
+        handleMaturityChange(value);
+        addSystemMessage(settings.language === 'ar' ? `تم اختيار مرحلة النضج: ${value}` : `Maturity selected: ${value}`);
+        return;
+      }
+      if (field === 'audience') {
+        const exists = userInput.targetAudience.includes(value);
+        const next = exists
+          ? userInput.targetAudience.filter((item) => item !== value)
+          : [...userInput.targetAudience, value];
+        handleAudienceChange(next);
+        addSystemMessage(settings.language === 'ar'
+          ? `تم تحديث الجمهور: ${next.join(', ') || 'غير محدد'}`
+          : `Audience updated: ${next.join(', ') || 'Not set'}`);
+        return;
+      }
+      if (field === 'goals') {
+        const exists = userInput.goals.includes(value);
+        const next = exists
+          ? userInput.goals.filter((item) => item !== value)
+          : [...userInput.goals, value];
+        handleGoalsChange(next);
+        addSystemMessage(settings.language === 'ar'
+          ? `تم تحديث الأهداف: ${next.join(', ') || 'غير محدد'}`
+          : `Goals updated: ${next.join(', ') || 'Not set'}`);
+      }
+    },
+    [
+      addSystemMessage,
+      handleAudienceChange,
+      handleCategoryChange,
+      handleGoalsChange,
+      handleMaturityChange,
+      settings.language,
+      userInput.goals,
+      userInput.targetAudience,
+    ]
+  );
+
+  useEffect(() => {
+    const handleMove = (event: MouseEvent) => {
+      if (!dragRef.current.side || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const minSide = 260;
+      const minCenter = 360;
+      const dx = event.clientX - dragRef.current.startX;
+      if (dragRef.current.side === 'left') {
+        const maxLeft = rect.width - rightWidth - minCenter - 12;
+        const nextLeft = Math.min(Math.max(dragRef.current.startLeft + dx, minSide), maxLeft);
+        setLeftWidth(nextLeft);
+      } else if (dragRef.current.side === 'right') {
+        const maxRight = rect.width - leftWidth - minCenter - 12;
+        const nextRight = Math.min(Math.max(dragRef.current.startRight - dx, minSide), maxRight);
+        setRightWidth(nextRight);
+      }
+    };
+    const handleUp = () => {
+      dragRef.current.side = null;
+    };
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleUp);
+    };
+  }, [leftWidth, rightWidth]);
+
   useEffect(() => {
     if (
       simulation.status === 'error' ||
@@ -503,7 +968,49 @@ const Index = () => {
       <Header
         simulationStatus={simulation.status}
         isConnected={websocketService.isConnected()}
+        language={settings.language}
       />
+
+      <div className="glass-panel border-b border-border/50 px-6 py-3">
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-muted-foreground">{settings.language === 'ar' ? 'اللغة' : 'Language'}</span>
+            <button
+              type="button"
+              className={settings.language === 'ar' ? 'px-3 py-1 rounded-md bg-primary text-primary-foreground' : 'px-3 py-1 rounded-md bg-secondary text-foreground'}
+              onClick={() => setSettings((prev) => ({ ...prev, language: 'ar' }))}
+            >
+              عربي
+            </button>
+            <button
+              type="button"
+              className={settings.language === 'en' ? 'px-3 py-1 rounded-md bg-primary text-primary-foreground' : 'px-3 py-1 rounded-md bg-secondary text-foreground'}
+              onClick={() => setSettings((prev) => ({ ...prev, language: 'en' }))}
+            >
+              English
+            </button>
+          </div>
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-muted-foreground">{settings.language === 'ar' ? 'الثيم' : 'Theme'}</span>
+            <select
+              className="rounded-md bg-secondary border border-border/50 px-2 py-1"
+              value={settings.theme}
+              onChange={(e) => setSettings((prev) => ({ ...prev, theme: e.target.value }))}
+            >
+              <option value="dark">{settings.language === 'ar' ? 'داكن' : 'Dark'}</option>
+              <option value="light">{settings.language === 'ar' ? 'فاتح' : 'Light'}</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-muted-foreground">{settings.language === 'ar' ? 'تركيز تلقائي' : 'Auto focus'}</span>
+            <input
+              type="checkbox"
+              checked={settings.autoFocusInput}
+              onChange={(e) => setSettings((prev) => ({ ...prev, autoFocusInput: e.target.checked }))}
+            />
+          </div>
+        </div>
+      </div>
 
       {/* Top Bar - Filters */}
       <TopBar
@@ -512,6 +1019,7 @@ const Index = () => {
         selectedGoals={userInput.goals}
         riskLevel={userInput.riskAppetite}
         maturity={userInput.ideaMaturity}
+        language={settings.language}
         onCategoryChange={handleCategoryChange}
         onAudienceChange={handleAudienceChange}
         onRiskChange={handleRiskChange}
@@ -520,20 +1028,40 @@ const Index = () => {
       />
 
       {/* Main Content */}
-      <div className="flex-1 flex overflow-hidden min-h-0">
+      <div
+        ref={containerRef}
+        className="flex-1 grid overflow-hidden min-h-0"
+        style={{
+          gridTemplateColumns: `${leftWidth}px 6px 1fr 6px ${rightWidth}px`,
+        }}
+      >
         {/* Left Panel - Chat */}
-        <div className="w-80 min-w-[320px] border-r border-border/50 flex flex-col min-h-0">
+        <div className="border-r border-border/50 flex flex-col min-h-0">
           <ChatPanel
             messages={chatMessages}
             reasoningFeed={simulation.reasoningFeed}
             onSendMessage={handleSendMessage}
+            onSelectOption={handleOptionSelect}
             isWaitingForCity={isWaitingForCity}
             isWaitingForCountry={isWaitingForCountry}
+            searchState={searchState}
+            settings={settings}
           />
         </div>
+        <div
+          className="resize-handle"
+          onMouseDown={(e) => {
+            dragRef.current = {
+              side: 'left',
+              startX: e.clientX,
+              startLeft: leftWidth,
+              startRight: rightWidth,
+            };
+          }}
+        />
 
         {/* Center - Simulation Arena */}
-        <div className="flex-1 flex flex-col p-4 gap-4 overflow-hidden min-h-0">
+        <div className="flex flex-col p-4 gap-4 overflow-hidden min-h-0">
           <div className="flex-1">
             <SimulationArena
               agents={simulation.agents}
@@ -541,6 +1069,7 @@ const Index = () => {
               currentIteration={simulation.metrics.currentIteration}
               totalIterations={simulation.metrics.totalIterations}
               onReset={simulation.stopSimulation}
+              language={settings.language}
             />
           </div>
 
@@ -548,12 +1077,25 @@ const Index = () => {
           <IterationTimeline
             currentIteration={simulation.metrics.currentIteration}
             totalIterations={simulation.metrics.totalIterations}
+            language={settings.language}
           />
         </div>
 
+        <div
+          className="resize-handle"
+          onMouseDown={(e) => {
+            dragRef.current = {
+              side: 'right',
+              startX: e.clientX,
+              startLeft: leftWidth,
+              startRight: rightWidth,
+            };
+          }}
+        />
+
         {/* Right Panel - Metrics */}
-        <div className="w-80 min-w-[320px] border-l border-border/50 flex flex-col min-h-0">
-          <MetricsPanel metrics={simulation.metrics} />
+        <div className="border-l border-border/50 flex flex-col min-h-0">
+          <MetricsPanel metrics={simulation.metrics} language={settings.language} />
         </div>
       </div>
     </div>

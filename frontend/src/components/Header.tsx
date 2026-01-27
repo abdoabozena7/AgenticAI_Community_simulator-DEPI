@@ -5,9 +5,29 @@ import { cn } from '@/lib/utils';
 interface HeaderProps {
   simulationStatus: SimulationStatus;
   isConnected: boolean;
+  language: 'ar' | 'en';
 }
 
-export function Header({ simulationStatus, isConnected }: HeaderProps) {
+export function Header({ simulationStatus, isConnected, language }: HeaderProps) {
+  const statusLabel = (() => {
+    const mapAr: Record<SimulationStatus, string> = {
+      idle: 'جاهز',
+      configuring: 'تهيئة',
+      running: 'يعمل',
+      paused: 'متوقف',
+      completed: 'مكتمل',
+      error: 'خطأ',
+    };
+    const mapEn: Record<SimulationStatus, string> = {
+      idle: 'Idle',
+      configuring: 'Configuring',
+      running: 'Running',
+      paused: 'Paused',
+      completed: 'Completed',
+      error: 'Error',
+    };
+    return language === 'ar' ? mapAr[simulationStatus] : mapEn[simulationStatus];
+  })();
   return (
     <header className="glass-panel border-b border-border/50 px-6 py-3">
       <div className="flex items-center justify-between">
@@ -25,7 +45,9 @@ export function Header({ simulationStatus, isConnected }: HeaderProps) {
             <h1 className="text-xl font-bold text-foreground">
               <span className="text-gradient">AgentSim</span>
             </h1>
-            <p className="text-xs text-muted-foreground">Multi-Agent Social Simulation</p>
+            <p className="text-xs text-muted-foreground">
+              {language === 'ar' ? 'محاكاة اجتماعية متعددة الوكلاء' : 'Multi-Agent Social Simulation'}
+            </p>
           </div>
         </div>
 
@@ -43,7 +65,7 @@ export function Header({ simulationStatus, isConnected }: HeaderProps) {
             ) : (
               <WifiOff className="w-3.5 h-3.5" />
             )}
-            <span>{isConnected ? 'Connected' : 'Disconnected'}</span>
+            <span>{isConnected ? (language === 'ar' ? 'متصل' : 'Connected') : (language === 'ar' ? 'غير متصل' : 'Disconnected')}</span>
           </div>
 
           {/* Simulation Status */}
@@ -65,7 +87,7 @@ export function Header({ simulationStatus, isConnected }: HeaderProps) {
               simulationStatus === 'idle' && "bg-muted-foreground",
               simulationStatus === 'configuring' && "bg-accent animate-pulse"
             )} />
-            <span className="capitalize">{simulationStatus}</span>
+            <span>{statusLabel}</span>
           </div>
         </div>
       </div>

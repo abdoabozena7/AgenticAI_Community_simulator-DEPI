@@ -4,12 +4,14 @@ interface IterationTimelineProps {
   currentIteration: number;
   totalIterations: number;
   milestones?: number[];
+  language: 'ar' | 'en';
 }
 
 export function IterationTimeline({
   currentIteration,
   totalIterations,
   milestones = [],
+  language,
 }: IterationTimelineProps) {
   const progress = totalIterations > 0 ? (currentIteration / totalIterations) * 100 : 0;
   
@@ -25,7 +27,9 @@ export function IterationTimeline({
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-          <span className="text-sm font-medium text-foreground">Iteration Timeline</span>
+          <span className="text-sm font-medium text-foreground">
+            {language === 'ar' ? 'خط التكرارات' : 'Iteration Timeline'}
+          </span>
         </div>
         <div className="flex items-center gap-2">
           <span className="text-2xl font-mono font-bold text-primary">{currentIteration}</span>
@@ -104,25 +108,25 @@ export function IterationTimeline({
               "w-2 h-2 rounded-full",
               currentIteration > 0 ? "bg-success" : "bg-muted-foreground/30"
             )} />
-            <span className="text-xs text-muted-foreground">Started</span>
+            <span className="text-xs text-muted-foreground">{language === 'ar' ? 'بداية' : 'Started'}</span>
           </div>
           <div className="flex items-center gap-1.5">
             <div className={cn(
               "w-2 h-2 rounded-full",
               progress >= 50 ? "bg-warning" : "bg-muted-foreground/30"
             )} />
-            <span className="text-xs text-muted-foreground">Midpoint</span>
+            <span className="text-xs text-muted-foreground">{language === 'ar' ? 'منتصف' : 'Midpoint'}</span>
           </div>
           <div className="flex items-center gap-1.5">
             <div className={cn(
               "w-2 h-2 rounded-full",
               progress >= 100 ? "bg-primary" : "bg-muted-foreground/30"
             )} />
-            <span className="text-xs text-muted-foreground">Complete</span>
+            <span className="text-xs text-muted-foreground">{language === 'ar' ? 'اكتمال' : 'Complete'}</span>
           </div>
         </div>
         <span className="text-xs text-muted-foreground">
-          {progress.toFixed(0)}% complete
+          {language === 'ar' ? `اكتمل ${progress.toFixed(0)}%` : `${progress.toFixed(0)}% complete`}
         </span>
       </div>
     </div>

@@ -10,6 +10,7 @@ interface SimulationArenaProps {
   currentIteration: number;
   totalIterations: number;
   onReset: () => void;
+  language: 'ar' | 'en';
 }
 
 export function SimulationArena({
@@ -18,6 +19,7 @@ export function SimulationArena({
   currentIteration,
   totalIterations,
   onReset,
+  language,
 }: SimulationArenaProps) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -50,7 +52,9 @@ export function SimulationArena({
       {/* Header Controls */}
       <div className="flex items-center justify-between p-4 border-b border-border/50">
         <div className="flex items-center gap-4">
-          <h2 className="text-lg font-semibold text-foreground">Simulation Arena</h2>
+          <h2 className="text-lg font-semibold text-foreground">
+            {language === 'ar' ? 'ساحة المحاكاة' : 'Simulation Arena'}
+          </h2>
           <div className="flex items-center gap-2">
             <span className={cn(
               "w-2 h-2 rounded-full",
@@ -59,7 +63,11 @@ export function SimulationArena({
               status === 'completed' ? "bg-primary" :
               "bg-muted-foreground"
             )} />
-            <span className="text-sm text-muted-foreground capitalize">{status}</span>
+            <span className="text-sm text-muted-foreground">
+              {language === 'ar'
+                ? ({ running: 'يعمل', paused: 'متوقف', completed: 'مكتمل', idle: 'جاهز', configuring: 'تهيئة', error: 'خطأ' } as Record<SimulationStatus, string>)[status]
+                : status}
+            </span>
           </div>
         </div>
         
@@ -73,7 +81,7 @@ export function SimulationArena({
             className="text-muted-foreground hover:text-foreground"
           >
             <RotateCcw className="w-4 h-4 mr-2" />
-            Reset
+            {language === 'ar' ? 'إعادة' : 'Reset'}
           </Button>
 
           <Button
@@ -126,7 +134,9 @@ export function SimulationArena({
               </div>
               <h3 className="text-xl font-medium text-foreground mb-2">Ready to Simulate</h3>
               <p className="text-sm text-muted-foreground max-w-[300px]">
-                Configure your idea in the chat panel to start the multi-agent simulation
+                {language === 'ar'
+                  ? 'أكمل إعداد الفكرة من الشات لبدء المحاكاة'
+                  : 'Configure your idea in the chat panel to start the multi-agent simulation'}
               </p>
             </div>
           </div>
@@ -167,7 +177,9 @@ export function SimulationArena({
           <div className="absolute bottom-4 left-4 right-4">
             <div className="glass-panel p-3">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-sm text-muted-foreground">Iteration Progress</span>
+                <span className="text-sm text-muted-foreground">
+                  {language === 'ar' ? 'تقدم التكرارات' : 'Iteration Progress'}
+                </span>
                 <span className="text-sm font-mono text-primary">
                   {currentIteration} / {totalIterations || 'inf'}
                 </span>

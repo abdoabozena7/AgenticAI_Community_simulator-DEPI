@@ -46,6 +46,11 @@ class SimulationEngine:
         prev_opinion: str,
         new_opinion: str,
         influence_weights: Dict[str, float],
+        changed: bool,
+        research_summary: str,
+        language: str,
+        idea_label: str,
+        peer_label: str,
     ) -> str:
         """Invoke the LLM to produce a short explanation for an opinion change.
 
@@ -66,41 +71,41 @@ class SimulationEngine:
         traits_desc = ", ".join(f"{k}: {v:.2f}" for k, v in agent.traits.items())
         bias_desc = ", ".join(agent.biases) if agent.biases else "none"
         archetype_lower = (agent.archetype_name or "").lower()
-        if "tech" in archetype_lower or "developer" in archetype_lower:
-            vocab = "efficiency, scalability, latency, reliability, smart systems"
+        if "developer" in archetype_lower or "tech" in archetype_lower or "engineer" in archetype_lower:
+            style = "focused on technical trade-offs, edge cases, and implementation effort"
         elif "entrepreneur" in archetype_lower or "business" in archetype_lower:
-            vocab = "ROI, market demand, profit margin, CAC/LTV, pricing"
+            style = "obsessed with market timing, competition, and customer acquisition costs"
         elif "worker" in archetype_lower or "employee" in archetype_lower:
-            vocab = "monthly savings, reliability, day-to-day usability, job security"
+            style = "concerned about practical utility, cost-to-value ratio, and daily convenience"
         else:
-            vocab = "market fit, trust, compliance, user adoption"
+            style = "thinking about social impact, trust, and long-term sustainability"
+        response_language = "Arabic" if language == "ar" else "English"
+        memory_context = " | ".join(agent.short_memory[-3:]) if agent.short_memory else "None"
         prompt = (
-            "You are an AI assistant summarising why a specific agent changed its opinion "
-            "in a multi-agent social simulation. Write 1-2 natural sentences. "
-            "Make it specific to the idea and the agent's archetype and traits. "
-            "Avoid repeating identical phrasing across agents. "
-            "Strict rule: do NOT use generic templates like 'benefits outweigh risks'. "
-            "Use archetype-specific vocabulary.\n"
-            f"Archetype: {agent.archetype_name}\n"
-            f"Biases: {bias_desc}\n"
-            f"Traits: {traits_desc}\n"
-            f"Vocabulary to use: {vocab}\n"
-            f"Research context: {research_summary}\n"
-            f"Previous opinion: {prev_opinion}\n"
-            f"New opinion: {new_opinion}\n"
-            f"Influence weights: "
-            f"accept={influence_weights.get('accept',0.0):.3f}, neutral={influence_weights.get('neutral',0.0):.3f}, "
-            f"reject={influence_weights.get('reject',0.0):.3f}. "
-            "Provide a concise explanation (max 30 words) in English."
+            f"You are a {agent.archetype_name or 'participant'} with skepticism level {agent.traits.get('skepticism', 0.5):.2f}. "
+            f"Evaluate this idea: {idea_label}. "
+            "Rule: Speak in the first person ('I think', 'I feel'). "
+            "Rule: Use your professional jargon (e.g., ROI, Scalability, Monthly savings). "
+            "Rule: Do NOT use generic sentences. "
+            "Tell exactly why you stay neutral or change your mind. "
+            f"Speak like a human {archetype_lower or 'participant'} {style}. "
+            f"Reference another agent's point (e.g., {peer_label}) if it helps. "
+            f"Your last thoughts: {memory_context}. "
+            f"Be specific to the idea context: {research_summary}. "
+            f"Respond in {response_language}."
         )
         try:
-            response = await generate_ollama(
-                prompt=prompt,
-                temperature=0.7,
-                options={
-                    "repeat_penalty": 1.15,
-                    "top_p": 0.9,
-                },
+            response = await asyncio.wait_for(
+                generate_ollama(
+                    prompt=prompt,
+                    temperature=0.9,
+                    options={
+                        "repeat_penalty": 1.2,
+                        "top_p": 0.9,
+                        "frequency_penalty": 0.6,
+                    },
+                ),
+                timeout=4.0,
             )
             # Truncate to ensure brevity
             explanation = response.strip().split("\n")[0]
@@ -111,6 +116,15 @@ class SimulationEngine:
             return explanation
         except Exception:
             # Fallback deterministic explanation
+            if language == "ar":
+                if prev_opinion == new_opinion:
+                    return (
+                        f"ما زلت على رأيي '{new_opinion}' لأن الأدلة غير حاسمة بعد."
+                    )
+                return (
+                    f"تم تغيير الرأي من '{prev_opinion}' إلى '{new_opinion}' "
+                    "بسبب تأثير تراكمي أقوى من بقية الوكلاء."
+                )
             return (
                 f"Changed opinion from '{prev_opinion}' to '{new_opinion}' due to stronger "
                 "cumulative influence from other agents."
@@ -169,6 +183,7 @@ class SimulationEngine:
 
         idea_text = str(user_context.get("idea") or "")
         research_summary = str(user_context.get("research_summary") or "")
+        language = str(user_context.get("language") or "ar").lower()
         idea_risk = _idea_risk_score(idea_text)
 
         def _idea_concerns() -> str:
@@ -206,39 +221,15 @@ class SimulationEngine:
             return "this idea"
 
         def _initial_opinion(traits: Dict[str, float]) -> str:
-            risk = user_context.get("riskAppetite")
-            if isinstance(risk, (int, float)):
-                risk_value = max(0.0, min(1.0, float(risk)))
-            else:
-                risk_value = 0.5
-            maturity = str(user_context.get("ideaMaturity") or "").lower()
-            maturity_bias = {
-                "concept": 0.0,
-                "prototype": 0.04,
-                "mvp": 0.08,
-                "launched": 0.12,
-            }.get(maturity, 0.0)
             optimism = float(traits.get("optimism", 0.5))
             skepticism = float(traits.get("skepticism", 0.5))
-            risk_tolerance = float(traits.get("risk_tolerance", 0.5))
-            accept_prob = (
-                0.24
-                + (0.25 * risk_value)
-                + (0.2 * risk_tolerance)
-                + (0.15 * optimism)
-                + maturity_bias
-                - idea_risk
-                - (0.15 * skepticism)
-            )
-            reject_prob = (
-                0.16
-                + (0.25 * (1.0 - risk_value))
-                + (0.15 * skepticism)
-                + idea_risk
-                - (0.1 * optimism)
-            )
-            accept_prob = min(0.7, max(0.12, accept_prob))
-            reject_prob = min(0.6, max(0.08, reject_prob))
+            # Requested formula for initial diversity
+            accept_prob = 0.3 + (0.4 * optimism) - (0.3 * skepticism)
+            accept_prob += random.uniform(-0.08, 0.08)
+            accept_prob = min(0.8, max(0.1, accept_prob))
+            reject_prob = 0.2 + (0.35 * skepticism) - (0.2 * optimism)
+            reject_prob += random.uniform(-0.08, 0.08)
+            reject_prob = min(0.7, max(0.05, reject_prob))
             neutral_prob = max(0.1, 1.0 - accept_prob - reject_prob)
             roll = random.random()
             if roll < accept_prob:
@@ -276,6 +267,21 @@ class SimulationEngine:
                 "confidence": agent.confidence,
             }
 
+        # Ensure we don't start with all-neutral opinions
+        def _opinion_score(agent: Agent) -> float:
+            optimism = float(agent.traits.get("optimism", 0.5))
+            risk_tolerance = float(agent.traits.get("risk_tolerance", 0.5))
+            skepticism = float(agent.traits.get("skepticism", 0.5))
+            return optimism + risk_tolerance - skepticism
+
+        if all(agent.current_opinion == "neutral" for agent in agents):
+            sorted_agents = sorted(agents, key=_opinion_score, reverse=True)
+            swing = max(1, len(agents) // 6)
+            for agent in sorted_agents[:swing]:
+                agent.current_opinion = "accept"
+            for agent in sorted_agents[-swing:]:
+                agent.current_opinion = "reject"
+
         # Emit initial agent snapshot (iteration 0)
         await emitter(
             "agents",
@@ -300,31 +306,104 @@ class SimulationEngine:
             value = int(hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8], 16)
             return phrases[value % len(phrases)]
 
-        def _persona_vocab(archetype: str, category: str) -> list[str]:
+        def _normalize_msg(msg: str) -> str:
+            return " ".join(msg.lower().split())
+
+        recent_messages: List[str] = []
+
+        def _is_template_message(message: str) -> bool:
+            lowered = _normalize_msg(message)
+            banned_phrases = [
+                "current opinion is",
+                "kept opinion",
+                "not enough influence",
+                "changed opinion from",
+                "الرأي الحالي هو",
+                "احتفظ بالرأي",
+                "لم يكن هناك تأثير كاف",
+                "تم تغيير الرأي من",
+            ]
+            return any(phrase in lowered for phrase in banned_phrases)
+
+        def _dedupe_message(message: str, agent: Agent, iteration: int) -> str:
+            normalized = _normalize_msg(message)
+            if not normalized:
+                return message
+            repeated = any(normalized == _normalize_msg(prev) for prev in recent_messages[-30:])
+            if agent.short_memory and normalized == _normalize_msg(agent.short_memory[-1]):
+                repeated = True
+            if not repeated:
+                recent_messages.append(message)
+                return message
+
+            # If repeated, add a persona-specific twist
+            category = _friendly_category(agent.category_id)
+            archetype = agent.archetype_name or category
+            vocab = _persona_vocab(archetype, category, language)
+            focal = _pick_phrase(f"{agent.agent_id}-dedupe-{iteration}", vocab)
+            if language == "ar":
+                message = f"{message} مع تركيز خاص على {focal}."
+            else:
+                message = f"{message} With a focus on {focal}."
+            recent_messages.append(message)
+            return message
+
+        def _debate_message(speaker: Agent, other: Agent, iteration: int) -> str:
+            category = _friendly_category(speaker.category_id)
+            archetype = speaker.archetype_name or category
+            vocab = _persona_vocab(archetype, category, language)
+            focal = random.choice(vocab) if vocab else _idea_concerns()
+            other_tag = f"Agent {other.agent_id[:4]}"
+            if language == "ar":
+                if speaker.current_opinion == "reject":
+                    return (
+                        f"{other_tag} شايف إن الفكرة جيدة، لكنني أرى أن {focal} ما زال نقطة ضعف. "
+                        "محتاج مبرر عملي قبل أن أغيّر رأيي."
+                    )
+                if speaker.current_opinion == "accept":
+                    return (
+                        f"{other_tag} متحفظ، لكني شايف أن {focal} يعطي أفضلية واضحة للفكرة حتى الآن."
+                    )
+                return (
+                    f"{other_tag} قال رأيه، وأنا محايد لأن تفاصيل {focal} غير محسومة."
+                )
+            if speaker.current_opinion == "reject":
+                return (
+                    f"{other_tag} likes the idea, but I still see {focal} as a major weak spot. "
+                    "I need concrete proof before moving."
+                )
+            if speaker.current_opinion == "accept":
+                return (
+                    f"{other_tag} is cautious, but I think {focal} keeps the upside credible right now."
+                )
+            return f"{other_tag} shared a view; I'm still neutral because {focal} feels unresolved."
+
+        def _persona_vocab(archetype: str, category: str, language: str) -> list[str]:
             a = archetype.lower()
             c = category.lower()
             if "tech" in a or "developer" in a or "engineer" in c:
-                return [
-                    "efficiency gains",
-                    "scalability",
-                    "latency and reliability",
-                    "automation potential",
-                ]
+                return (
+                    ["تحسين الكفاءة", "قابلية التوسع", "زمن الاستجابة", "استقرار النظام"]
+                    if language == "ar"
+                    else ["efficiency gains", "scalability", "latency and reliability", "automation potential"]
+                )
             if "entrepreneur" in a or "business" in a:
-                return [
-                    "ROI",
-                    "market demand",
-                    "profit margin",
-                    "pricing leverage",
-                ]
+                return (
+                    ["العائد على الاستثمار", "طلب السوق", "هامش الربح", "تكلفة الاستحواذ"]
+                    if language == "ar"
+                    else ["ROI", "market demand", "profit margin", "pricing leverage"]
+                )
             if "worker" in a or "employee" in c:
-                return [
-                    "monthly savings",
-                    "reliability",
-                    "day-to-day usability",
-                    "job stability",
-                ]
-            return ["market fit", "trust", "compliance", "user adoption"]
+                return (
+                    ["التوفير الشهري", "سهولة الاستخدام", "الاستقرار الوظيفي", "الموثوقية"]
+                    if language == "ar"
+                    else ["monthly savings", "reliability", "day-to-day usability", "job stability"]
+                )
+            return (
+                ["ملاءمة السوق", "الثقة", "الامتثال", "تبني المستخدمين"]
+                if language == "ar"
+                else ["market fit", "trust", "compliance", "user adoption"]
+            )
 
         def _human_reasoning(
             agent: Agent,
@@ -341,34 +420,52 @@ class SimulationEngine:
             top_opinion = max(influence_weights, key=influence_weights.get)
             archetype = agent.archetype_name or category
             prefix = _pick_phrase(
-                agent.agent_id,
+                f"{agent.agent_id}-{iteration}",
                 [
                     "From my perspective",
                     "Given my background",
                     "As someone in this segment",
                     "In my view",
+                ]
+                if language != "ar"
+                else [
+                    "من وجهة نظري",
+                    "بحكم خبرتي",
+                    "كممثل لهذا النوع من الجمهور",
+                    "برأيي الشخصي",
                 ],
             )
-            vocab = _persona_vocab(archetype, category)
-            focal = _pick_phrase(f"{agent.agent_id}-vocab", vocab)
+            vocab = _persona_vocab(archetype, category, language)
+            focal = random.choice(vocab) if vocab else _idea_concerns()
             peer = _pick_phrase(
-                f"{agent.agent_id}-peer",
-                [
-                    "Agent A",
-                    "Agent B",
-                    "Agent C",
-                ],
+                f"{agent.agent_id}-peer-{iteration}",
+                ["Agent A", "Agent B", "Agent C"] if language != "ar" else ["الوكيل أ", "الوكيل ب", "الوكيل ج"],
             )
             if changed and prev_opinion and new_opinion:
                 if new_opinion == "accept":
+                    if language == "ar":
+                        return (
+                            f"{prefix} ({archetype}) أصبحت ميّالاً للقبول لأن {_idea_label()} تبدو قابلة للتنفيذ، "
+                            f"ونقطة {peer} حول {focal} قللت ترددي."
+                        )
                     return (
                         f"{prefix} ({archetype}), I now lean accept because {_idea_label()} feels feasible "
                         f"and the {focal} case is convincing after {peer}'s point."
                     )
                 if new_opinion == "reject":
+                    if language == "ar":
+                        return (
+                            f"{prefix} ({archetype}) اتجهت للرفض لأن {_idea_label()} تثير مخاطر تخص "
+                            f"{_idea_concerns()}، وتحذير {peer} عزز ذلك."
+                        )
                     return (
                         f"{prefix} ({archetype}), I moved to reject because {_idea_label()} raises "
                         f"risks around {_idea_concerns()}, and {peer}'s caution reinforced it."
+                    )
+                if language == "ar":
+                    return (
+                        f"{prefix} ({archetype}) انتقلت للموقف المحايد تجاه {_idea_label()} لأن المؤشرات "
+                        "مختلطة وما زلت أحتاج أدلة أوضح."
                     )
                 return (
                     f"{prefix} ({archetype}), I moved to neutral on {_idea_label()} because the signals "
@@ -377,75 +474,111 @@ class SimulationEngine:
             # Not changed
             if agent.current_opinion == "accept":
                 reason = _pick_phrase(
-                    f"{agent.agent_id}-accept",
+                    f"{agent.agent_id}-accept-{iteration}",
                     [
                         f"{focal} looks strong",
                         f"{focal} is still compelling",
                         f"{focal} keeps the value clear",
+                    ]
+                    if language != "ar"
+                    else [
+                        f"{focal} تبدو قوية",
+                        f"{focal} ما زالت مقنعة",
+                        f"{focal} توضح القيمة بشكل كافٍ",
                     ],
                 )
                 if skepticism > 0.6:
-                    reason = f"{focal} is clear, but I still want safeguards"
+                    reason = f"{focal} واضحة لكني أريد ضمانات" if language == "ar" else f"{focal} is clear, but I still want safeguards"
+                if language == "ar":
+                    return f"{prefix} ({archetype}) ما زلت أميل للقبول بخصوص {_idea_label()} لأن {reason}."
                 return f"{prefix} ({archetype}), I still lean accept on {_idea_label()} because {reason}."
             if agent.current_opinion == "reject":
                 reason = _pick_phrase(
-                    f"{agent.agent_id}-reject",
+                    f"{agent.agent_id}-reject-{iteration}",
                     [
                         f"{focal} risk feels too high, especially around {_idea_concerns()}",
                         f"{focal} uncertainty is still too high",
                         f"{focal} and {_idea_concerns()} are unresolved",
+                    ]
+                    if language != "ar"
+                    else [
+                        f"مخاطر {focal} مرتفعة، خصوصاً فيما يتعلق بـ {_idea_concerns()}",
+                        f"عدم وضوح {focal} ما زال كبيراً",
+                        f"{focal} و {_idea_concerns()} لم تُحل بعد",
                     ],
                 )
                 if risk_tolerance > 0.7:
-                    reason = f"{focal} is high and the value is unclear"
+                    reason = f"{focal} مرتفعة والقيمة غير واضحة" if language == "ar" else f"{focal} is high and the value is unclear"
+                if language == "ar":
+                    return f"{prefix} ({archetype}) أميل للرفض بخصوص {_idea_label()} لأن {reason}."
                 return f"{prefix} ({archetype}), I'm leaning reject on {_idea_label()} because {reason}."
             if optimism > 0.6:
+                if language == "ar":
+                    return (
+                        f"{prefix} ({archetype}) ما زلت محايداً تجاه {_idea_label()}: "
+                        "أرى إمكانات، لكن الأدلة ليست قوية بعد."
+                    )
                 return (
                     f"{prefix} ({archetype}), I stay neutral on {_idea_label()}: "
                     "I see potential, but the evidence is not strong yet."
                 )
+            if language == "ar":
+                return (
+                    f"{prefix} ({archetype}) ما زلت محايداً لأن بيانات {focal} غير كافية لدي الآن، "
+                    "وأحتاج توضيحاً عملياً قبل الحسم."
+                )
             return (
-                f"{prefix} ({archetype}), I stay neutral on {_idea_label()} because "
-                f"{_idea_concerns()} are still unresolved, even after {peer}'s input."
+                f"{prefix} ({archetype}), I'm still neutral because {focal} evidence feels thin, "
+                "and I need concrete proof before committing."
             )
 
         # Main simulation loop
         for iteration in range(1, num_iterations + 1):
-            # Phase 1: Broadcast current opinions (simulate environment awareness)
-            for agent in agents:
-                message = (
-                    f"Iteration {iteration}: I'm leaning '{agent.current_opinion}' "
-                    f"with confidence {agent.confidence:.2f}."
-                )
-                agent.record_reasoning_step(
-                    iteration=iteration,
-                    message=message,
-                    triggered_by="environment",
-                    opinion_change=None,
-                )
-                await emitter(
-                    "reasoning_step",
-                    {
-                        "agent_id": agent.agent_id,
-                        "iteration": iteration,
-                        "message": message,
-                    },
-                )
-
-            # Phase 2: Compute pairwise influences
+            # Phase 1: Compute pairwise influences
             influences = compute_pairwise_influences(agents, self.dataset)
 
-            # Phase 3: Apply opinion updates
+            # Phase 1.5: lightweight debate layer (adds direct influence and messages)
+            debate_pool = random.sample(agents, k=min(len(agents), max(4, len(agents) // 3)))
+            for i in range(0, len(debate_pool) - 1, 2):
+                a = debate_pool[i]
+                b = debate_pool[i + 1]
+                if a.current_opinion == b.current_opinion:
+                    continue
+                # Influence boosts based on confidence and skepticism
+                a_skepticism = float(a.traits.get("skepticism", 0.5))
+                b_skepticism = float(b.traits.get("skepticism", 0.5))
+                boost_to_a = max(0.05, 0.18 * b.confidence * (1.0 - a_skepticism))
+                boost_to_b = max(0.05, 0.18 * a.confidence * (1.0 - b_skepticism))
+                influences[a.agent_id][b.current_opinion] += boost_to_a
+                influences[b.agent_id][a.current_opinion] += boost_to_b
+
+                msg_a = _debate_message(a, b, iteration)
+                msg_b = _debate_message(b, a, iteration)
+                msg_a = _dedupe_message(msg_a, a, iteration)
+                msg_b = _dedupe_message(msg_b, b, iteration)
+                a.record_reasoning_step(iteration=iteration, message=msg_a, triggered_by="debate", opinion_change=None)
+                b.record_reasoning_step(iteration=iteration, message=msg_b, triggered_by="debate", opinion_change=None)
+                await emitter("reasoning_step", {"agent_id": a.agent_id, "iteration": iteration, "message": msg_a})
+                await emitter("reasoning_step", {"agent_id": b.agent_id, "iteration": iteration, "message": msg_b})
+
+            # Phase 2: Apply opinion updates
             any_changed = False
             for agent in agents:
                 influence_weights = influences[agent.agent_id]
+                sorted_weights = sorted(influence_weights.items(), key=lambda item: item[1], reverse=True)
+                top_opinion, top_weight = sorted_weights[0]
+                second_weight = sorted_weights[1][1] if len(sorted_weights) > 1 else 0.0
+                diff = max(0.0, top_weight - second_weight)
+                peer_label = _pick_phrase(
+                    f"{agent.agent_id}-peer-{iteration}",
+                    ["Agent A", "Agent B", "Agent C"] if language != "ar" else ["الوكيل أ", "الوكيل ب", "الوكيل ج"],
+                )
                 new_opinion, changed = decide_opinion_change(
                     current_opinion=agent.current_opinion,
                     influence_weights=influence_weights,
                     skepticism=agent.traits.get("skepticism", 0.0),
                 )
                 if not changed:
-                    top_opinion = max(influence_weights, key=influence_weights.get)
                     if influence_weights[top_opinion] > 0 and random.random() < 0.12:
                         new_opinion = top_opinion
                         changed = new_opinion != agent.current_opinion
@@ -453,8 +586,9 @@ class SimulationEngine:
                     any_changed = True
                     prev_opinion = agent.current_opinion
                     agent.current_opinion = new_opinion
-                    # Adjust confidence: drop when changed
-                    agent.confidence = max(0.3, agent.confidence - 0.1)
+                    agent.neutral_streak = 0
+                    # Adjust confidence: drop when changed, scaled by conflict strength
+                    agent.confidence = max(0.3, agent.confidence - (0.08 + min(0.08, diff)))
                     # Generate an LLM explanation for the opinion change
                     try:
                         explanation = await self._llm_reasoning(
@@ -462,6 +596,11 @@ class SimulationEngine:
                             prev_opinion,
                             new_opinion,
                             influence_weights,
+                            True,
+                            research_summary,
+                            language,
+                            _idea_label(),
+                            peer_label,
                         )
                     except Exception:
                         explanation = _human_reasoning(
@@ -472,6 +611,16 @@ class SimulationEngine:
                             prev_opinion,
                             new_opinion,
                         )
+                    if _is_template_message(explanation):
+                        explanation = _human_reasoning(
+                            agent,
+                            iteration,
+                            influence_weights,
+                            True,
+                            prev_opinion,
+                            new_opinion,
+                        )
+                    explanation = _dedupe_message(explanation, agent, iteration)
                     agent.record_reasoning_step(
                         iteration=iteration,
                         message=explanation,
@@ -487,10 +636,40 @@ class SimulationEngine:
                         },
                     )
                 else:
-                    # If not changed, slightly increase confidence
-                    agent.confidence = min(1.0, agent.confidence + 0.05)
-                    # Send a simple deterministic message for stable opinion
-                    explanation = _human_reasoning(agent, iteration, influence_weights, False)
+                    # Confidence adjustment based on alignment strength
+                    if agent.current_opinion == "neutral":
+                        agent.neutral_streak += 1
+                        decay = 0.04 + min(0.04, diff / 2)
+                        if agent.neutral_streak >= 2:
+                            decay += 0.03
+                        agent.confidence = max(0.2, agent.confidence - decay)
+                    elif agent.current_opinion == top_opinion:
+                        agent.neutral_streak = 0
+                        agent.confidence = min(1.0, agent.confidence + 0.06 + min(0.08, diff / 2))
+                    else:
+                        agent.neutral_streak = 0
+                        agent.confidence = max(0.25, agent.confidence - 0.05)
+                    # Generate reasoning for stable opinion (LLM sometimes, otherwise human)
+                    if random.random() < 0.8:
+                        try:
+                            explanation = await self._llm_reasoning(
+                                agent,
+                                agent.current_opinion,
+                                agent.current_opinion,
+                                influence_weights,
+                                False,
+                                research_summary,
+                                language,
+                                _idea_label(),
+                                peer_label,
+                            )
+                        except Exception:
+                            explanation = _human_reasoning(agent, iteration, influence_weights, False)
+                    else:
+                        explanation = _human_reasoning(agent, iteration, influence_weights, False)
+                    if _is_template_message(explanation):
+                        explanation = _human_reasoning(agent, iteration, influence_weights, False)
+                    explanation = _dedupe_message(explanation, agent, iteration)
                     agent.record_reasoning_step(
                         iteration=iteration,
                         message=explanation,
@@ -524,6 +703,40 @@ class SimulationEngine:
                     if agent.current_opinion != flip_to:
                         agent.current_opinion = flip_to
                         agent.confidence = max(0.3, agent.confidence - 0.1)
+
+            # If still all-neutral, force a small split to keep realism
+            if all(agent.current_opinion == "neutral" for agent in agents):
+                sorted_agents = sorted(agents, key=_opinion_score, reverse=True)
+                swing = max(1, len(agents) // 8)
+                for agent in sorted_agents[:swing]:
+                    agent.current_opinion = "accept"
+                for agent in sorted_agents[-swing:]:
+                    agent.current_opinion = "reject"
+
+            # External noise: occasional wild-card shift with a human explanation
+            if random.random() < 0.15:
+                wild_agent = random.choice(agents)
+                wild_agent.current_opinion = random.choice(["accept", "reject"])
+                wild_agent.confidence = max(0.3, wild_agent.confidence - 0.05)
+                wild_message = (
+                    "سمعت أخباراً متضاربة اليوم جعلتني أعيد التفكير في مخاطر المشروع."
+                    if language == "ar"
+                    else "I heard mixed reports today that made me reconsider the project risks."
+                )
+                wild_agent.record_reasoning_step(
+                    iteration=iteration,
+                    message=wild_message,
+                    triggered_by="external_event",
+                    opinion_change=None,
+                )
+                await emitter(
+                    "reasoning_step",
+                    {
+                        "agent_id": wild_agent.agent_id,
+                        "iteration": iteration,
+                        "message": wild_message,
+                    },
+                )
 
             # Phase 4: Emit aggregated metrics
 
