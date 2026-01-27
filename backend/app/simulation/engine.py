@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from typing import Callable, Dict, List, Any
+from typing import Callable, Dict, List, Any, Tuple
 
 from ..core.dataset_loader import Dataset
 from ..models.schemas import ReasoningStep
@@ -52,20 +52,41 @@ class SimulationEngine:
         Returns:
             Final aggregated metrics summarising the simulation outcome.
         """
-        # Determine number of agents (19–24 inclusive)
-        num_agents = random.randint(19, 24)
+        # Determine number of agents (18-24 inclusive)
+        num_agents = random.randint(18, 24)
         agents: List[Agent] = []
-        category_ids = list(self.dataset.category_by_id.keys())
-        # Spawn agents by randomly picking categories and templates
+        template_pool: List[Tuple[Any, Any]] = []
+        for category_id, templates in self.dataset.templates_by_category.items():
+            category = self.dataset.category_by_id.get(category_id)
+            if not category or not templates:
+                continue
+            for template in templates:
+                template_pool.append((template, category))
+        if not template_pool:
+            raise ValueError("No persona templates available to spawn agents.")
+        # Spawn agents by randomly sampling from available templates
         for _ in range(num_agents):
-            category_id = random.choice(category_ids)
-            templates = self.dataset.templates_by_category.get(category_id)
-            if not templates:
-                continue  # skip if no templates for this category
-            template = random.choice(templates)
-            agent = Agent(template=template, category=self.dataset.category_by_id[category_id], initial_opinion="neutral")
+            template, category = random.choice(template_pool)
+            agent = Agent(template=template, category=category, initial_opinion="neutral")
             agents.append(agent)
-        # Determine number of iterations (3–6 inclusive)
+
+        def _agent_snapshot(agent: Agent) -> Dict[str, Any]:
+            return {
+                "agent_id": agent.agent_id,
+                "category_id": agent.category_id,
+                "opinion": agent.current_opinion,
+                "confidence": agent.confidence,
+            }
+
+        await emitter(
+            "agents",
+            {
+                "iteration": 0,
+                "total_agents": len(agents),
+                "agents": [_agent_snapshot(agent) for agent in agents],
+            },
+        )
+        # Determine number of iterations (3-6 inclusive)
         num_iterations = random.randint(3, 6)
         # Main simulation loop
         for iteration in range(1, num_iterations + 1):
@@ -129,6 +150,15 @@ class SimulationEngine:
                     "total_agents": metrics["total_agents"],
                     "per_category": metrics["per_category"],
                     "iteration": iteration,
+                    "total_iterations": num_iterations,
+                },
+            )
+            await emitter(
+                "agents",
+                {
+                    "iteration": iteration,
+                    "total_agents": len(agents),
+                    "agents": [_agent_snapshot(agent) for agent in agents],
                 },
             )
             # Small delay to simulate asynchronous processing and allow UI to update

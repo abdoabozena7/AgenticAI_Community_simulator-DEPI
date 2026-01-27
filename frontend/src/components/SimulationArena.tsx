@@ -169,7 +169,7 @@ export function SimulationArena({
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm text-muted-foreground">Iteration Progress</span>
                 <span className="text-sm font-mono text-primary">
-                  {currentIteration} / {totalIterations || '∞'}
+                  {currentIteration} / {totalIterations || 'inf'}
                 </span>
               </div>
               <div className="h-1.5 bg-secondary rounded-full overflow-hidden">

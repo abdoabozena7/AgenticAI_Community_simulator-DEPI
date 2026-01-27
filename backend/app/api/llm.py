@@ -1,0 +1,256 @@
+"""
+LLM endpoints backed by a local Ollama server.
+
+Includes free-form generation and schema extraction.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from typing import Optional, Dict, Any
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+from ..core.ollama_client import generate_ollama
+
+
+router = APIRouter(prefix="/llm")
+logger = logging.getLogger("llm_api")
+
+
+class GenerateRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+    system: Optional[str] = None
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+
+
+@router.post("/generate")
+async def generate_text(payload: GenerateRequest) -> dict:
+    try:
+        text = await generate_ollama(
+            prompt=payload.prompt,
+            system=payload.system,
+            temperature=payload.temperature,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"text": text}
+
+
+# --- Schema extraction (chat-first flow) ---
+
+class ExtractRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+    schema: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ExtractResponse(BaseModel):
+    idea: Optional[str] = None
+    country: Optional[str] = None
+    city: Optional[str] = None
+    category: Optional[str] = None
+    target_audience: list[str] = Field(default_factory=list)
+    goals: list[str] = Field(default_factory=list)
+    risk_appetite: Optional[float] = None
+    idea_maturity: Optional[str] = None
+    missing: list[str] = Field(default_factory=list)
+    question: Optional[str] = None
+
+
+PROMPT_TEMPLATE = """You extract structured fields from chat messages.
+
+Required fields: idea, country, city, category, target_audience, goals.
+
+Allowed options (choose the closest match):
+- category: technology, healthcare, finance, education, e-commerce, entertainment, social, b2b saas, consumer apps, hardware
+- target_audience: Gen Z (18-24), Millennials (25-40), Gen X (41-56), Boomers (57-75), Developers, Enterprises, SMBs, Consumers, Students, Professionals
+- goals: Market Validation, Funding Readiness, User Acquisition, Product-Market Fit, Competitive Analysis, Growth Strategy
+- idea_maturity: concept, prototype, mvp, launched
+
+Hard requirements:
+- If all required fields are present/confident, missing MUST be [] and question MUST be null.
+- Do NOT ask for a field that you can reliably extract from the message.
+- If category/target_audience/goals are not explicit, infer the best-fit options from the idea and choose from the list above.
+- If a required field is missing or unclear, include its name in "missing" and provide a brief, human, context-rich follow-up in "question" (Arabic allowed).
+- Prefer proper names (e.g., "Egypt", "Cairo", "Giza"). Handle "City, Country" patterns.
+- Return JSON only, no prose.
+
+Examples:
+Input: "I want to launch an AI legal assistant in Cairo, Egypt"
+Output:
+{{"idea":"AI legal assistant","country":"Egypt","city":"Cairo","category":"technology","target_audience":["Consumers"],"goals":["Market Validation"],"risk_appetite":0.5,"idea_maturity":"concept","missing":[],"question":null}}
+
+Input: "I want to launch an AI app in Egypt"
+Output:
+{{"idea":"AI app","country":"Egypt","city":null,"category":"technology","target_audience":["Consumers"],"goals":["Market Validation"],"risk_appetite":0.5,"idea_maturity":"concept","missing":["city"],"question":"Which city in Egypt should we focus on? Location changes market culture and behavior."}}
+
+Current schema (may be partial):
+{schema_json}
+
+User message:
+{message}
+
+Return JSON with keys: idea, country, city, category, target_audience, goals, risk_appetite, idea_maturity, missing (array), question (string or null)."""
+
+
+COUNTRY_ALIASES = {
+    "egypt": "Egypt",
+    "مصر": "Egypt",
+    "ksa": "Saudi Arabia",
+    "saudi": "Saudi Arabia",
+    "السعودية": "Saudi Arabia",
+    "uae": "United Arab Emirates",
+    "emirates": "United Arab Emirates",
+    "الإمارات": "United Arab Emirates",
+}
+
+CITY_ALIASES = {
+    "cairo": "Cairo",
+    "القاهرة": "Cairo",
+    "giza": "Giza",
+    "الجيزة": "Giza",
+    "alexandria": "Alexandria",
+    "الإسكندرية": "Alexandria",
+}
+
+
+def _norm_text(value: Optional[str]) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    v = value.strip()
+    return v or None
+
+
+def _normalize_country(value: Optional[str]) -> Optional[str]:
+    v = _norm_text(value)
+    if not v:
+        return None
+    key = v.lower()
+    return COUNTRY_ALIASES.get(key, v.title())
+
+
+def _normalize_city(value: Optional[str]) -> Optional[str]:
+    v = _norm_text(value)
+    if not v:
+        return None
+    key = v.lower()
+    return CITY_ALIASES.get(key, v.title())
+
+
+def _extract_from_message(message: str) -> Dict[str, Optional[str]]:
+    # Simple "City, Country" heuristic
+    match = re.search(r"in\s+([a-zA-Z\u0600-\u06FF\\s]+?),\s*([a-zA-Z\u0600-\u06FF\\s]+?)([\\.!]|$)", message)
+    if match:
+        return {"city": _normalize_city(match.group(1)), "country": _normalize_country(match.group(2))}
+    return {}
+
+
+def _safe_json_loads(raw: str) -> Dict[str, Any]:
+    from json import loads, JSONDecodeError
+
+    try:
+        return loads(raw)
+    except JSONDecodeError:
+        # Try to extract a JSON object from surrounding text
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return loads(raw[start : end + 1])
+        raise
+
+
+@router.post("/extract", response_model=ExtractResponse)
+async def extract_schema(payload: ExtractRequest) -> ExtractResponse:
+    from json import dumps, loads
+
+    logger.info("extract_schema: message_len=%s", len(payload.message or ""))
+    logger.info("extract_schema: schema_in=%s", payload.schema)
+
+    prompt = PROMPT_TEMPLATE.format(
+        schema_json=dumps(payload.schema, ensure_ascii=False),
+        message=payload.message,
+    )
+    try:
+        raw = await generate_ollama(prompt, temperature=0.2, response_format="json")
+        logger.info("extract_schema: raw_llm=%s", raw)
+        data = _safe_json_loads(raw)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM extraction failed: {exc}")
+
+    # Normalize scalars
+    idea = _norm_text(data.get("idea"))
+    country = _normalize_country(data.get("country"))
+    city = _normalize_city(data.get("city"))
+    category = _norm_text(data.get("category"))
+    idea_maturity = _norm_text(data.get("idea_maturity"))
+    question = _norm_text(data.get("question"))
+    # Lists
+    target_audience = data.get("target_audience") if isinstance(data.get("target_audience"), list) else []
+    goals = data.get("goals") if isinstance(data.get("goals"), list) else []
+    # Risk appetite
+    risk_appetite = data.get("risk_appetite")
+    if isinstance(risk_appetite, (int, float)):
+        if risk_appetite > 1:
+            risk_appetite = risk_appetite / 100.0
+    else:
+        risk_appetite = None
+
+    # Heuristic fallback from message if LLM omitted
+    inferred = _extract_from_message(payload.message)
+    country = country or inferred.get("country") or _normalize_country(payload.schema.get("country"))
+    city = city or inferred.get("city") or _normalize_city(payload.schema.get("city"))
+    idea = idea or _norm_text(payload.schema.get("idea"))
+    category = category or _norm_text(payload.schema.get("category"))
+    idea_maturity = idea_maturity or _norm_text(payload.schema.get("idea_maturity"))
+    if not target_audience and isinstance(payload.schema.get("target_audience"), list):
+        target_audience = payload.schema.get("target_audience") or []
+    if not goals and isinstance(payload.schema.get("goals"), list):
+        goals = payload.schema.get("goals") or []
+    if risk_appetite is None:
+        ra = payload.schema.get("risk_appetite")
+        if isinstance(ra, (int, float)):
+            risk_appetite = ra
+
+    # Compute missing required fields deterministically
+    missing = []
+    if not idea:
+        missing.append("idea")
+    if not country:
+        missing.append("country")
+    if not city:
+        missing.append("city")
+    if not category:
+        missing.append("category")
+    if not target_audience:
+        missing.append("target_audience")
+    if not goals:
+        missing.append("goals")
+    if not missing:
+        question = None
+
+    logger.info(
+        "extract_schema: parsed idea=%s country=%s city=%s category=%s target_audience=%s goals=%s missing=%s question=%s",
+        idea,
+        country,
+        city,
+        category,
+        target_audience,
+        goals,
+        missing,
+        question,
+    )
+
+    return ExtractResponse(
+        idea=idea,
+        country=country,
+        city=city,
+        category=category,
+        target_audience=target_audience,
+        goals=goals,
+        risk_appetite=risk_appetite,
+        idea_maturity=idea_maturity,
+        missing=missing,
+        question=question,
+    )

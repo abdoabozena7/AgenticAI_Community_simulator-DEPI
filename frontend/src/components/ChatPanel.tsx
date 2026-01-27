@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, MapPin, Sparkles } from 'lucide-react';
+import { Send, Bot, User, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -10,7 +10,6 @@ interface ChatPanelProps {
   messages: ChatMessage[];
   reasoningFeed: ReasoningMessage[];
   onSendMessage: (message: string) => void;
-  onLocationSubmit: (country: string, city: string) => void;
   isWaitingForCity?: boolean;
   isWaitingForCountry?: boolean;
 }
@@ -19,7 +18,6 @@ export function ChatPanel({
   messages,
   reasoningFeed,
   onSendMessage,
-  onLocationSubmit,
   isWaitingForCity = false,
   isWaitingForCountry = false,
 }: ChatPanelProps) {
@@ -37,17 +35,7 @@ export function ChatPanel({
     e.preventDefault();
     if (!inputValue.trim()) return;
 
-    if (isWaitingForCity || isWaitingForCountry) {
-      // Handle location input
-      const parts = inputValue.split(',').map(s => s.trim());
-      if (parts.length >= 2) {
-        onLocationSubmit(parts[1], parts[0]);
-      } else {
-        onSendMessage(inputValue);
-      }
-    } else {
-      onSendMessage(inputValue);
-    }
+    onSendMessage(inputValue);
     setInputValue('');
   };
 
@@ -141,15 +129,6 @@ export function ChatPanel({
               ))
             )}
 
-            {/* Location prompt indicator */}
-            {(isWaitingForCity || isWaitingForCountry) && (
-              <div className="flex items-center gap-2 p-3 rounded-lg bg-warning/10 border border-warning/20">
-                <MapPin className="w-4 h-4 text-warning" />
-                <span className="text-sm text-warning">
-                  {isWaitingForCity ? 'Please specify a city' : 'Please specify a country'}
-                </span>
-              </div>
-            )}
           </div>
         ) : (
           <div className="space-y-3">
@@ -192,10 +171,10 @@ export function ChatPanel({
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             placeholder={
-              isWaitingForCity
-                ? "Enter city, country..."
-                : isWaitingForCountry
+              isWaitingForCountry
                 ? "Enter country..."
+                : isWaitingForCity
+                ? "Enter city..."
                 : "Describe your idea..."
             }
             className="flex-1 bg-secondary border-border/50 focus:border-primary/50"

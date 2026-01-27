@@ -1,4 +1,4 @@
-export type MessageType = 'reasoning_step' | 'metrics';
+export type MessageType = 'reasoning_step' | 'metrics' | 'agents';
 
 export interface ReasoningStepEvent {
   type: 'reasoning_step';
@@ -17,11 +17,26 @@ export interface MetricsEvent {
   acceptance_rate: number;
   total_agents: number;
   iteration: number;
+  total_iterations?: number;
   // Backend includes per-category acceptance counts only.
   per_category?: Record<string, number>;
 }
 
-export type WebSocketEvent = ReasoningStepEvent | MetricsEvent;
+export interface AgentSnapshot {
+  agent_id: string;
+  category_id: string;
+  opinion: 'accept' | 'reject' | 'neutral';
+  confidence?: number;
+}
+
+export interface AgentsEvent {
+  type: 'agents';
+  agents: AgentSnapshot[];
+  iteration: number;
+  total_agents?: number;
+}
+
+export type WebSocketEvent = ReasoningStepEvent | MetricsEvent | AgentsEvent;
 
 type EventCallback = (event: WebSocketEvent) => void;
 

@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .core.dataset_loader import load_dataset
 from .api import routes as simulation_routes
 from .api import websocket as websocket_module
+from .api import llm as llm_routes
 
 
 def create_app() -> FastAPI:
@@ -31,6 +32,7 @@ def create_app() -> FastAPI:
     # Include API routes
     app.include_router(simulation_routes.router)
     app.include_router(websocket_module.router)
+    app.include_router(llm_routes.router)
 
     @app.on_event("startup")
     async def startup_event() -> None:
