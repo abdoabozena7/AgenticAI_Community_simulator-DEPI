@@ -1,194 +1,223 @@
-import { useRef, useEffect, useState } from 'react';
-import { RotateCcw, Maximize2, Minimize2 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Agent, SimulationStatus } from '@/types/simulation';
-import { cn } from '@/lib/utils';
+import { useRef, useMemo } from 'react';
+import { Canvas, useFrame } from '@react-three/fiber';
+import { OrbitControls, PerspectiveCamera, Line, Sphere } from '@react-three/drei';
+import * as THREE from 'three';
+import { Agent, Connection } from '@/types/simulation';
 
-interface SimulationArenaProps {
-  agents: Map<string, Agent>;
-  status: SimulationStatus;
-  currentIteration: number;
-  totalIterations: number;
-  onReset: () => void;
-  onToggleSpeed?: () => void;
-  speed?: number;
-  language: 'ar' | 'en';
+interface AgentNodeProps {
+  agent: Agent;
+  onClick?: (agent: Agent) => void;
 }
 
-export function SimulationArena({
-  agents,
-  status,
-  currentIteration,
-  totalIterations,
-  onReset,
-  onToggleSpeed,
-  speed = 1,
-  language,
-}: SimulationArenaProps) {
-  const canvasRef = useRef<HTMLDivElement>(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-
-  // Placeholder for Three.js integration
-  useEffect(() => {
-    // Three.js scene initialization will go here
-    // For now, we render a placeholder visualization
-  }, []);
-
-  const getStatusColor = (agentStatus: Agent['status']) => {
-    switch (agentStatus) {
-      case 'accepted': return 'bg-success';
-      case 'rejected': return 'bg-destructive';
-      case 'thinking': return 'bg-warning animate-pulse';
-      default: return 'bg-agent-neutral';
-    }
-  };
-
-  const agentArray = Array.from(agents.values());
+const AgentNode = ({ agent, onClick }: AgentNodeProps) => {
+  const meshRef = useRef<THREE.Mesh>(null);
+  const glowRef = useRef<THREE.Mesh>(null);
   
-  // Create a grid visualization of agents
-  const gridSize = Math.ceil(Math.sqrt(Math.max(agentArray.length, 100)));
+  const color = useMemo(() => {
+    switch (agent.status) {
+      case 'accepted': return '#22c55e';
+      case 'rejected': return '#ef4444';
+      case 'reasoning': return '#a855f7';
+      default: return '#6b7280';
+    }
+  }, [agent.status]);
+
+  useFrame((state) => {
+    if (meshRef.current) {
+      meshRef.current.rotation.y += 0.01;
+    }
+    if (glowRef.current && agent.status !== 'neutral') {
+      const scale = 1 + Math.sin(state.clock.elapsedTime * 2) * 0.1;
+      glowRef.current.scale.setScalar(scale);
+    }
+  });
 
   return (
-    <div className={cn(
-      "glass-panel h-full flex flex-col",
-      isFullscreen && "fixed inset-4 z-50"
-    )}>
-      {/* Header Controls */}
-      <div className="flex items-center justify-between p-4 border-b border-border/50">
-        <div className="flex items-center gap-4">
-          <h2 className="text-lg font-semibold text-foreground">
-            {language === 'ar' ? 'ساحة المحاكاة' : 'Simulation Arena'}
-          </h2>
-          <div className="flex items-center gap-2">
-            <span className={cn(
-              "w-2 h-2 rounded-full",
-              status === 'running' ? "bg-success animate-pulse" :
-              status === 'paused' ? "bg-warning" :
-              status === 'completed' ? "bg-primary" :
-              "bg-muted-foreground"
-            )} />
-            <span className="text-sm text-muted-foreground">
-              {language === 'ar'
-                ? ({ running: 'يعمل', paused: 'متوقف', completed: 'مكتمل', idle: 'جاهز', configuring: 'تهيئة', error: 'خطأ' } as Record<SimulationStatus, string>)[status]
-                : status}
-            </span>
-          </div>
-        </div>
-        
-        <div className="flex items-center gap-2">
-          {/* Pause/Resume not supported by the current backend contract */}
-          {onToggleSpeed && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onToggleSpeed}
-              className="text-muted-foreground hover:text-foreground"
-            >
-              {language === 'ar' ? `السرعة ${speed}x` : `Speed ${speed}x`}
-            </Button>
-          )}
-          
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onReset}
-            className="text-muted-foreground hover:text-foreground"
-          >
-            <RotateCcw className="w-4 h-4 mr-2" />
-            {language === 'ar' ? 'إعادة' : 'Reset'}
-          </Button>
-
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => setIsFullscreen(!isFullscreen)}
-            className="text-muted-foreground hover:text-foreground"
-          >
-            {isFullscreen ? (
-              <Minimize2 className="w-4 h-4" />
-            ) : (
-              <Maximize2 className="w-4 h-4" />
-            )}
-          </Button>
-        </div>
-      </div>
-
-      {/* Three.js Canvas Placeholder */}
-      <div 
-        ref={canvasRef} 
-        className="flex-1 simulation-canvas relative overflow-hidden"
-      >
-        {/* Grid background pattern */}
-        <div 
-          className="absolute inset-0 opacity-20"
-          style={{
-            backgroundImage: 'linear-gradient(hsl(var(--border) / 0.5) 1px, transparent 1px), linear-gradient(90deg, hsl(var(--border) / 0.5) 1px, transparent 1px)',
-            backgroundSize: '40px 40px',
-          }}
-        />
-
-        {/* Central glow effect */}
-        <div className="absolute inset-0 pointer-events-none">
-          <div 
-            className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[60%] h-[60%] rounded-full opacity-30"
-            style={{
-              background: 'radial-gradient(ellipse at center, hsl(var(--primary) / 0.3) 0%, transparent 70%)',
-            }}
+    <group position={agent.position}>
+      {/* Glow effect for non-neutral agents */}
+      {agent.status !== 'neutral' && (
+        <Sphere ref={glowRef} args={[0.25, 16, 16]}>
+          <meshBasicMaterial
+            color={color}
+            transparent
+            opacity={0.2}
           />
+        </Sphere>
+      )}
+      
+      {/* Main node */}
+      <Sphere
+        ref={meshRef}
+        args={[0.15, 32, 32]}
+        onClick={() => onClick?.(agent)}
+      >
+        <meshStandardMaterial
+          color={color}
+          emissive={color}
+          emissiveIntensity={agent.status !== 'neutral' ? 0.5 : 0.1}
+          metalness={0.8}
+          roughness={0.2}
+        />
+      </Sphere>
+    </group>
+  );
+};
+
+interface ConnectionLineProps {
+  from: [number, number, number];
+  to: [number, number, number];
+  active: boolean;
+  pulseProgress: number;
+}
+
+const ConnectionLine = ({ from, to, active, pulseProgress }: ConnectionLineProps) => {
+  const points = useMemo(() => [
+    new THREE.Vector3(...from),
+    new THREE.Vector3(...to),
+  ], [from, to]);
+
+  const pulsePosition = useMemo(() => {
+    if (!active) return null;
+    const start = new THREE.Vector3(...from);
+    const end = new THREE.Vector3(...to);
+    return start.lerp(end, pulseProgress);
+  }, [from, to, active, pulseProgress]);
+
+  return (
+    <group>
+      <Line
+        points={points}
+        color={active ? '#ffffff' : '#374151'}
+        lineWidth={active ? 2 : 0.5}
+        transparent
+        opacity={active ? 0.9 : 0.3}
+      />
+      
+      {/* White light pulse traveling along the connection */}
+      {pulsePosition && (
+        <group position={pulsePosition}>
+          {/* Glow effect */}
+          <Sphere args={[0.15, 16, 16]}>
+            <meshBasicMaterial color="#ffffff" transparent opacity={0.3} />
+          </Sphere>
+          {/* Core pulse */}
+          <Sphere args={[0.06, 16, 16]}>
+            <meshBasicMaterial color="#ffffff" />
+          </Sphere>
+        </group>
+      )}
+    </group>
+  );
+};
+
+interface NeuralNetworkProps {
+  agents: Agent[];
+  activePulses: Connection[];
+}
+
+const NeuralNetwork = ({ agents, activePulses }: NeuralNetworkProps) => {
+  const groupRef = useRef<THREE.Group>(null);
+  
+  useFrame((state) => {
+    if (groupRef.current) {
+      groupRef.current.rotation.y = state.clock.elapsedTime * 0.05;
+    }
+  });
+
+  const connections = useMemo(() => {
+    const conns: { from: Agent; to: Agent; key: string }[] = [];
+    agents.forEach(agent => {
+      agent.connections.forEach(targetId => {
+        const target = agents.find(a => a.id === targetId);
+        if (target) {
+          conns.push({ from: agent, to: target, key: `${agent.id}-${targetId}` });
+        }
+      });
+    });
+    return conns;
+  }, [agents]);
+
+  return (
+    <group ref={groupRef}>
+      {/* Connections */}
+      {connections.map(({ from, to, key }) => {
+        const pulse = activePulses.find(p => p.from === from.id && p.to === to.id);
+        return (
+          <ConnectionLine
+            key={key}
+            from={from.position}
+            to={to.position}
+            active={!!pulse?.active}
+            pulseProgress={pulse?.pulseProgress || 0}
+          />
+        );
+      })}
+      
+      {/* Agent nodes */}
+      {agents.map(agent => (
+        <AgentNode key={agent.id} agent={agent} />
+      ))}
+    </group>
+  );
+};
+
+interface SimulationArenaProps {
+  agents: Agent[];
+  activePulses: Connection[];
+}
+
+export const SimulationArena = ({ agents, activePulses }: SimulationArenaProps) => {
+  return (
+    <div className="w-full h-full relative">
+      {/* Legend */}
+      <div className="absolute top-4 left-4 z-10 flex flex-col gap-2 p-3 rounded-lg bg-card/80 backdrop-blur-sm border border-border">
+        <div className="flex items-center gap-2">
+          <div className="w-3 h-3 rounded-full bg-[#22c55e]" />
+          <span className="text-xs text-muted-foreground">Accepted</span>
         </div>
-
-        {/* Agent Visualization */}
-        {status === 'idle' ? (
-          <div className="absolute inset-0 flex items-center justify-center">
-            <div className="text-center">
-              <div className="w-24 h-24 mx-auto mb-6 rounded-full border-2 border-dashed border-primary/30 flex items-center justify-center">
-                <div className="w-16 h-16 rounded-full border border-primary/50 flex items-center justify-center animate-pulse">
-                  <div className="w-8 h-8 rounded-full bg-primary/20" />
-                </div>
-              </div>
-              <h3 className="text-xl font-medium text-foreground mb-2">Ready to Simulate</h3>
-              <p className="text-sm text-muted-foreground max-w-[300px]">
-                {language === 'ar'
-                  ? 'أكمل إعداد الفكرة من الشات لبدء المحاكاة'
-                  : 'Configure your idea in the chat panel to start the multi-agent simulation'}
-              </p>
-            </div>
-          </div>
-        ) : (
-          <div className="absolute inset-0 p-8 flex items-center justify-center">
-            <div 
-              className="grid gap-1.5 max-w-full max-h-full"
-              style={{
-                gridTemplateColumns: `repeat(${Math.min(gridSize, 15)}, minmax(0, 1fr))`,
-              }}
-            >
-              {agentArray.slice(0, 225).map((agent) => (
-                <div
-                  key={agent.id}
-                  className={cn(
-                    "agent-dot transition-colors duration-300",
-                    getStatusColor(agent.status)
-                  )}
-                  title={`Agent ${agent.id.slice(0, 8)} - ${agent.status}`}
-                />
-              ))}
-              {agentArray.length === 0 && (status === 'running' || status === 'paused') && (
-                // Placeholder agents for demo
-                Array.from({ length: 100 }).map((_, i) => (
-                  <div
-                    key={i}
-                    className="agent-dot bg-agent-neutral opacity-50"
-                    style={{ animationDelay: `${i * 0.02}s` }}
-                  />
-                ))
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Iteration indicator overlay */}
-       
+        <div className="flex items-center gap-2">
+          <div className="w-3 h-3 rounded-full bg-[#ef4444]" />
+          <span className="text-xs text-muted-foreground">Rejected</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="w-3 h-3 rounded-full bg-[#6b7280]" />
+          <span className="text-xs text-muted-foreground">Neutral</span>
+        </div>
       </div>
+      
+      {/* Stats overlay */}
+      <div className="absolute top-4 right-4 z-10 p-3 rounded-lg bg-card/80 backdrop-blur-sm border border-border">
+        <div className="text-xs text-muted-foreground">
+          {agents.length} Nodes ? {agents.reduce((acc, a) => acc + a.connections.length, 0)} Connections
+        </div>
+      </div>
+      
+      <Canvas>
+        <PerspectiveCamera makeDefault position={[0, 0, 12]} fov={60} />
+        <OrbitControls 
+          enablePan={false}
+          minDistance={5}
+          maxDistance={20}
+          autoRotate={false}
+        />
+        
+        {/* Lighting */}
+        <ambientLight intensity={0.4} />
+        <pointLight position={[10, 10, 10]} intensity={1} color="#22c55e" />
+        <pointLight position={[-10, -10, -10]} intensity={0.5} color="#a855f7" />
+        <pointLight position={[0, 10, 0]} intensity={0.3} color="#ffffff" />
+        
+        {/* Neural Network */}
+        <NeuralNetwork agents={agents} activePulses={activePulses} />
+        
+        {/* Background sphere */}
+        <Sphere args={[25, 64, 64]}>
+          <meshBasicMaterial 
+            color="#0a0a1a" 
+            side={THREE.BackSide}
+          />
+        </Sphere>
+      </Canvas>
     </div>
   );
-}
+};

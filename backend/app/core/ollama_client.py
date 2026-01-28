@@ -112,12 +112,34 @@ async def generate_ollama(
     if response_format:
         payload["format"] = response_format
 
-    try:
-        result = await asyncio.to_thread(_post_json, f"{api_base}/api/generate", payload)
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
-        raise RuntimeError(f"Ollama request failed: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Ollama response was not valid JSON: {exc}") from exc
+    retries = 2
+    delay = 0.8
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            result = await asyncio.to_thread(_post_json, f"{api_base}/api/generate", payload)
+            last_exc = None
+            break
+        except urllib.error.HTTPError as exc:
+            last_exc = exc
+            if exc.code == 429 and attempt < retries:
+                await asyncio.sleep(delay * (attempt + 1))
+                continue
+            raise RuntimeError(f"Ollama request failed: {exc}") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_exc = exc
+            if attempt < retries:
+                await asyncio.sleep(delay * (attempt + 1))
+                continue
+            raise RuntimeError(f"Ollama request failed: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            last_exc = exc
+            if attempt < retries:
+                await asyncio.sleep(delay * (attempt + 1))
+                continue
+            raise RuntimeError(f"Ollama response was not valid JSON: {exc}") from exc
+    if last_exc is not None:
+        raise RuntimeError(f"Ollama request failed: {last_exc}") from last_exc
 
     response = result.get("response")
     if not isinstance(response, str) or not response.strip():

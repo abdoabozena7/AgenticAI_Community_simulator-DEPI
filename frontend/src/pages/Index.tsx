@@ -1140,14 +1140,8 @@ If rejection is about competition or location, suggest searching for a better lo
         <div className="flex flex-col p-4 gap-4 overflow-hidden min-h-0">
           <div className="flex-1">
         <SimulationArena
-          agents={simulation.agents}
-          status={simulation.status}
-          currentIteration={simulation.metrics.currentIteration}
-          totalIterations={simulation.metrics.totalIterations}
-          onReset={simulation.stopSimulation}
-          onToggleSpeed={toggleSpeed}
-          speed={simulationSpeed}
-          language={settings.language}
+          agents={Array.from(simulation.agents.values())}
+          activePulses={simulation.activePulses}
         />
           </div>
 

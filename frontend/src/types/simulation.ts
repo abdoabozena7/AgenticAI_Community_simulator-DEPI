@@ -1,9 +1,17 @@
 export interface Agent {
   id: string;
-  status: 'accepted' | 'rejected' | 'neutral' | 'thinking';
-  position: { x: number; y: number; z: number };
+  status: 'accepted' | 'rejected' | 'neutral' | 'thinking' | 'reasoning';
+  position: [number, number, number];
+  connections: string[];
   category: string;
   lastUpdate: number;
+}
+
+export interface Connection {
+  from: string;
+  to: string;
+  active: boolean;
+  pulseProgress: number;
 }
 
 export interface ReasoningMessage {

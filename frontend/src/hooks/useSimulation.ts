@@ -51,13 +51,35 @@ const hashString = (value: string) => {
   return Math.abs(hash);
 };
 
-const createPosition = (seed: string) => {
+const createPosition = (seed: string): [number, number, number] => {
   const base = hashString(seed) || 1;
   const rand = (n: number) => {
     const x = Math.sin(base * n) * 10000;
     return x - Math.floor(x);
   };
-  return { x: rand(1), y: rand(2), z: rand(3) };
+  return [rand(1) * 8 - 4, rand(2) * 8 - 4, rand(3) * 2 - 1];
+};
+
+const buildConnections = (agentIds: string[]) => {
+  const connections = new Map<string, string[]>();
+  const total = agentIds.length;
+  agentIds.forEach((id, idx) => {
+    if (total <= 1) {
+      connections.set(id, []);
+      return;
+    }
+    const picks = 3 + (hashString(`${id}-c`) % 3);
+    const targets = new Set<string>();
+    for (let i = 0; i < picks; i += 1) {
+      const offset = 1 + (hashString(`${id}-${i}`) % (total - 1));
+      const target = agentIds[(idx + offset) % total];
+      if (target && target !== id) {
+        targets.add(target);
+      }
+    }
+    connections.set(id, Array.from(targets));
+  });
+  return connections;
 };
 
 const mapOpinionToStatus = (opinion: string): Agent['status'] => {
@@ -100,9 +122,18 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
           id: agent.agent_id,
           status: mapOpinionToStatus(agent.opinion),
           position: existing?.position ?? createPosition(agent.agent_id),
+          connections: existing?.connections ?? [],
           category: agent.category_id,
           lastUpdate: ts,
         });
+      });
+      const ids = Array.from(nextAgents.keys());
+      const connectionMap = buildConnections(ids);
+      ids.forEach((id) => {
+        const existing = nextAgents.get(id);
+        if (existing) {
+          nextAgents.set(id, { ...existing, connections: connectionMap.get(id) ?? [] });
+        }
       });
       return {
         ...state,
@@ -126,7 +157,7 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
       if (existing) {
         nextAgents.set(event.agent_id, {
           ...existing,
-          status: 'thinking',
+          status: 'reasoning',
           lastUpdate: ts,
         });
       }
@@ -418,10 +449,20 @@ export function useSimulation() {
     dispatch({ type: 'RESET' });
   }, [pollTask]);
 
+  const activePulses = Array.from(state.agents.values()).flatMap((agent, idx) =>
+    agent.connections.map((to) => ({
+      from: agent.id,
+      to,
+      active: state.status === 'running',
+      pulseProgress: ((state.metrics.currentIteration + idx) % 10) / 10,
+    }))
+  );
+
   return {
     ...state,
     error,
     startSimulation,
     stopSimulation,
+    activePulses,
   };
 }
