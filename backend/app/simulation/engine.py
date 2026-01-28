@@ -100,12 +100,13 @@ class SimulationEngine:
             "Rule: Use your professional jargon and concrete trade-offs. "
             "Rule: Do NOT use generic sentences or templates. "
             "Rule: Reference another agent's point if it helps. "
-            "Rule: Mention at least one real constraint from the settings or research context. "
+            "Examples (Arabic): ??? ????? ??? ????? ????? ???????. ??? ????? ?????? ????? ??. ????? ??? ??????? ?? ??????? ?????? "
+            "Rule: Use the settings and research as real-world context, but do NOT list them or show numbers. "
             "Rule: If responding in Arabic, avoid the English words accept/reject/neutral. "
             f"Speak like a human {archetype_lower or 'participant'} {style}. "
             f"Your last thoughts: {memory_context}. "
             f"Research summary: {research_summary}. "
-            f"Influence context: {constraints_summary}. "
+            f"Constraints (do NOT list, just consider): {constraints_summary}. "
             f"Respond in {response_language}. If {response_language} is Arabic, do not use any English words or Latin characters."
         )
         try:
@@ -123,6 +124,12 @@ class SimulationEngine:
             )
             # Truncate to ensure brevity
             explanation = response.strip().split("\n")[0]
+            if response_language == "Arabic":
+                for token in ["?????=", "???????=", "?????=", "?????=", "??????=", "????????="]:
+                    explanation = explanation.replace(token, "")
+            else:
+                for token in ["category=", "audience=", "goals=", "maturity=", "location=", "risk="]:
+                    explanation = explanation.replace(token, "")
             # Only keep first sentence up to 25 words
             words = explanation.split()
             if len(words) > 30:
@@ -263,6 +270,27 @@ class SimulationEngine:
             return "الفكرة"
 
         idea_label_for_llm = _idea_label_localized() if language == "ar" else _idea_label()
+
+        def _research_insight() -> str:
+            if not research_summary:
+                return ""
+            summary = research_summary.lower()
+            city = str(user_context.get('city') or '')
+            if language == 'ar':
+                if any(token in summary for token in ['?????', '??????', '????', '????', '????', '?????? ??????']):
+                    return f"??? ?????? ????? ?? {city}" if city else "??? ?????? ????? ?? ?????"
+                if any(token in summary for token in ['???', '??????', '?????', '??????']):
+                    return "??? ??? ???? ??? ??????"
+                if any(token in summary for token in ['?????', '????', '???', '?????']):
+                    return "??? ????? ??????? ???? ??????"
+            else:
+                if any(token in summary for token in ['competition', 'crowded', 'saturated', 'many similar']):
+                    return f"competition looks high in {city}" if city else "competition looks high"
+                if any(token in summary for token in ['demand', 'interest', 'need']):
+                    return "there seems to be clear demand"
+                if any(token in summary for token in ['risk', 'regulation', 'compliance']):
+                    return "regulatory risk looks material"
+            return ""
 
         def _constraints_summary() -> str:
             category = str(user_context.get("category") or "")
@@ -433,6 +461,7 @@ class SimulationEngine:
             category = _friendly_category(agent.category_id)
             archetype = agent.archetype_name or category
             vocab = _persona_vocab(archetype, category, language)
+            insight = _research_insight()
             focal = _pick_phrase(f"{agent.agent_id}-dedupe-{iteration}", vocab)
             if language == "ar":
                 message = f"{message} مع تركيز خاص على {focal}."
@@ -445,6 +474,7 @@ class SimulationEngine:
             category = _friendly_category(speaker.category_id)
             archetype = speaker.archetype_name or category
             vocab = _persona_vocab(archetype, category, language)
+            insight = _research_insight()
             focal = _pick_phrase(f"{speaker.agent_id}-debate-{iteration}", vocab) if vocab else _idea_concerns()
             other_tag = f"Agent {other.agent_id[:4]}" if language != "ar" else f"الوكيل {other.agent_id[:4]}"
             constraints = _constraints_summary()
@@ -531,6 +561,7 @@ class SimulationEngine:
                 ],
             )
             vocab = _persona_vocab(archetype, category, language)
+            insight = _research_insight()
             focal = _pick_phrase(f"{agent.agent_id}-vocab-{iteration}", vocab) if vocab else _idea_concerns()
             peer = _pick_phrase(
                 f"{agent.agent_id}-peer-{iteration}",
