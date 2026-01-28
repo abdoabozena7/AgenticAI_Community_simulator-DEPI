@@ -87,7 +87,7 @@ const ConnectionLine = ({ from, to, active, pulseProgress }: ConnectionLineProps
     <group>
       <Line
         points={points}
-        color={active ? '#ffffff' : '#374151'}
+        color={active ? '#ffffff' : '#9ca2ad'}
         lineWidth={active ? 2 : 0.5}
         transparent
         opacity={active ? 0.9 : 0.3}
