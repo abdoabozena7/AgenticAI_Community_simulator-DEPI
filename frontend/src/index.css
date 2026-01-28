@@ -250,3 +250,301 @@
     border-image: var(--gradient-primary) 1;
   }
 }
+
+@layer components {
+  .messages-container {
+    @apply flex-1 overflow-y-auto px-4 py-5 flex flex-col gap-4;
+  }
+
+  .message {
+    max-width: 85%;
+    opacity: 0;
+    transform: translateY(20px) scale(0.95);
+    animation: messageIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  }
+
+  .message.bot {
+    align-self: flex-start;
+  }
+
+  .message.user {
+    align-self: flex-end;
+  }
+
+  .bubble {
+    padding: 12px 16px;
+    border-radius: 16px;
+    font-size: 15px;
+    line-height: 1.6;
+  }
+
+  .message.bot .bubble {
+    background: hsl(var(--card));
+    border-radius: 16px 16px 16px 6px;
+    box-shadow: 0 2px 10px hsl(222 47% 0% / 0.35);
+    border: 1px solid hsl(var(--border));
+  }
+
+  .message.user .bubble {
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+    border-radius: 16px 16px 6px 16px;
+    box-shadow: 0 2px 10px hsl(var(--primary) / 0.35);
+  }
+
+  .thinking-container {
+    max-width: 85%;
+    align-self: flex-start;
+    opacity: 0;
+    animation: messageIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  }
+
+  .thinking-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    background: linear-gradient(90deg, hsl(var(--card)) 0%, hsl(var(--secondary)) 100%);
+    border-bottom: 1px solid hsl(var(--border));
+    cursor: pointer;
+  }
+
+  .thinking-icon {
+    width: 18px;
+    height: 18px;
+    border: 2px solid hsl(var(--primary));
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+
+  .thinking-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: hsl(var(--primary));
+    flex: 1;
+  }
+
+  .thinking-chevron {
+    width: 16px;
+    height: 16px;
+    color: hsl(var(--muted-foreground));
+    transition: transform 0.3s;
+  }
+
+  .thinking-container.expanded .thinking-chevron {
+    transform: rotate(180deg);
+  }
+
+  .thinking-content {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease-out;
+  }
+
+  .thinking-container.expanded .thinking-content {
+    max-height: 220px;
+  }
+
+  .thinking-steps {
+    padding: 12px 16px;
+    font-size: 13px;
+    color: hsl(var(--muted-foreground));
+  }
+
+  .thinking-step {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    opacity: 0;
+    animation: stepFadeIn 0.3s ease forwards;
+  }
+
+  .thinking-step::before {
+    content: "→";
+    color: hsl(var(--primary));
+  }
+
+  .typing-indicator {
+    display: flex;
+    gap: 4px;
+    padding: 12px 16px;
+    background: hsl(var(--card));
+    border-radius: 16px 16px 16px 6px;
+    border: 1px solid hsl(var(--border));
+    max-width: 90px;
+    align-self: flex-start;
+  }
+
+  .typing-dot {
+    width: 8px;
+    height: 8px;
+    background: hsl(var(--muted-foreground));
+    opacity: 0.5;
+    border-radius: 50%;
+    animation: bounce 1.4s ease-in-out infinite;
+  }
+
+  .typing-dot:nth-child(2) {
+    animation-delay: 0.2s;
+  }
+
+  .typing-dot:nth-child(3) {
+    animation-delay: 0.4s;
+  }
+
+  .poll-card,
+  .multi-select-card {
+    max-width: 90%;
+    align-self: flex-start;
+    background: hsl(var(--card));
+    border-radius: 16px 16px 16px 6px;
+    border: 1px solid hsl(var(--border));
+    padding: 14px;
+    opacity: 0;
+    animation: inputExpand 0.3s ease-out forwards;
+  }
+
+  .poll-card p,
+  .multi-select-card p {
+    font-size: 14px;
+    color: hsl(var(--muted-foreground));
+    margin-bottom: 12px;
+  }
+
+  .poll-options,
+  .multi-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .poll-option,
+  .multi-option {
+    padding: 10px 14px;
+    background: hsl(var(--secondary));
+    border: 2px solid transparent;
+    border-radius: 999px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    text-align: start;
+    opacity: 0;
+    animation: pollPopIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  }
+
+  .poll-option:hover,
+  .multi-option:hover {
+    border-color: hsl(var(--primary));
+    background: hsl(var(--primary) / 0.15);
+  }
+
+  .multi-option.selected {
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+    border-color: hsl(var(--primary));
+  }
+
+  .option-label {
+    font-weight: 600;
+  }
+
+  .option-desc {
+    font-size: 12px;
+    opacity: 0.75;
+  }
+
+  .chat-input-container {
+    padding: 16px;
+    background: hsl(var(--card));
+    border-top: 1px solid hsl(var(--border));
+  }
+
+  .chat-input-wrapper {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .chat-input {
+    flex: 1;
+    padding: 12px 16px;
+    border-radius: 999px;
+    border: 1px solid hsl(var(--border));
+    background: hsl(var(--background));
+  }
+
+  .send-btn {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+  }
+}
+
+@keyframes messageIn {
+  0% {
+    opacity: 0;
+    transform: translateY(20px) scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes inputExpand {
+  0% {
+    opacity: 0;
+    max-height: 0;
+    transform: translateY(10px);
+  }
+  100% {
+    opacity: 1;
+    max-height: 500px;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pollPopIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  50% {
+    transform: scale(1.02);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes bounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+  }
+  30% {
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes stepFadeIn {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}

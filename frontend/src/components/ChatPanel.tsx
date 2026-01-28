@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Sparkles, Search } from 'lucide-react';
+import { Send, Bot, User, Sparkles, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ChatMessage, ReasoningMessage } from '@/types/simulation';
@@ -44,9 +44,16 @@ export function ChatPanel({
   const [activeTab, setActiveTab] = useState<'chat' | 'reasoning'>('chat');
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const [expandedSources, setExpandedSources] = useState<Record<number, boolean>>({});
-  const [searchDetailsOpen, setSearchDetailsOpen] = useState(false);
+  const [thinkingOpen, setThinkingOpen] = useState(false);
   const [isNearBottom, setIsNearBottom] = useState(true);
+
+  const handleThinkingHeaderClick = () => {
+    if (searchState?.status === 'searching') {
+      setThinkingOpen((prev) => !prev);
+      return;
+    }
+    setActiveTab('reasoning');
+  };
 
   useEffect(() => {
     if (scrollRef.current && isNearBottom) {
@@ -75,21 +82,16 @@ export function ChatPanel({
     }
   };
 
-  const formatTimestamp = (timestamp: number) => {
-    return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  };
-
   return (
     <div className="glass-panel h-full flex flex-col min-h-0">
-      {/* Tab Header */}
       <div className="flex border-b border-border/50">
         <button
           onClick={() => setActiveTab('chat')}
           className={cn(
-            "flex-1 px-4 py-3 text-sm font-medium transition-all relative",
+            'flex-1 px-4 py-3 text-sm font-medium transition-all relative',
             activeTab === 'chat'
-              ? "text-primary"
-              : "text-muted-foreground hover:text-foreground"
+              ? 'text-primary'
+              : 'text-muted-foreground hover:text-foreground'
           )}
           data-testid="tab-chat"
         >
@@ -104,10 +106,10 @@ export function ChatPanel({
         <button
           onClick={() => setActiveTab('reasoning')}
           className={cn(
-            "flex-1 px-4 py-3 text-sm font-medium transition-all relative",
+            'flex-1 px-4 py-3 text-sm font-medium transition-all relative',
             activeTab === 'reasoning'
-              ? "text-primary"
-              : "text-muted-foreground hover:text-foreground"
+              ? 'text-primary'
+              : 'text-muted-foreground hover:text-foreground'
           )}
           data-testid="tab-reasoning"
         >
@@ -124,9 +126,8 @@ export function ChatPanel({
         </button>
       </div>
 
-      {/* Messages Area */}
       <div
-        className="flex-1 p-4 overflow-y-auto scrollbar-thin"
+        className="messages-container scrollbar-thin"
         ref={scrollRef}
         data-testid={activeTab === 'chat' ? 'chat-messages' : 'reasoning-messages'}
         onScroll={() => {
@@ -138,123 +139,43 @@ export function ChatPanel({
       >
         {activeTab === 'chat' ? (
           <div className="space-y-4">
-            {isThinking && (
-              <button
-                type="button"
-                onClick={() => setActiveTab('reasoning')}
-                className="w-full rounded-lg border border-border/40 bg-secondary/30 px-3 py-2 text-sm text-muted-foreground hover:border-primary/50 hover:bg-primary/5 transition"
-              >
-                {settings.language === 'ar'
-                  ? 'جاري التفكير... اضغط لمشاهدة تفكير الوكلاء'
-                  : 'Thinking... click to view agent reasoning'}
-              </button>
-            )}
-            {searchState && searchState.status !== 'idle' && (
-              <div className="p-3 rounded-lg border border-border/50 bg-secondary/30 space-y-2">
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Search className="w-4 h-4 text-primary" />
-                  {searchState.status === 'searching'
-                    ? (settings.language === 'ar' ? 'جار البحث في الويب...' : 'Searching the web...')
-                    : (settings.language === 'ar' ? 'نتائج البحث' : 'Research results')}
-                  {searchState.isLive === false && (
-                    <span className="text-xs text-warning">
-                      {settings.language === 'ar' ? 'محاكاة بالـ LLM' : 'LLM fallback'}
-                    </span>
-                  )}
+            {(isThinking || (searchState && searchState.status === 'searching')) && (
+              <div className={cn('thinking-container', thinkingOpen && 'expanded')}>
+                <div
+                  className="thinking-header"
+                  onClick={handleThinkingHeaderClick}
+                >
+                  <span className="thinking-icon" />
+                  <span className="thinking-label">
+                    {searchState?.status === 'searching'
+                      ? (settings.language === 'ar' ? 'جاري البحث' : 'Searching')
+                      : (settings.language === 'ar' ? 'جارٍ التفكير' : 'Reasoning')}
+                  </span>
+                  <ChevronDown className="thinking-chevron" />
                 </div>
-                {searchState.status === 'searching' && (
-                  <button
-                    type="button"
-                    onClick={() => setSearchDetailsOpen((prev) => !prev)}
-                    className="text-xs text-primary underline"
-                  >
-                    {settings.language === 'ar' ? 'تفاصيل البحث' : 'Search details'}
-                  </button>
-                )}
-                {searchState.status === 'searching' && searchDetailsOpen && (
-                  <div className="text-xs text-muted-foreground space-y-1">
-                    <div>
-                      {settings.language === 'ar'
-                        ? `الاستعلام: ${searchState.query || ''}`
-                        : `Query: ${searchState.query || ''}`}
-                    </div>
-                    <div>
-                      {settings.language === 'ar'
-                        ? 'الحد الأقصى للبحث: 6 ثواني ثم نكمل بالـ LLM'
-                        : 'Max search time: 6s, then continue with LLM'}
-                    </div>
+                <div className="thinking-content">
+                  <div className="thinking-steps">
+                    {(searchState?.status === 'searching'
+                      ? [
+                          settings.language === 'ar' ? 'جمع مصادر سريعة' : 'Collecting quick sources',
+                          settings.language === 'ar' ? 'تلخيص إشارات السوق' : 'Summarizing market signals',
+                          settings.language === 'ar' ? 'تحضير سياق الوكلاء' : 'Preparing agent context',
+                        ]
+                      : [
+                          settings.language === 'ar' ? 'قراءة آراء الوكلاء' : 'Reading agent views',
+                          settings.language === 'ar' ? 'مقارنة الحجج' : 'Comparing arguments',
+                          settings.language === 'ar' ? 'صياغة رد واضح' : 'Drafting a clear reply',
+                        ]
+                    ).map((step, idx) => (
+                      <div key={step} className="thinking-step" style={{ animationDelay: `${idx * 0.1}s` }}>
+                        {step}
+                      </div>
+                    ))}
                   </div>
-                )}
-                {searchState.answer && (
-                  <p className="text-sm text-foreground/90">{searchState.answer}</p>
-                )}
-                {searchState.status === 'done' &&
-                  !searchState.answer &&
-                  (!searchState.results || searchState.results.length === 0) && (
-                    <p className="text-xs text-muted-foreground">
-                      {settings.language === 'ar'
-                        ? 'لم يتم العثور على مصادر كافية.'
-                        : 'No sufficient sources found.'}
-                    </p>
-                  )}
-                {searchState.results && searchState.results.length > 0 && (
-                  <div className="space-y-2">
-                    {searchState.results.map((result, index) => {
-                      const expanded = Boolean(expandedSources[index]);
-                      const domain = result.domain || result.url?.replace(/^https?:\/\//, '').split('/')[0] || 'source';
-                      return (
-                        <button
-                          key={`${domain}-${index}`}
-                          type="button"
-                          className={cn(
-                            "w-full p-2 rounded-md border border-border/40 bg-background/40 hover:border-primary/40 transition",
-                            settings.language === 'ar' ? 'text-right' : 'text-left'
-                          )}
-                          onClick={() =>
-                            setExpandedSources((prev) => ({ ...prev, [index]: !expanded }))
-                          }
-                        >
-                          <div className="flex items-center gap-2">
-                            <div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center text-xs text-primary overflow-hidden">
-                              <img
-                                src={`https://www.google.com/s2/favicons?domain=${domain}&sz=32`}
-                                alt={domain}
-                                className="w-4 h-4"
-                                onError={(e) => {
-                                  (e.currentTarget as HTMLImageElement).style.display = 'none';
-                                }}
-                              />
-                              <span className="leading-none">{domain.slice(0, 1).toUpperCase()}</span>
-                            </div>
-                            <div className="flex-1">
-                              <p className="text-xs text-muted-foreground">{domain}</p>
-                              <p className="text-sm text-foreground">{result.title}</p>
-                            </div>
-                          </div>
-                          {expanded ? (
-                            <div className="mt-2 text-xs text-muted-foreground space-y-1">
-                              {result.snippet && <p>{result.snippet}</p>}
-                              {result.reason && (
-                                <p>
-                                  {settings.language === 'ar' ? 'المنطق: ' : 'Reasoning: '}
-                                  {result.reason}
-                                </p>
-                              )}
-                            </div>
-                          ) : (
-                            result.snippet && (
-                              <p className="mt-2 text-xs text-muted-foreground line-clamp-2">
-                                {result.snippet}
-                              </p>
-                            )
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
+                </div>
               </div>
             )}
+
             {messages.length === 0 ? (
               <div className="text-center py-8">
                 <Sparkles className="w-12 h-12 mx-auto text-primary/50 mb-4" />
@@ -263,64 +184,46 @@ export function ChatPanel({
                 </h3>
                 <p className="text-sm text-muted-foreground max-w-[250px] mx-auto">
                   {settings.language === 'ar'
-                    ? 'اكتب فكرتك وسيقوم النظام بتجهيز الإعدادات تلقائيًا'
+                    ? 'صف فكرتك وسيقودك النظام لإكمال الإعدادات'
                     : 'Describe your idea and the system will guide you through the configuration'}
                 </p>
               </div>
             ) : (
               messages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={cn(
-                    "chat-message animate-fade-in",
-                    msg.type === 'user' ? "chat-message-user" : "chat-message-system"
-                  )}
-                >
-                  <div className="flex items-start gap-3">
-                    <div className={cn(
-                      "w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0",
-                      msg.type === 'user' ? "bg-primary/20" : "bg-secondary"
-                    )}>
-                      {msg.type === 'user' ? (
-                        <User className="w-4 h-4 text-primary" />
-                      ) : (
-                        <Bot className="w-4 h-4 text-muted-foreground" />
-                      )}
-                    </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-foreground whitespace-pre-wrap">{msg.content}</p>
-                    {msg.options && msg.options.items.length > 0 && (
-                      <div className="mt-3 space-y-2">
-                        {msg.options.items.map((opt) => (
+                <div key={msg.id} className={cn('message', msg.type === 'user' ? 'user' : 'bot')}>
+                  {!msg.options && <div className="bubble">{msg.content}</div>}
+                  {msg.options && msg.options.items.length > 0 && (
+                    <div className={msg.options.kind === 'single' ? 'poll-card' : 'multi-select-card'}>
+                      <p>{msg.content}</p>
+                      <div className={msg.options.kind === 'single' ? 'poll-options' : 'multi-options'}>
+                        {msg.options.items.map((opt, idx) => (
                           <button
                             key={`${msg.options?.field}-${opt.value}`}
                             type="button"
+                            className={msg.options.kind === 'single' ? 'poll-option' : 'multi-option'}
+                            style={{ animationDelay: `${100 + idx * 60}ms` }}
                             onClick={() => onSelectOption?.(msg.options!.field, opt.value)}
-                            className={cn(
-                              "w-full rounded-lg border border-border/40 px-3 py-2 text-sm text-foreground/90",
-                              "hover:border-primary/50 hover:bg-primary/5 transition text-right"
-                            )}
                           >
-                            <div className="flex items-center justify-between">
-                              <span className="font-medium">{opt.label}</span>
-                              <span className="text-xs text-muted-foreground">OK</span>
-                            </div>
+                            <span className="option-label">{opt.label}</span>
                             {opt.description && (
-                              <p className="text-xs text-muted-foreground mt-1">{opt.description}</p>
+                              <span className="option-desc">{opt.description}</span>
                             )}
                           </button>
                         ))}
                       </div>
-                    )}
-                    <span className="text-xs text-muted-foreground mt-1 block">
-                      {formatTimestamp(msg.timestamp)}
-                    </span>
-                  </div>
-                  </div>
+                    </div>
+                  )}
                 </div>
               ))
             )}
 
+            {(isThinking || (searchState && searchState.status === 'searching')) && (
+              <div className="typing-indicator">
+                <span className="typing-dot" />
+                <span className="typing-dot" />
+                <span className="typing-dot" />
+              </div>
+            )}
           </div>
         ) : (
           <div className="space-y-3">
@@ -345,19 +248,17 @@ export function ChatPanel({
                     </div>
                     <span
                       className={cn(
-                        "text-xs font-mono",
+                        'text-xs font-mono',
                         msg.opinion === 'accept'
-                          ? "text-success"
+                          ? 'text-success'
                           : msg.opinion === 'reject'
-                          ? "text-destructive"
-                          : "text-primary"
+                          ? 'text-destructive'
+                          : 'text-primary'
                       )}
                     >
                       Agent {msg.agentId.slice(0, 8)}
                     </span>
-                    <span className="text-xs text-muted-foreground">
-                      � Iteration {msg.iteration}
-                    </span>
+                    <span className="text-xs text-muted-foreground">? Iteration {msg.iteration}</span>
                   </div>
                   <p className="text-sm text-foreground/90 pl-8">{msg.message}</p>
                 </div>
@@ -366,6 +267,7 @@ export function ChatPanel({
           </div>
         )}
       </div>
+
       {activeTab === 'chat' && !isNearBottom && (
         <button
           type="button"
@@ -380,9 +282,8 @@ export function ChatPanel({
         </button>
       )}
 
-      {/* Input Area */}
-      <div className="p-4 border-t border-border/50 shrink-0">
-        <form onSubmit={handleSubmit} className="flex gap-2">
+      <div className="chat-input-container">
+        <form onSubmit={handleSubmit} className="chat-input-wrapper">
           <Input
             ref={inputRef}
             value={inputValue}
@@ -390,19 +291,19 @@ export function ChatPanel({
             dir={settings.language === 'ar' ? 'rtl' : 'ltr'}
             placeholder={
               isWaitingForCountry
-                ? (settings.language === 'ar' ? "اكتب الدولة..." : "Enter country...")
+                ? (settings.language === 'ar' ? 'اكتب الدولة...' : 'Enter country...')
                 : isWaitingForCity
-                ? (settings.language === 'ar' ? "اكتب المدينة..." : "Enter city...")
-                : (settings.language === 'ar' ? "اكتب فكرتك..." : "Describe your idea...")
+                ? (settings.language === 'ar' ? 'اكتب المدينة...' : 'Enter city...')
+                : (settings.language === 'ar' ? 'اكتب رسالتك...' : 'Type a message...')
             }
-            className="flex-1 bg-secondary border-border/50 focus:border-primary/50"
+            className="chat-input"
             data-testid="chat-input"
           />
           <Button
             type="submit"
             size="icon"
             disabled={!inputValue.trim()}
-            className="bg-primary hover:bg-primary/90 text-primary-foreground"
+            className="send-btn"
             data-testid="chat-send"
           >
             <Send className="w-4 h-4" />

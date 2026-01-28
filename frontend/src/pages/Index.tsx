@@ -1,13 +1,13 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { Header } from '@/components/Header';
 import {
-  TopBar,
   CATEGORY_OPTIONS,
   AUDIENCE_OPTIONS,
   GOAL_OPTIONS,
   MATURITY_LEVELS,
 } from '@/components/TopBar';
 import { ChatPanel } from '@/components/ChatPanel';
+import { ConfigPanel } from '@/components/ConfigPanel';
 import { SimulationArena } from '@/components/SimulationArena';
 import { MetricsPanel } from '@/components/MetricsPanel';
 import { IterationTimeline } from '@/components/IterationTimeline';
@@ -15,6 +15,7 @@ import { useSimulation } from '@/hooks/useSimulation';
 import { ChatMessage, UserInput } from '@/types/simulation';
 import { websocketService } from '@/services/websocket';
 import { apiService, SearchResponse } from '@/services/api';
+import { cn } from '@/lib/utils';
 
 const CATEGORY_LABEL_BY_VALUE = new Map(
   CATEGORY_OPTIONS.map((label) => [label.toLowerCase(), label])
@@ -22,27 +23,27 @@ const CATEGORY_LABEL_BY_VALUE = new Map(
 
 const CATEGORY_DESCRIPTIONS: Record<string, { ar: string; en: string }> = {
   Technology: { ar: 'حلول تقنية وبرمجيات ومنتجات رقمية', en: 'Software and digital technology products' },
-  Healthcare: { ar: 'خدمات صحية، رعاية، وتكنولوجيا طبية', en: 'Healthcare services and medical tech' },
-  Finance: { ar: 'خدمات مالية، مدفوعات، واستثمارات', en: 'Financial services, payments, and investing' },
-  Education: { ar: 'تعليم، تدريب، ومنصات تعلم', en: 'Learning, training, and education platforms' },
+  Healthcare: { ar: 'خدمات صحية ورعاية وتقنية طبية', en: 'Healthcare services and medical tech' },
+  Finance: { ar: 'خدمات مالية ومدفوعات واستثمارات', en: 'Financial services, payments, and investing' },
+  Education: { ar: 'تعليم وتدريب ومنصات تعلم', en: 'Learning, training, and education platforms' },
   'E-commerce': { ar: 'متاجر رقمية وتجربة شراء', en: 'Online commerce and shopping experiences' },
-  Entertainment: { ar: 'تجربة ترفيهية ومحتوى', en: 'Entertainment and content products' },
+  Entertainment: { ar: 'ترفيه ومحتوى', en: 'Entertainment and content products' },
   Social: { ar: 'مجتمعات وتواصل اجتماعي', en: 'Social communities and networks' },
-  'B2B SaaS': { ar: 'برمجيات للشركات وخدمات SaaS', en: 'B2B SaaS tools for companies' },
-  'Consumer Apps': { ar: 'تطبيقات مباشرة للمستخدمين', en: 'Direct-to-consumer apps' },
+  'B2B SaaS': { ar: 'برمجيات أعمال للشركات وخدمات SaaS', en: 'B2B SaaS tools for companies' },
+  'Consumer Apps': { ar: 'تطبيقات للمستهلكين', en: 'Direct-to-consumer apps' },
   Hardware: { ar: 'أجهزة ومنتجات مادية', en: 'Hardware and physical products' },
 };
 
 const AUDIENCE_DESCRIPTIONS: Record<string, { ar: string; en: string }> = {
-  'Gen Z (18-24)': { ar: 'جيل صغير ومتفاعل مع التقنية', en: 'Young digital-native audience' },
+  'Gen Z (18-24)': { ar: 'جيل شاب ومتفاعل مع التقنية', en: 'Young digital-native audience' },
   'Millennials (25-40)': { ar: 'شريحة نشطة اقتصادياً', en: 'Economically active cohort' },
   'Gen X (41-56)': { ar: 'خبرة عملية وقرارات محسوبة', en: 'Experienced, pragmatic decision-makers' },
   'Boomers (57-75)': { ar: 'يميلون للثقة والاستقرار', en: 'Trust and stability focused' },
-  Developers: { ar: 'مطورون ومهندسو برمجيات', en: 'Software developers and engineers' },
-  Enterprises: { ar: 'شركات كبيرة وقرارات مؤسسية', en: 'Large enterprises with formal buying' },
+  Developers: { ar: 'مطوّرون ومهندسو برمجيات', en: 'Software developers and engineers' },
+  Enterprises: { ar: 'شركات كبرى وقرارات مؤسسية', en: 'Large enterprises with formal buying' },
   SMBs: { ar: 'شركات صغيرة ومتوسطة', en: 'Small & medium-sized businesses' },
-  Consumers: { ar: 'مستخدمون نهائيون للأفراد', en: 'End consumers' },
-  Students: { ar: 'طلبة وباحثون عن تعليم', en: 'Students and learners' },
+  Consumers: { ar: 'مستهلكون أفراد', en: 'End consumers' },
+  Students: { ar: 'طلاب وباحثون عن تعلم', en: 'Students and learners' },
   Professionals: { ar: 'محترفون في مجالات مختلفة', en: 'Professionals across sectors' },
 };
 
@@ -50,16 +51,16 @@ const GOAL_DESCRIPTIONS: Record<string, { ar: string; en: string }> = {
   'Market Validation': { ar: 'اختبار اهتمام السوق بالفكرة', en: 'Validate demand and interest' },
   'Funding Readiness': { ar: 'تجهيز الفكرة لجذب تمويل', en: 'Prepare to raise funding' },
   'User Acquisition': { ar: 'زيادة قاعدة المستخدمين', en: 'Grow user acquisition' },
-  'Product-Market Fit': { ar: 'ضبط المنتج مع احتياج السوق', en: 'Achieve product-market fit' },
+  'Product-Market Fit': { ar: 'مواءمة المنتج مع احتياج السوق', en: 'Achieve product-market fit' },
   'Competitive Analysis': { ar: 'فهم المنافسين والتميّز', en: 'Understand competitors and differentiation' },
   'Growth Strategy': { ar: 'خطة نمو واستراتيجية توسع', en: 'Growth and expansion strategy' },
 };
 
 const MATURITY_DESCRIPTIONS: Record<string, { ar: string; en: string }> = {
-  concept: { ar: 'الفكرة في مرحلة التصوّر', en: 'Idea stage' },
+  concept: { ar: 'الفكرة في مرحلة التصور', en: 'Idea stage' },
   prototype: { ar: 'نموذج أولي قيد التجربة', en: 'Prototype being tested' },
   mvp: { ar: 'نسخة أولية قابلة للاستخدام', en: 'Minimum viable product' },
-  launched: { ar: 'منتج مطلق بالفعل في السوق', en: 'Already launched' },
+  launched: { ar: 'منتج مطلق في السوق', en: 'Already launched' },
 };
 
 const CATEGORY_KEYWORDS: Record<string, string> = {
@@ -156,27 +157,8 @@ const normalizeMaturityValue = (value?: string): UserInput['ideaMaturity'] | und
   return undefined;
 };
 
-const getRiskLabel = (value: number, language: 'ar' | 'en' = 'en') => {
-  if (language === 'ar') {
-    if (value < 30) return 'محافظ';
-    if (value < 70) return 'متوسط';
-    return 'مغامر';
-  }
-  if (value < 30) return 'Conservative';
-  if (value < 70) return 'Moderate';
-  return 'Aggressive';
-};
 
-const getMaturityLabel = (value?: string) => {
-  if (!value) return 'Concept';
-  const match = MATURITY_LEVELS.find((level) => level.value === value);
-  return match?.label ?? value;
-};
 
-const getCategoryLabel = (value?: string) => {
-  if (!value) return 'Technology';
-  return CATEGORY_LABEL_BY_VALUE.get(value) ?? value;
-};
 
 const Index = () => {
   const simulation = useSimulation();
@@ -201,7 +183,6 @@ const Index = () => {
   const [isWaitingForCity, setIsWaitingForCity] = useState(false);
   const [isWaitingForCountry, setIsWaitingForCountry] = useState(false);
   const [hasStarted, setHasStarted] = useState(false);
-  const [lastSuggestionKey, setLastSuggestionKey] = useState<string | null>(null);
   const summaryRef = useRef<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [leftWidth, setLeftWidth] = useState(320);
@@ -217,6 +198,12 @@ const Index = () => {
     theme: 'dark',
     autoFocusInput: true,
   });
+
+  const [activePanel, setActivePanel] = useState<'config' | 'chat'>('chat');
+  const [missingFields, setMissingFields] = useState<string[]>([]);
+  const [pendingConfigReview, setPendingConfigReview] = useState(false);
+  const [isConfigSearching, setIsConfigSearching] = useState(false);
+  const [isChatThinking, setIsChatThinking] = useState(false);
   const [searchState, setSearchState] = useState<{
     status: 'idle' | 'searching' | 'done';
     query?: string;
@@ -344,50 +331,6 @@ const Index = () => {
     return missing;
   }, []);
 
-  const getMaturityLabelLocalized = useCallback((value: string | undefined, language: 'ar' | 'en') => {
-    if (language === 'ar') {
-      return ({
-        concept: 'فكرة',
-        prototype: 'نموذج',
-        mvp: 'نسخة أولية',
-        launched: 'أُطلق',
-      } as Record<string, string>)[value || 'concept'] || 'فكرة';
-    }
-    return getMaturityLabel(value);
-  }, []);
-
-  const buildSuggestionMessage = useCallback((input: UserInput) => {
-    const locationLine = input.city && input.country
-      ? (settings.language === 'ar'
-        ? `الموقع: ${input.city}, ${input.country}.`
-        : `Location detected: ${input.city}, ${input.country}.`)
-      : (settings.language === 'ar' ? 'الموقع: (غير محدد)' : 'Location detected: (missing)');
-    const categoryLabel = input.category ? getCategoryLabel(input.category) : (settings.language === 'ar' ? 'غير محدد' : 'Not set');
-    const audienceLabel = input.targetAudience.length ? input.targetAudience.join(', ') : (settings.language === 'ar' ? 'غير محدد' : 'Not set');
-    const goalsLabel = input.goals.length ? input.goals.join(', ') : (settings.language === 'ar' ? 'غير محدد' : 'Not set');
-    const lines = settings.language === 'ar'
-      ? [
-        locationLine,
-        'تم ملء الشريط العلوي بناءً على فكرتك. عدّل إن احتجت ثم أخبرني أنك جاهز للبدء.',
-        '',
-        `1) الفئة: ${categoryLabel}`,
-        `3) الجمهور: ${audienceLabel}`,
-        `5) الهدف: ${goalsLabel}`,
-        `7) المخاطرة: ${getRiskLabel(input.riskAppetite, 'ar')}`,
-        `9) النضج: ${getMaturityLabelLocalized(input.ideaMaturity, 'ar')}`,
-      ]
-      : [
-        locationLine,
-        'I pre-filled the top bar based on your idea. Adjust if needed, then tell me you are ready to start.',
-        '',
-        `1) Category: ${categoryLabel}`,
-        `3) Audience: ${audienceLabel}`,
-        `5) Goals: ${goalsLabel}`,
-        `7) Risk: ${getRiskLabel(input.riskAppetite, 'en')}`,
-        `9) Maturity: ${getMaturityLabelLocalized(input.ideaMaturity, 'en')}`,
-      ];
-    return lines.join('\n');
-  }, [getMaturityLabelLocalized, settings.language]);
 
   const addOptionsMessage = useCallback((
     field: 'category' | 'audience' | 'goals' | 'maturity',
@@ -476,36 +419,51 @@ const Index = () => {
     return true;
   }, [addSystemMessage, getAssistantMessage, settings.language]);
 
+  const promptForMissing = useCallback(async (missing: string[], question?: string) => {
+    setMissingFields(missing);
+    if (missing.length === 0) return false;
+
+    if (missing.includes('idea')) {
+      const prompt = 'Ask the user to describe their idea in one clear sentence.';
+      const message = await getAssistantMessage(prompt);
+      addSystemMessage(message || (settings.language === 'ar'
+        ? 'من فضلك اكتب الفكرة في جملة واحدة.'
+        : 'Please describe the idea in one clear sentence.'));
+      return true;
+    }
+
+    const needsCountry = missing.includes('country');
+    const needsCity = missing.includes('city');
+    if (needsCountry || needsCity) {
+      if (question) {
+        addSystemMessage(question);
+        setIsWaitingForCountry(needsCountry);
+        setIsWaitingForCity(needsCity);
+        return true;
+      }
+      const asked = await requestLocationIfNeeded(missing);
+      return asked;
+    }
+
+    if (missing.includes('category')) {
+      return addOptionsMessage('category');
+    }
+    if (missing.includes('target_audience')) {
+      return addOptionsMessage('audience');
+    }
+    if (missing.includes('goals')) {
+      return addOptionsMessage('goals');
+    }
+    if (missing.includes('idea_maturity')) {
+      return addOptionsMessage('maturity');
+    }
+    return false;
+  }, [addOptionsMessage, addSystemMessage, getAssistantMessage, requestLocationIfNeeded, settings.language]);
+
   const handleStart = useCallback(async () => {
     const missing = getMissingForStart(userInput);
-      if (missing.length > 0) {
-        if (missing.includes('idea')) {
-          const prompt = 'Ask the user to describe their idea in one clear sentence.';
-          const message = await getAssistantMessage(prompt);
-          addSystemMessage(message || (settings.language === 'ar'
-            ? 'من فضلك اكتب الفكرة في جملة واحدة.'
-            : 'Please describe the idea in one clear sentence.'));
-          return;
-        }
-        const asked = await requestLocationIfNeeded(missing);
-        if (asked) return;
-        if (missing.includes('category')) {
-          if (addOptionsMessage('category')) return;
-        }
-        if (missing.includes('target_audience')) {
-          if (addOptionsMessage('audience')) return;
-        }
-        if (missing.includes('goals')) {
-          if (addOptionsMessage('goals')) return;
-        }
-        if (missing.includes('idea_maturity')) {
-          if (addOptionsMessage('maturity')) return;
-        }
-        const prompt = `Tell the user to review the top bar and fill these fields: ${missing.join(', ')}. Do not ask questions; just instruct them to adjust the top bar and say they are ready to start.`;
-        const message = await getAssistantMessage(prompt);
-        addSystemMessage(message || buildSuggestionMessage(userInput));
-        return;
-      }
+    const asked = await promptForMissing(missing);
+    if (asked) return;
 
     if (hasStarted || simulation.status === 'running') return;
     setHasStarted(true);
@@ -517,7 +475,54 @@ const Index = () => {
       console.warn('Simulation start failed.', err);
       addSystemMessage(settings.language === 'ar' ? 'تعذر بدء المحاكاة. تحقق من الباك إند.' : 'Failed to start simulation. Check the backend.');
     }
-  }, [addOptionsMessage, addSystemMessage, buildConfig, getAssistantMessage, getMissingForStart, hasStarted, requestLocationIfNeeded, simulation, userInput]);
+  }, [addSystemMessage, buildConfig, getAssistantMessage, getMissingForStart, hasStarted, promptForMissing, settings.language, simulation, userInput]);
+
+
+  const handleConfigSubmit = useCallback(async () => {
+    const missing = getMissingForStart(userInput);
+    setMissingFields(missing);
+    if (missing.length > 0) {
+      return;
+    }
+
+    setPendingConfigReview(false);
+    setActivePanel('chat');
+    setIsConfigSearching(true);
+    const ideaText = userInput.idea.trim();
+    setSearchState({ status: 'searching', query: ideaText });
+
+    try {
+      const timeoutMs = 10000;
+      const search = await Promise.race([
+        apiService.searchWeb(ideaText, settings.language === 'ar' ? 'ar' : 'en', 5),
+        new Promise<SearchResponse>((_, reject) =>
+          setTimeout(() => reject(new Error('Search timeout')), timeoutMs)
+        ),
+      ]);
+      const searchData = search as SearchResponse;
+      setSearchState({
+        status: 'done',
+        query: ideaText,
+        answer: searchData.answer,
+        provider: searchData.provider,
+        isLive: searchData.is_live,
+        results: searchData.results,
+      });
+      const summary = searchData.answer
+        || searchData.results.map((r) => r.snippet).filter(Boolean).slice(0, 3).join(' ');
+      setResearchContext({ summary, sources: searchData.results });
+    } catch {
+      setSearchState({ status: 'done', query: ideaText, answer: '', provider: 'none', isLive: false, results: [] });
+      setResearchContext({ summary: '', sources: [] });
+      addSystemMessage(settings.language === 'ar'
+        ? 'لم أجد معلومات كافية سريعاً، سأكمل بالـ LLM مباشرة.'
+        : 'Not enough information quickly; asking the LLM directly.');
+    } finally {
+      setIsConfigSearching(false);
+    }
+
+    await handleStart();
+  }, [addSystemMessage, getMissingForStart, handleStart, settings.language, userInput, setSearchState, setResearchContext, setPendingConfigReview, setActivePanel]);
 
   const handleSendMessage = useCallback(
     (content: string) => {
@@ -534,6 +539,22 @@ const Index = () => {
 
       void (async () => {
         try {
+          if (pendingConfigReview) {
+            const lower = trimmed.toLowerCase();
+            const confirm = ['yes', 'ok', 'okay', 'go', 'start', 'run', 'y', '\u062a\u0645', '\u062a\u0645\u0627\u0645', '\u0645\u0648\u0627\u0641\u0642', '\u0646\u0639\u0645', '\u0627\u0628\u062f\u0623', '\u0627\u0628\u062f\u0621'];
+            const edit = ['تعديل', 'اعدادات', 'الإعدادات', 'settings', 'config'];
+            if (confirm.includes(lower)) {
+              await handleConfigSubmit();
+              return;
+            }
+            if (edit.includes(lower)) {
+              setActivePanel('config');
+              addSystemMessage(settings.language === 'ar'
+                ? 'عدل الإعدادات ثم اضغط تأكيد البيانات.'
+                : 'Update the configuration, then confirm.');
+              return;
+            }
+          }
           if (pendingUpdate) {
             const yes = ['yes', 'ok', 'okay', 'go', 'start', 'run', 'y', 'نعم', 'اه', 'أيوه', 'ايوه', 'تمام', 'حاضر', 'ماشي'];
             const no = ['no', 'nope', 'cancel', 'stop', 'لا', 'مش', 'مش موافق', 'ارفض'];
@@ -606,108 +627,19 @@ const Index = () => {
             setIsWaitingForCity(false);
 
             const missing = getMissingForStart(nextInput);
-            if (missing.length > 0) {
-              if (missing.includes('city')) {
-                addSystemMessage(extraction.question || (settings.language === 'ar'
-                  ? 'ما هي المدينة المستهدفة؟'
-                  : 'Which city should we focus on?'));
-                setIsWaitingForCity(true);
-                return;
-              }
-              if (missing.includes('country')) {
-                addSystemMessage(extraction.question || (settings.language === 'ar'
-                  ? 'ما هي الدولة المستهدفة؟'
-                  : 'Which country should we focus on?'));
-                setIsWaitingForCountry(true);
-                return;
-              }
-              if (missing.includes('category')) {
-                if (addOptionsMessage('category')) return;
-              }
-              if (missing.includes('target_audience')) {
-                if (addOptionsMessage('audience')) return;
-              }
-              if (missing.includes('goals')) {
-                if (addOptionsMessage('goals')) return;
-              }
-              if (missing.includes('idea_maturity')) {
-                if (addOptionsMessage('maturity')) return;
-              }
-            }
+            const asked = await promptForMissing(missing, extraction.question || undefined);
+            if (asked) return;
 
-            const prompt = [
-              `Summarize the inferred settings and tell the user to adjust the top bar if needed, then say they are ready to start.`,
-              `Location: ${nextInput.city}, ${nextInput.country}.`,
-              `Category: ${getCategoryLabel(nextInput.category)}.`,
-              `Audience: ${nextInput.targetAudience.join(', ') || 'Not set'}.`,
-              `Goals: ${nextInput.goals.join(', ') || 'Not set'}.`,
-              `Risk: ${getRiskLabel(nextInput.riskAppetite, settings.language)}.`,
-              `Maturity: ${getMaturityLabelLocalized(nextInput.ideaMaturity, settings.language)}.`,
-              `Use a short intro and a numbered list with items 1,3,5,7,9 (odd numbers only).`,
-            ].join(' ');
-            const assistantMessage = await getAssistantMessage(prompt);
-            addSystemMessage(assistantMessage || buildSuggestionMessage(nextInput));
+            setPendingConfigReview(true);
+            setActivePanel('config');
+            setMissingFields([]);
+            addSystemMessage(settings.language === 'ar'
+              ? 'راجِع الإعدادات ثم اضغط تأكيد البيانات للمتابعة.'
+              : 'Review the configuration, then confirm to continue.');
             return;
           }
 
-          // If user is likely confirming readiness, detect intent before search.
-          if (userInput.idea && userInput.country && userInput.city) {
-            const intentContext = `Idea: ${userInput.idea}. Location: ${userInput.city}, ${userInput.country}.`;
-            try {
-              const intent = await Promise.race([
-                apiService.detectStartIntent(trimmed, intentContext),
-                new Promise<{ start: boolean }>((_, reject) =>
-                  setTimeout(() => reject(new Error('Intent timeout')), 3000)
-                ),
-              ]);
-              if (intent.start) {
-                await handleStart();
-                return;
-              }
-            } catch {
-              // ignore intent failure
-            }
-            const quickYes = ['yes', 'ok', 'okay', 'go', 'start', 'run', 'y', 'تمام', 'حاضر', 'ماشي', 'ايوه', 'نعم', 'ايوا'];
-            if (trimmed.length <= 5 && quickYes.includes(trimmed.toLowerCase())) {
-              await handleStart();
-              return;
-            }
-          }
-
-          const socialBoost = '(site:twitter.com OR site:reddit.com OR site:tiktok.com OR site:facebook.com OR site:linkedin.com)';
-          const searchQuery = `${trimmed} ${socialBoost}`;
-          setSearchState({ status: 'searching', query: trimmed });
-          let search: SearchResponse | null = null;
-          try {
-            const timeoutMs = 6000;
-            search = await Promise.race([
-              apiService.searchWeb(searchQuery, settings.language === 'ar' ? 'ar' : 'en', 5),
-              new Promise<SearchResponse>((_, reject) =>
-                setTimeout(() => reject(new Error('Search timeout')), timeoutMs)
-              ),
-            ]);
-          } catch (searchErr) {
-            console.warn('Search failed, continuing without live sources.', searchErr);
-          }
-          if (search) {
-            setSearchState({
-              status: 'done',
-              query: trimmed,
-              answer: search.answer,
-              provider: search.provider,
-              isLive: search.is_live,
-              results: search.results,
-            });
-            const summary = search.answer || search.results.map((r) => r.snippet).filter(Boolean).slice(0, 3).join(' ');
-            setResearchContext({ summary, sources: search.results });
-          } else {
-            setSearchState({ status: 'done', query: trimmed, answer: '', provider: 'none', isLive: false, results: [] });
-            setResearchContext({ summary: '', sources: [] });
-            addSystemMessage(settings.language === 'ar'
-              ? 'لم أجد معلومات كافية سريعًا، سأستخدم الـ LLM مباشرة.'
-              : 'Not enough information quickly; asking the LLM directly.');
-          }
-
+          // If a simulation is already running, handle discussion vs. update directly.
           if (simulation.status === 'running' || simulation.status === 'completed') {
             const context = `Idea: ${userInput.idea}. Location: ${userInput.city}, ${userInput.country}.`;
             let mode: 'update' | 'discuss' = 'discuss';
@@ -720,7 +652,6 @@ const Index = () => {
               ]);
               mode = res.mode;
             } catch {
-              // fallback heuristic
               const isQuestion = /[?؟]/.test(trimmed);
               mode = isQuestion ? 'discuss' : 'update';
             }
@@ -731,27 +662,29 @@ const Index = () => {
                 .map((r) => `Agent ${r.agentId.slice(0, 4)}: ${r.message}`)
                 .join(' | ');
               const constraintsContext = `Category=${userInput.category}; Audience=${userInput.targetAudience.join(', ')}; Goals=${userInput.goals.join(', ')}; Maturity=${userInput.ideaMaturity}; Location=${userInput.city}, ${userInput.country}`;
-              const researchContextText = researchContext.summary || "";
+              const researchContextText = researchContext.summary || '';
+              setIsChatThinking(true);
               const reply = await getAssistantMessage(
                 settings.language === 'ar'
-                  ? `?? ???? ????? ???? ??? ???????: "${trimmed}". ???? ?????? ????? ??????? ??????? ?????. ?? ???? ????? ?? ????? ??????? ??????. ?????? ???? ???????? ?????? ????? ?? ?????? ?????? ?????.
-???? ???????: ${reasoningContext}
-???? ?????: ${researchContextText}
-???? ?????? (????? ??? ?? ?????): ${constraintsContext}
-??? ??? ????? ???? ???????? ?? ??????? ????? ????? ?? ???? ???? ????? ???????? ?? ??? ???? ???.`
+                  ? `جاوب بشكل طبيعي على: "${trimmed}". اربط إجابتك بما قاله الوكلاء وبنتائج البحث. لا تذكر إعدادات خام أو أرقام. استخدم السياق لتفسير الرفض إن وجد.
+سياق الوكلاء: ${reasoningContext}
+سياق البحث: ${researchContextText}
+القيود (للفهم فقط): ${constraintsContext}
+إذا كان الرفض بسبب المنافسة أو الموقع، اقترح بحثاً عن موقع أفضل واسأل المستخدم.`
                   : `Reply naturally to: "${trimmed}". Tie your answer to agent reasoning and research. Do not list raw settings or numbers. Use simulation context to explain rejections.
 Reasoning context: ${reasoningContext}
 Research context: ${researchContextText}
 Constraints (for understanding only): ${constraintsContext}
 If rejection is about competition or location, suggest searching for a better location and ask the user.`
               );
-              addSystemMessage(reply || (settings.language === 'ar' ? 'حسنًا، دعنا نناقش ذلك.' : 'Sure, let’s discuss that.'));
+              setIsChatThinking(false);
+              addSystemMessage(reply || (settings.language === 'ar' ? 'حسناً، دعنا نناقش ذلك.' : "Sure, let's discuss that."));
               return;
             }
 
             setPendingUpdate(trimmed);
             addSystemMessage(settings.language === 'ar'
-              ? 'هل تريد إرسال هذا التحديث للمجتمع ليعيدوا تقييم الفكرة؟ (نعم/لا)'
+              ? 'هل تريد إرسال هذا التحديث للوكلاء لإعادة التقييم؟ (نعم/لا)'
               : 'Do you want to send this update to the agents for re-evaluation? (yes/no)');
             return;
           }
@@ -830,69 +763,19 @@ If rejection is about competition or location, suggest searching for a better lo
           };
 
           setUserInput(nextInput);
-
-          const missingLocation = getMissingForStart(nextInput).filter(
-            (field) => field === 'country' || field === 'city'
-          );
-          if (missingLocation.length > 0) {
-            setIsWaitingForCountry(missingLocation.includes('country'));
-            setIsWaitingForCity(missingLocation.includes('city'));
-            if (extraction.question) {
-              addSystemMessage(extraction.question);
-            } else {
-              await requestLocationIfNeeded(missingLocation);
-            }
-            return;
-          }
-
           setIsWaitingForCountry(false);
           setIsWaitingForCity(false);
 
-          const suggestionKey = [
-            nextInput.idea,
-            nextInput.country,
-            nextInput.city,
-            nextInput.category,
-            nextInput.targetAudience.join(','),
-            nextInput.goals.join(','),
-            String(nextInput.riskAppetite),
-            nextInput.ideaMaturity,
-          ].join('|');
+          const missing = getMissingForStart(nextInput);
+          const asked = await promptForMissing(missing, extraction.question || undefined);
+          if (asked) return;
 
-          if (suggestionKey !== lastSuggestionKey) {
-            const prompt = [
-              `Summarize the inferred settings and tell the user to adjust the top bar if needed, then say they are ready to start.`,
-              `Location: ${nextInput.city}, ${nextInput.country}.`,
-              `Category: ${getCategoryLabel(nextInput.category)}.`,
-              `Audience: ${nextInput.targetAudience.join(', ') || 'Not set'}.`,
-              `Goals: ${nextInput.goals.join(', ') || 'Not set'}.`,
-              `Risk: ${getRiskLabel(nextInput.riskAppetite, settings.language)}.`,
-              `Maturity: ${getMaturityLabel(nextInput.ideaMaturity)}.`,
-              `Use a short intro and a numbered list with items 1,3,5,7,9 (odd numbers only).`,
-            ].join(' ');
-            try {
-              const assistantMessage = await getAssistantMessage(prompt);
-              addSystemMessage(assistantMessage || buildSuggestionMessage(nextInput));
-            } catch (err) {
-              console.warn('LLM suggestion message failed, using fallback.', err);
-              addSystemMessage(buildSuggestionMessage(nextInput));
-            }
-            setLastSuggestionKey(suggestionKey);
-          }
-          const intentContext = `Idea: ${nextInput.idea}. Location: ${nextInput.city}, ${nextInput.country}.`;
-          try {
-            const intent = await Promise.race([
-              apiService.detectStartIntent(trimmed, intentContext),
-              new Promise<{ start: boolean }>((_, reject) =>
-                setTimeout(() => reject(new Error('Intent timeout')), 4000)
-              ),
-            ]);
-            if (intent.start) {
-              await handleStart();
-            }
-          } catch {
-            // ignore intent failure
-          }
+          setPendingConfigReview(true);
+          setActivePanel('config');
+          setMissingFields([]);
+          addSystemMessage(settings.language === 'ar'
+            ? 'راجِع الإعدادات ثم اضغط تأكيد البيانات للمتابعة.'
+            : 'Review the configuration, then confirm to continue.');
         } catch (err) {
           console.error('Schema extraction failed', err);
           addSystemMessage(settings.language === 'ar'
@@ -902,51 +785,46 @@ If rejection is about competition or location, suggest searching for a better lo
       })();
     },
       [
-        addOptionsMessage,
         addSystemMessage,
-        buildConfig,
-        buildSuggestionMessage,
         getAssistantMessage,
         getMissingForStart,
-      handleStart,
-      inferLocation,
-      lastSuggestionKey,
-      requestLocationIfNeeded,
-      settings.language,
-      simulation,
-      touched,
-      userInput,
-    ]
+        handleConfigSubmit,
+        handleStart,
+        inferLocation,
+        pendingConfigReview,
+        pendingUpdate,
+        promptForMissing,
+        researchContext,
+        settings.language,
+        simulation,
+        touched,
+        userInput,
+      ]
   );
 
   const handleCategoryChange = useCallback((value: string) => {
     setTouched((prev) => ({ ...prev, category: true }));
     setUserInput((prev) => ({ ...prev, category: value }));
-    setLastSuggestionKey(null);
   }, []);
 
   const handleAudienceChange = useCallback((value: string[]) => {
     setTouched((prev) => ({ ...prev, audience: true }));
     setUserInput((prev) => ({ ...prev, targetAudience: value }));
-    setLastSuggestionKey(null);
   }, []);
 
   const handleRiskChange = useCallback((value: number) => {
     setTouched((prev) => ({ ...prev, risk: true }));
     setUserInput((prev) => ({ ...prev, riskAppetite: value }));
-    setLastSuggestionKey(null);
   }, []);
 
   const handleMaturityChange = useCallback((value: string) => {
     setTouched((prev) => ({ ...prev, maturity: true }));
     setUserInput((prev) => ({ ...prev, ideaMaturity: value as UserInput['ideaMaturity'] }));
-    setLastSuggestionKey(null);
   }, []);
 
   const handleGoalsChange = useCallback((value: string[]) => {
     setTouched((prev) => ({ ...prev, goals: true }));
     setUserInput((prev) => ({ ...prev, goals: value }));
-    setLastSuggestionKey(null);
   }, []);
 
   const toggleSpeed = useCallback(() => {
@@ -1038,7 +916,7 @@ If rejection is about competition or location, suggest searching for a better lo
   }, [simulation.status]);
 
   return (
-    <div className="h-screen bg-background flex flex-col overflow-hidden">
+    <div className="h-screen w-screen bg-background flex flex-col overflow-hidden">
       {/* Header */}
       <Header
         simulationStatus={simulation.status}
@@ -1087,21 +965,6 @@ If rejection is about competition or location, suggest searching for a better lo
         </div>
       </div>
 
-      {/* Top Bar - Filters */}
-      <TopBar
-        selectedCategory={userInput.category}
-        selectedAudiences={userInput.targetAudience}
-        selectedGoals={userInput.goals}
-        riskLevel={userInput.riskAppetite}
-        maturity={userInput.ideaMaturity}
-        language={settings.language}
-        onCategoryChange={handleCategoryChange}
-        onAudienceChange={handleAudienceChange}
-        onRiskChange={handleRiskChange}
-        onMaturityChange={handleMaturityChange}
-        onGoalsChange={handleGoalsChange}
-      />
-
       {/* Main Content */}
       <div
         ref={containerRef}
@@ -1110,19 +973,65 @@ If rejection is about competition or location, suggest searching for a better lo
           gridTemplateColumns: `${leftWidth}px 6px 1fr 6px ${rightWidth}px`,
         }}
       >
-        {/* Left Panel - Chat */}
+        {/* Left Panel - Config / Chat */}
         <div className="border-r border-border/50 flex flex-col min-h-0">
-          <ChatPanel
-            messages={chatMessages}
-            reasoningFeed={simulation.reasoningFeed}
-            onSendMessage={handleSendMessage}
-            onSelectOption={handleOptionSelect}
-            isWaitingForCity={isWaitingForCity}
-            isWaitingForCountry={isWaitingForCountry}
-            searchState={searchState}
-            isThinking={simulation.status === 'running' && simulation.reasoningFeed.length > 0}
-            settings={settings}
-          />
+          <div className="flex items-center justify-between px-4 py-3 border-b border-border/40">
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setActivePanel('chat')}
+                className={cn(
+                  'px-3 py-1.5 rounded-full text-xs font-medium transition',
+                  activePanel === 'chat'
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
+                )}
+              >
+                {settings.language === 'ar' ? 'الدردشة' : 'Chat'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setActivePanel('config')}
+                className={cn(
+                  'px-3 py-1.5 rounded-full text-xs font-medium transition',
+                  activePanel === 'config'
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
+                )}
+              >
+                {settings.language === 'ar' ? '\u0627\u0644\u0625\u0639\u062f\u0627\u062f\u0627\u062a' : 'Config'}
+              </button>
+            </div>
+          </div>
+
+          {activePanel === 'config' ? (
+            <ConfigPanel
+              value={userInput}
+              onChange={(updates) => {
+                setUserInput((prev) => {
+                  const next = { ...prev, ...updates };
+                  setMissingFields(getMissingForStart(next));
+                  return next;
+                });
+              }}
+              onSubmit={handleConfigSubmit}
+              missingFields={missingFields}
+              language={settings.language}
+              isSearching={isConfigSearching}
+            />
+          ) : (
+            <ChatPanel
+              messages={chatMessages}
+              reasoningFeed={simulation.reasoningFeed}
+              onSendMessage={handleSendMessage}
+              onSelectOption={handleOptionSelect}
+              isWaitingForCity={isWaitingForCity}
+              isWaitingForCountry={isWaitingForCountry}
+              searchState={searchState}
+              isThinking={isChatThinking}
+              settings={settings}
+            />
+          )}
         </div>
         <div
           className="resize-handle"
