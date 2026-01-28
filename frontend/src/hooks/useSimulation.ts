@@ -119,6 +119,7 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
         message: event.message,
         timestamp: ts,
         iteration: event.iteration,
+        opinion: event.opinion,
       };
       const nextAgents = new Map(state.agents);
       const existing = nextAgents.get(event.agent_id);
@@ -241,6 +242,7 @@ export function useSimulation() {
             message: step.message,
             timestamp: Date.now(),
             iteration: step.iteration,
+            opinion: step.opinion,
           }));
           dispatch({ type: 'SET_REASONING', payload: reasoningMessages });
         }
@@ -263,6 +265,8 @@ export function useSimulation() {
           if (stateResponse?.error) {
             setError(stateResponse.error);
             dispatch({ type: 'SET_STATUS', payload: 'error' });
+            window.clearInterval(intervalId);
+            setPollTask(null);
             return;
           }
           if (stateResponse?.metrics) {
@@ -293,13 +297,14 @@ export function useSimulation() {
             });
           }
           if (stateResponse?.reasoning && stateResponse.reasoning.length > 0) {
-            const reasoningMessages: ReasoningMessage[] = stateResponse.reasoning.map((step, index) => ({
-              id: `${step.agent_id}-${step.iteration}-${index}`,
-              agentId: step.agent_id,
-              message: step.message,
-              timestamp: Date.now(),
-              iteration: step.iteration,
-            }));
+          const reasoningMessages: ReasoningMessage[] = stateResponse.reasoning.map((step, index) => ({
+            id: `${step.agent_id}-${step.iteration}-${index}`,
+            agentId: step.agent_id,
+            message: step.message,
+            timestamp: Date.now(),
+            iteration: step.iteration,
+            opinion: step.opinion,
+          }));
             dispatch({ type: 'SET_REASONING', payload: reasoningMessages });
           }
           if (stateResponse?.summary) {
@@ -342,6 +347,8 @@ export function useSimulation() {
           if (stateResponse.error) {
             setError(stateResponse.error);
             dispatch({ type: 'SET_STATUS', payload: 'error' });
+            window.clearInterval(fastId);
+            setPollTask(null);
             return;
           }
           if (stateResponse.metrics) {

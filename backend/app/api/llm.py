@@ -337,3 +337,38 @@ async def detect_intent(payload: IntentRequest) -> IntentResponse:
         return IntentResponse(start=bool(data.get("start")), reason=data.get("reason"))
     except Exception:
         return IntentResponse(start=False, reason=None)
+
+
+class MessageModeRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+    context: Optional[str] = None
+    language: Optional[str] = None
+
+
+class MessageModeResponse(BaseModel):
+    mode: str
+    reason: Optional[str] = None
+
+
+@router.post("/message_mode", response_model=MessageModeResponse)
+async def detect_message_mode(payload: MessageModeRequest) -> MessageModeResponse:
+    """Classify whether the message is a discussion or an update to the idea."""
+    lang_hint = payload.language or ("ar" if _contains_arabic(payload.message) else "en")
+    prompt = (
+        "Classify the user's message as one of: update, discuss.\n"
+        "update = introduces new info that should re-run the simulation or modify the idea.\n"
+        "discuss = questions, critiques, negotiations, or conversation about results.\n"
+        "Return JSON only: {\"mode\": \"update\"|\"discuss\", \"reason\": \"...\"}.\n"
+        f"Language: {lang_hint}\n"
+        f"Context: {payload.context or ''}\n"
+        f"Message: {payload.message}\n"
+    )
+    try:
+        raw = await generate_ollama(prompt=prompt, temperature=0.2, response_format="json")
+        data = _safe_json_loads(raw)
+        mode = str(data.get("mode") or "discuss").lower()
+        if mode not in {"update", "discuss"}:
+            mode = "discuss"
+        return MessageModeResponse(mode=mode, reason=data.get("reason"))
+    except Exception:
+        return MessageModeResponse(mode="discuss", reason=None)

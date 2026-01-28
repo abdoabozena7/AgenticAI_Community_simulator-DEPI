@@ -225,6 +225,8 @@ const Index = () => {
     isLive?: boolean;
     results?: SearchResponse['results'];
   }>({ status: 'idle' });
+  const [pendingUpdate, setPendingUpdate] = useState<string | null>(null);
+  const [simulationSpeed, setSimulationSpeed] = useState(1);
   const [researchContext, setResearchContext] = useState<{ summary: string; sources: SearchResponse['results'] }>({
     summary: '',
     sources: [],
@@ -327,8 +329,9 @@ const Index = () => {
       research_summary: researchContext.summary,
       research_sources: researchContext.sources,
       language: settings.language,
+      speed: simulationSpeed,
     };
-  }, [researchContext, settings.language]);
+  }, [researchContext, settings.language, simulationSpeed]);
 
   const getMissingForStart = useCallback((input: UserInput) => {
     const missing: string[] = [];
@@ -531,6 +534,40 @@ const Index = () => {
 
       void (async () => {
         try {
+          if (pendingUpdate) {
+            const yes = ['yes', 'ok', 'okay', 'go', 'start', 'run', 'y', 'نعم', 'اه', 'أيوه', 'ايوه', 'تمام', 'حاضر', 'ماشي'];
+            const no = ['no', 'nope', 'cancel', 'stop', 'لا', 'مش', 'مش موافق', 'ارفض'];
+            const lower = trimmed.toLowerCase();
+            if (yes.includes(lower)) {
+              const nextIdea = userInput.idea
+                ? `${userInput.idea}\nUpdate: ${pendingUpdate}`
+                : pendingUpdate;
+              const nextInput = { ...userInput, idea: nextIdea };
+              setUserInput(nextInput);
+              setPendingUpdate(null);
+              addSystemMessage(settings.language === 'ar'
+                ? 'تم تأكيد التحديث، سأرسله للمجتمع الآن.'
+                : 'Update confirmed. Sending it to the agents now.');
+              await simulation.stopSimulation();
+              await simulation.startSimulation(buildConfig(nextInput));
+              return;
+            }
+            if (no.includes(lower)) {
+              setPendingUpdate(null);
+              const reply = await getAssistantMessage(
+                settings.language === 'ar'
+                  ? `تمام، سنكمل النقاش بدون إرسال التحديث. رد على: "${trimmed}".`
+                  : `Okay, we won't send the update. Reply to: "${trimmed}".`
+              );
+              addSystemMessage(reply || (settings.language === 'ar' ? 'تمام، لن أرسل التحديث.' : 'Okay, no update will be sent.'));
+              return;
+            }
+            addSystemMessage(settings.language === 'ar'
+              ? 'هل تريد إرسال هذا التحديث للمجتمع؟ اكتب نعم أو لا.'
+              : 'Do you want to send this update to the agents? Type yes or no.');
+            return;
+          }
+
           // If we're explicitly waiting for location, handle it directly without search.
           if (isWaitingForCountry || isWaitingForCity) {
             const schemaPayload = {
@@ -672,16 +709,40 @@ const Index = () => {
           }
 
           if (simulation.status === 'running' || simulation.status === 'completed') {
-            const nextIdea = userInput.idea
-              ? `${userInput.idea}\nUpdate: ${trimmed}`
-              : trimmed;
-            const nextInput = { ...userInput, idea: nextIdea };
-            setUserInput(nextInput);
+            const context = `Idea: ${userInput.idea}. Location: ${userInput.city}, ${userInput.country}.`;
+            let mode: 'update' | 'discuss' = 'discuss';
+            try {
+              const res = await Promise.race([
+                apiService.detectMessageMode(trimmed, context, settings.language),
+                new Promise<{ mode: 'update' | 'discuss' }>((_, reject) =>
+                  setTimeout(() => reject(new Error('Mode timeout')), 3000)
+                ),
+              ]);
+              mode = res.mode;
+            } catch {
+              // fallback heuristic
+              const isQuestion = /[?؟]/.test(trimmed);
+              mode = isQuestion ? 'discuss' : 'update';
+            }
+
+            if (mode === 'discuss') {
+              const reasoningContext = simulation.reasoningFeed
+                .slice(-6)
+                .map((r) => `Agent ${r.agentId.slice(0, 4)}: ${r.message}`)
+                .join(' | ');
+              const reply = await getAssistantMessage(
+                settings.language === 'ar'
+                  ? `جاوب على الرسالة التالية بشكل طبيعي كحوار: "${trimmed}". اربط الإجابة بنتائج المحاكاة وأفكار الوكلاء إن أمكن. سياق التفكير: ${reasoningContext}`
+                  : `Reply conversationally to: "${trimmed}". Tie it to simulation results and agent reasoning if possible. Reasoning context: ${reasoningContext}`
+              );
+              addSystemMessage(reply || (settings.language === 'ar' ? 'حسنًا، دعنا نناقش ذلك.' : 'Sure, let’s discuss that.'));
+              return;
+            }
+
+            setPendingUpdate(trimmed);
             addSystemMessage(settings.language === 'ar'
-              ? 'تم استلام التحديث. سيتم الاستمرار بنفس مجموعة الوكلاء.'
-              : 'Update received. Continuing the simulation with the same agent pool.');
-            await simulation.stopSimulation();
-            await simulation.startSimulation(buildConfig(nextInput));
+              ? 'هل تريد إرسال هذا التحديث للمجتمع ليعيدوا تقييم الفكرة؟ (نعم/لا)'
+              : 'Do you want to send this update to the agents for re-evaluation? (yes/no)');
             return;
           }
 
@@ -878,6 +939,10 @@ const Index = () => {
     setLastSuggestionKey(null);
   }, []);
 
+  const toggleSpeed = useCallback(() => {
+    setSimulationSpeed((prev) => (prev === 10 ? 1 : 10));
+  }, []);
+
   const handleOptionSelect = useCallback(
     (field: 'category' | 'audience' | 'goals' | 'maturity', value: string) => {
       if (field === 'category') {
@@ -1045,6 +1110,7 @@ const Index = () => {
             isWaitingForCity={isWaitingForCity}
             isWaitingForCountry={isWaitingForCountry}
             searchState={searchState}
+            isThinking={simulation.status === 'running' && simulation.reasoningFeed.length > 0}
             settings={settings}
           />
         </div>
@@ -1063,14 +1129,16 @@ const Index = () => {
         {/* Center - Simulation Arena */}
         <div className="flex flex-col p-4 gap-4 overflow-hidden min-h-0">
           <div className="flex-1">
-            <SimulationArena
-              agents={simulation.agents}
-              status={simulation.status}
-              currentIteration={simulation.metrics.currentIteration}
-              totalIterations={simulation.metrics.totalIterations}
-              onReset={simulation.stopSimulation}
-              language={settings.language}
-            />
+        <SimulationArena
+          agents={simulation.agents}
+          status={simulation.status}
+          currentIteration={simulation.metrics.currentIteration}
+          totalIterations={simulation.metrics.totalIterations}
+          onReset={simulation.stopSimulation}
+          onToggleSpeed={toggleSpeed}
+          speed={simulationSpeed}
+          language={settings.language}
+        />
           </div>
 
           {/* Iteration Timeline */}

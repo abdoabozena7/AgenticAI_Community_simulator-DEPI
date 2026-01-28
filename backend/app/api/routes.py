@@ -82,7 +82,8 @@ async def _build_summary(user_context: Dict[str, Any], metrics: Dict[str, Any], 
     response_language = "Arabic" if language == "ar" else "English"
     prompt = (
         "You are summarising a multi-agent market simulation. "
-        "Write 3-5 short sentences in a friendly, human tone. "
+        "Write 6-9 short sentences in a friendly, human tone. "
+        "Explicitly list 2-3 pros and 2-3 cons as part of the summary. "
         "Mention acceptance rate and key concerns. "
         "Give a realistic recommendation (e.g., improve, validate, or proceed). "
         f"Idea: {idea}\n"
@@ -99,31 +100,34 @@ async def _build_summary(user_context: Dict[str, Any], metrics: Dict[str, Any], 
         if language == "ar":
             if acceptance_rate >= 0.6:
                 return (
-                    "الانطباع العام إيجابي. هناك تقدير للفكرة لكن بعض الأشخاص يحتاجون أدلة أكثر. "
-                    "إن قررت المتابعة، اختبر بنموذج صغير ووضّح حدود المخاطر والالتزام."
+                    "الانطباع العام إيجابي. أبرز الإيجابيات: وضوح القيمة، قابلية التنفيذ، وإمكانية توسع السوق. "
+                    "أما السلبيات: مخاطر الامتثال، ثقة المستخدمين، وبعض الشكوك حول الجدوى التشغيلية. "
+                    "يوصى بتجربة نموذج صغير مع مؤشرات أداء واضحة قبل التوسع."
                 )
             if acceptance_rate >= 0.35:
                 return (
-                    "الآراء متباينة. بعض الوكلاء رأوا قيمة، لكن المخاطر والجدوى العملية ما زالت محل نقاش. "
-                    "خفّض نطاق الفكرة وضع ضمانات واختبر شريحة محددة قبل التوسع."
+                    "الآراء متباينة. الإيجابيات تشمل فائدة محتملة ونقطة تميز واضحة، لكن السلبيات تدور حول المخاطر "
+                    "والثقة والجدوى المالية. من الأفضل تقليص النطاق، وتأكيد الدليل العملي، وتجربة سوق محدود أولاً."
                 )
             return (
-                "معظم الوكلاء متحفظون حالياً. المخاوف حول المخاطر أو الثقة تطغى على الفوائد. "
-                "فكّر في تبسيط الفكرة وبناء مصداقية أكبر قبل الاستثمار."
+                "معظم الوكلاء متحفظون حالياً. الإيجابيات قليلة مقارنة بالسلبيات التي تشمل مخاطر الامتثال والثقة "
+                "وضعف الدليل العملي. يُنصح بتعديل الفكرة وبناء مصداقية أقوى قبل الاستثمار."
             )
         if acceptance_rate >= 0.6:
             return (
-                "Overall feedback is positive. People see value in the idea, but a few still need proof. "
-                "If you proceed, validate with a small pilot and tighten the risk/ethics boundaries."
+                "Overall feedback is positive. Pros: clear value, feasible execution, and promising market pull. "
+                "Cons: compliance risk, trust concerns, and operational uncertainty. "
+                "Recommendation: validate with a small pilot and tighten safeguards before scaling."
             )
         if acceptance_rate >= 0.35:
             return (
-                "Feedback is mixed. Some agents like the idea, but risk and practicality are common concerns. "
-                "Refine the scope, add safeguards, and test with a narrow user segment before scaling."
+                "Feedback is mixed. Pros include potential adoption and differentiation. "
+                "Cons include risk, trust, and unclear economics. "
+                "Recommendation: refine scope, add safeguards, and test with a narrow segment."
             )
         return (
-            "Most agents are skeptical right now. Concerns around risk, feasibility, or trust outweigh the benefits. "
-            "Consider simplifying the promise and building credibility before investing further."
+            "Most agents are skeptical right now. Pros are limited, while cons include risk, feasibility, and trust. "
+            "Recommendation: simplify the promise and build credibility before further investment."
         )
 
 

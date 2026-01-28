@@ -12,6 +12,7 @@ export interface ReasoningMessage {
   message: string;
   timestamp: number;
   iteration: number;
+  opinion?: 'accept' | 'reject' | 'neutral';
 }
 
 export interface SimulationMetrics {

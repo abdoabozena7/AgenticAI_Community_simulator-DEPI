@@ -13,6 +13,7 @@ interface ChatPanelProps {
   onSelectOption?: (field: 'category' | 'audience' | 'goals' | 'maturity', value: string) => void;
   isWaitingForCity?: boolean;
   isWaitingForCountry?: boolean;
+  isThinking?: boolean;
   searchState?: {
     status: 'idle' | 'searching' | 'done';
     query?: string;
@@ -35,6 +36,7 @@ export function ChatPanel({
   onSelectOption,
   isWaitingForCity = false,
   isWaitingForCountry = false,
+  isThinking = false,
   searchState,
   settings,
 }: ChatPanelProps) {
@@ -44,12 +46,13 @@ export function ChatPanel({
   const inputRef = useRef<HTMLInputElement>(null);
   const [expandedSources, setExpandedSources] = useState<Record<number, boolean>>({});
   const [searchDetailsOpen, setSearchDetailsOpen] = useState(false);
+  const [isNearBottom, setIsNearBottom] = useState(true);
 
   useEffect(() => {
-    if (scrollRef.current) {
+    if (scrollRef.current && isNearBottom) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, reasoningFeed, activeTab]);
+  }, [messages, reasoningFeed, activeTab, isNearBottom]);
 
   const lastMessageCount = useRef(0);
   useEffect(() => {
@@ -126,9 +129,26 @@ export function ChatPanel({
         className="flex-1 p-4 overflow-y-auto scrollbar-thin"
         ref={scrollRef}
         data-testid={activeTab === 'chat' ? 'chat-messages' : 'reasoning-messages'}
+        onScroll={() => {
+          const el = scrollRef.current;
+          if (!el) return;
+          const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+          setIsNearBottom(distance < 120);
+        }}
       >
         {activeTab === 'chat' ? (
           <div className="space-y-4">
+            {isThinking && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('reasoning')}
+                className="w-full rounded-lg border border-border/40 bg-secondary/30 px-3 py-2 text-sm text-muted-foreground hover:border-primary/50 hover:bg-primary/5 transition"
+              >
+                {settings.language === 'ar'
+                  ? 'جاري التفكير... اضغط لمشاهدة تفكير الوكلاء'
+                  : 'Thinking... click to view agent reasoning'}
+              </button>
+            )}
             {searchState && searchState.status !== 'idle' && (
               <div className="p-3 rounded-lg border border-border/50 bg-secondary/30 space-y-2">
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -283,7 +303,7 @@ export function ChatPanel({
                           >
                             <div className="flex items-center justify-between">
                               <span className="font-medium">{opt.label}</span>
-                              <span className="text-xs text-muted-foreground">✓</span>
+                              <span className="text-xs text-muted-foreground">OK</span>
                             </div>
                             {opt.description && (
                               <p className="text-xs text-muted-foreground mt-1">{opt.description}</p>
@@ -323,11 +343,20 @@ export function ChatPanel({
                     <div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center">
                       <Bot className="w-3 h-3 text-primary" />
                     </div>
-                    <span className="text-xs font-mono text-primary">
+                    <span
+                      className={cn(
+                        "text-xs font-mono",
+                        msg.opinion === 'accept'
+                          ? "text-success"
+                          : msg.opinion === 'reject'
+                          ? "text-destructive"
+                          : "text-primary"
+                      )}
+                    >
                       Agent {msg.agentId.slice(0, 8)}
                     </span>
                     <span className="text-xs text-muted-foreground">
-                      • Iteration {msg.iteration}
+                      � Iteration {msg.iteration}
                     </span>
                   </div>
                   <p className="text-sm text-foreground/90 pl-8">{msg.message}</p>
@@ -337,6 +366,19 @@ export function ChatPanel({
           </div>
         )}
       </div>
+      {activeTab === 'chat' && !isNearBottom && (
+        <button
+          type="button"
+          onClick={() => {
+            if (scrollRef.current) {
+              scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+            }
+          }}
+          className="mx-4 mb-2 rounded-full border border-border/50 bg-secondary/60 px-3 py-1 text-xs text-muted-foreground hover:text-foreground"
+        >
+          {settings.language === 'ar' ? 'الانتقال لآخر الرسائل' : 'Jump to latest'}
+        </button>
+      )}
 
       {/* Input Area */}
       <div className="p-4 border-t border-border/50 shrink-0">

@@ -5,6 +5,7 @@ export interface ReasoningStepEvent {
   agent_id: string;
   iteration: number;
   message: string;
+  opinion?: 'accept' | 'reject' | 'neutral';
   // Backend does not include timestamp; client adds one for ordering.
   timestamp?: number;
 }

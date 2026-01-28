@@ -10,6 +10,8 @@ interface SimulationArenaProps {
   currentIteration: number;
   totalIterations: number;
   onReset: () => void;
+  onToggleSpeed?: () => void;
+  speed?: number;
   language: 'ar' | 'en';
 }
 
@@ -19,6 +21,8 @@ export function SimulationArena({
   currentIteration,
   totalIterations,
   onReset,
+  onToggleSpeed,
+  speed = 1,
   language,
 }: SimulationArenaProps) {
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -73,6 +77,16 @@ export function SimulationArena({
         
         <div className="flex items-center gap-2">
           {/* Pause/Resume not supported by the current backend contract */}
+          {onToggleSpeed && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onToggleSpeed}
+              className="text-muted-foreground hover:text-foreground"
+            >
+              {language === 'ar' ? `السرعة ${speed}x` : `Speed ${speed}x`}
+            </Button>
+          )}
           
           <Button
             variant="ghost"
@@ -173,30 +187,7 @@ export function SimulationArena({
         )}
 
         {/* Iteration indicator overlay */}
-        {status !== 'idle' && (
-          <div className="absolute bottom-4 left-4 right-4">
-            <div className="glass-panel p-3">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm text-muted-foreground">
-                  {language === 'ar' ? 'تقدم التكرارات' : 'Iteration Progress'}
-                </span>
-                <span className="text-sm font-mono text-primary">
-                  {currentIteration} / {totalIterations || 'inf'}
-                </span>
-              </div>
-              <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-primary transition-all duration-500 rounded-full"
-                  style={{ 
-                    width: totalIterations > 0 
-                      ? `${(currentIteration / totalIterations) * 100}%` 
-                      : '50%' 
-                  }}
-                />
-              </div>
-            </div>
-          </div>
-        )}
+       
       </div>
     </div>
   );

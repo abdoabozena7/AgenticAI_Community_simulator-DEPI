@@ -51,6 +51,7 @@ class SimulationEngine:
         language: str,
         idea_label: str,
         peer_label: str,
+        constraints_summary: str,
     ) -> str:
         """Invoke the LLM to produce a short explanation for an opinion change.
 
@@ -81,18 +82,31 @@ class SimulationEngine:
             style = "thinking about social impact, trust, and long-term sustainability"
         response_language = "Arabic" if language == "ar" else "English"
         memory_context = " | ".join(agent.short_memory[-3:]) if agent.short_memory else "None"
+        def _label_opinion_local(opinion: str) -> str:
+            if language != "ar":
+                return opinion
+            return {"accept": "\u0642\u0628\u0648\u0644", "reject": "\u0631\u0641\u0636", "neutral": "\u0645\u062d\u0627\u064a\u062f"}.get(opinion, "\u0645\u062d\u0627\u064a\u062f")
+
+        def _is_mostly_latin(text: str) -> bool:
+            if not text:
+                return False
+            latin = sum(1 for ch in text if "a" <= ch.lower() <= "z")
+            arabic = sum(1 for ch in text if "\u0600" <= ch <= "\u06ff")
+            return latin > arabic * 2 and latin > 10
         prompt = (
             f"You are a {agent.archetype_name or 'participant'} with skepticism level {agent.traits.get('skepticism', 0.5):.2f}. "
             f"Evaluate this idea: {idea_label}. "
-            "Rule: Speak in the first person ('I think', 'I feel'). "
-            "Rule: Use your professional jargon (e.g., ROI, Scalability, Monthly savings). "
-            "Rule: Do NOT use generic sentences. "
-            "Tell exactly why you stay neutral or change your mind. "
+            "Rule: Speak in the first person. "
+            "Rule: Use your professional jargon and concrete trade-offs. "
+            "Rule: Do NOT use generic sentences or templates. "
+            "Rule: Reference another agent's point if it helps. "
+            "Rule: Mention at least one real constraint from the settings or research context. "
+            "Rule: If responding in Arabic, avoid the English words accept/reject/neutral. "
             f"Speak like a human {archetype_lower or 'participant'} {style}. "
-            f"Reference another agent's point (e.g., {peer_label}) if it helps. "
             f"Your last thoughts: {memory_context}. "
-            f"Be specific to the idea context: {research_summary}. "
-            f"Respond in {response_language}."
+            f"Research summary: {research_summary}. "
+            f"Influence context: {constraints_summary}. "
+            f"Respond in {response_language}. If {response_language} is Arabic, do not use any English words or Latin characters."
         )
         try:
             response = await asyncio.wait_for(
@@ -113,16 +127,20 @@ class SimulationEngine:
             words = explanation.split()
             if len(words) > 30:
                 explanation = " ".join(words[:30])
+            if response_language == "Arabic" and _is_mostly_latin(explanation):
+                raise RuntimeError("LLM response not Arabic enough")
             return explanation
         except Exception:
             # Fallback deterministic explanation
             if language == "ar":
+                prev_label = _label_opinion_local(prev_opinion)
+                new_label = _label_opinion_local(new_opinion)
                 if prev_opinion == new_opinion:
                     return (
-                        f"ما زلت على رأيي '{new_opinion}' لأن الأدلة غير حاسمة بعد."
+                        f"ما زلت على رأيي '{new_label}' لأن الأدلة غير حاسمة بعد."
                     )
                 return (
-                    f"تم تغيير الرأي من '{prev_opinion}' إلى '{new_opinion}' "
+                    f"تم تغيير الرأي من '{prev_label}' إلى '{new_label}' "
                     "بسبب تأثير تراكمي أقوى من بقية الوكلاء."
                 )
             return (
@@ -190,13 +208,13 @@ class SimulationEngine:
             text = idea_text.lower()
             concerns = []
             if any(token in text for token in ["legal", "court", "lawsuit", "police", "regulation"]):
-                concerns.append("regulation and liability")
+                concerns.append("regulation and liability" if language != "ar" else "اللوائح والمسؤولية")
             if any(token in text for token in ["predict", "prediction", "outcome"]):
-                concerns.append("prediction accuracy")
+                concerns.append("prediction accuracy" if language != "ar" else "دقة التنبؤ")
             if any(token in text for token in ["documents", "upload", "records", "photos"]):
-                concerns.append("privacy and data security")
+                concerns.append("privacy and data security" if language != "ar" else "الخصوصية وأمن البيانات")
             if not concerns:
-                return "market fit and execution risk"
+                return "market fit and execution risk" if language != "ar" else "ملاءمة السوق ومخاطر التنفيذ"
             return ", ".join(concerns[:2])
 
         def _idea_label() -> str:
@@ -219,6 +237,59 @@ class SimulationEngine:
                     snippet = snippet[:67].rstrip() + "..."
                 return f"the idea '{snippet}'"
             return "this idea"
+
+        def _idea_label_localized() -> str:
+            if language != "ar":
+                return _idea_label()
+            raw = idea_text.strip()
+            if any("؀" <= ch <= "ۿ" for ch in raw):
+                snippet = raw
+                if len(snippet) > 60:
+                    snippet = snippet[:57].rstrip() + "..."
+                return f"الفكرة: {snippet}"
+            text_local = raw.lower()
+            if "legal" in text_local or "court" in text_local:
+                if "predict" in text_local or "outcome" in text_local:
+                    return "مساعد قانوني ذكي لتوقع نتائج القضايا"
+                return "مساعد قانوني ذكي"
+            if any(token in text_local for token in ["medical", "health", "clinic", "doctor"]):
+                return "مساعد صحي ذكي"
+            if "finance" in text_local or "bank" in text_local:
+                return "مساعد مالي ذكي"
+            if "education" in text_local or "school" in text_local:
+                return "مساعد تعليمي ذكي"
+            if "e-commerce" in text_local or "commerce" in text_local or "retail" in text_local:
+                return "منتج تجاري إلكتروني"
+            return "الفكرة"
+
+        idea_label_for_llm = _idea_label_localized() if language == "ar" else _idea_label()
+
+        def _constraints_summary() -> str:
+            category = str(user_context.get("category") or "")
+            audience = ", ".join(user_context.get("targetAudience") or [])
+            goals = ", ".join(user_context.get("goals") or [])
+            risk = user_context.get("riskAppetite")
+            maturity = str(user_context.get("ideaMaturity") or "")
+            location = f"{user_context.get('city') or ''}, {user_context.get('country') or ''}".strip(", ")
+            parts = []
+            if category:
+                parts.append(f"category={category}" if language != "ar" else f"الفئة={category}")
+            if audience:
+                parts.append(f"audience={audience}" if language != "ar" else f"الجمهور={audience}")
+            if goals:
+                parts.append(f"goals={goals}" if language != "ar" else f"الهدف={goals}")
+            if maturity:
+                parts.append(f"maturity={maturity}" if language != "ar" else f"النضج={maturity}")
+            if location:
+                parts.append(f"location={location}" if language != "ar" else f"الموقع={location}")
+            if isinstance(risk, (int, float)):
+                parts.append(f"risk={risk:.2f}" if language != "ar" else f"المخاطرة={risk:.2f}")
+            return "; ".join(parts)
+
+        def _label_opinion(opinion: str) -> str:
+            if language != "ar":
+                return opinion
+            return {"accept": "قبول", "reject": "رفض", "neutral": "محايد"}.get(opinion, "محايد")
 
         def _initial_opinion(traits: Dict[str, float]) -> str:
             optimism = float(traits.get("optimism", 0.5))
@@ -282,6 +353,20 @@ class SimulationEngine:
             for agent in sorted_agents[-swing:]:
                 agent.current_opinion = "reject"
 
+        # Determine number of iterations (3-6 inclusive)
+        requested_iterations = user_context.get("iterations")
+        if isinstance(requested_iterations, int) and 1 <= requested_iterations <= 12:
+            num_iterations = requested_iterations
+        else:
+            num_iterations = random.randint(3, 6)
+        # Simulation speed (1x default, 10x fast)
+        speed = user_context.get("speed") or 1
+        try:
+            speed = float(speed)
+        except Exception:
+            speed = 1.0
+        speed = max(0.5, min(20.0, speed))
+
         # Emit initial agent snapshot (iteration 0)
         await emitter(
             "agents",
@@ -291,13 +376,21 @@ class SimulationEngine:
                 "agents": [_agent_snapshot(agent) for agent in agents],
             },
         )
-
-        # Determine number of iterations (3-6 inclusive)
-        requested_iterations = user_context.get("iterations")
-        if isinstance(requested_iterations, int) and 1 <= requested_iterations <= 12:
-            num_iterations = requested_iterations
-        else:
-            num_iterations = random.randint(3, 6)
+        # Emit initial metrics so UI updates immediately
+        initial_metrics = compute_metrics(agents)
+        await emitter(
+            "metrics",
+            {
+                "accepted": initial_metrics["accepted"],
+                "rejected": initial_metrics["rejected"],
+                "neutral": initial_metrics["neutral"],
+                "acceptance_rate": initial_metrics["acceptance_rate"],
+                "total_agents": initial_metrics["total_agents"],
+                "per_category": initial_metrics["per_category"],
+                "iteration": 0,
+                "total_iterations": num_iterations,
+            },
+        )
 
         def _friendly_category(category_id: str) -> str:
             return category_id.replace("_", " ").title()
@@ -352,31 +445,32 @@ class SimulationEngine:
             category = _friendly_category(speaker.category_id)
             archetype = speaker.archetype_name or category
             vocab = _persona_vocab(archetype, category, language)
-            focal = random.choice(vocab) if vocab else _idea_concerns()
-            other_tag = f"Agent {other.agent_id[:4]}"
+            focal = _pick_phrase(f"{speaker.agent_id}-debate-{iteration}", vocab) if vocab else _idea_concerns()
+            other_tag = f"Agent {other.agent_id[:4]}" if language != "ar" else f"الوكيل {other.agent_id[:4]}"
+            constraints = _constraints_summary()
             if language == "ar":
                 if speaker.current_opinion == "reject":
                     return (
-                        f"{other_tag} شايف إن الفكرة جيدة، لكنني أرى أن {focal} ما زال نقطة ضعف. "
-                        "محتاج مبرر عملي قبل أن أغيّر رأيي."
+                        f"{other_tag} شايف الفكرة جيدة، لكن {focal} ما زالت نقطة ضعف واضحة عندي. "
+                        f"محتاج دليل عملي أو أرقام قبل ما أغيّر رأيي. ({constraints})"
                     )
                 if speaker.current_opinion == "accept":
                     return (
-                        f"{other_tag} متحفظ، لكني شايف أن {focal} يعطي أفضلية واضحة للفكرة حتى الآن."
+                        f"{other_tag} متحفظ، لكني شايف أن {focal} يعطي أفضلية واضحة للفكرة حتى الآن. ({constraints})"
                     )
                 return (
-                    f"{other_tag} قال رأيه، وأنا محايد لأن تفاصيل {focal} غير محسومة."
+                    f"{other_tag} قال رأيه، وأنا محايد لأن تفاصيل {focal} غير محسومة حتى الآن. ({constraints})"
                 )
             if speaker.current_opinion == "reject":
                 return (
                     f"{other_tag} likes the idea, but I still see {focal} as a major weak spot. "
-                    "I need concrete proof before moving."
+                    f"I need concrete proof before moving. ({constraints})"
                 )
             if speaker.current_opinion == "accept":
                 return (
-                    f"{other_tag} is cautious, but I think {focal} keeps the upside credible right now."
+                    f"{other_tag} is cautious, but I think {focal} keeps the upside credible right now. ({constraints})"
                 )
-            return f"{other_tag} shared a view; I'm still neutral because {focal} feels unresolved."
+            return f"{other_tag} shared a view; I'm still neutral because {focal} feels unresolved. ({constraints})"
 
         def _persona_vocab(archetype: str, category: str, language: str) -> list[str]:
             a = archetype.lower()
@@ -419,6 +513,7 @@ class SimulationEngine:
             risk_tolerance = agent.traits.get("risk_tolerance", 0.5)
             top_opinion = max(influence_weights, key=influence_weights.get)
             archetype = agent.archetype_name or category
+            idea_local = _idea_label_localized() if language == "ar" else idea_local
             prefix = _pick_phrase(
                 f"{agent.agent_id}-{iteration}",
                 [
@@ -436,7 +531,7 @@ class SimulationEngine:
                 ],
             )
             vocab = _persona_vocab(archetype, category, language)
-            focal = random.choice(vocab) if vocab else _idea_concerns()
+            focal = _pick_phrase(f"{agent.agent_id}-vocab-{iteration}", vocab) if vocab else _idea_concerns()
             peer = _pick_phrase(
                 f"{agent.agent_id}-peer-{iteration}",
                 ["Agent A", "Agent B", "Agent C"] if language != "ar" else ["الوكيل أ", "الوكيل ب", "الوكيل ج"],
@@ -445,31 +540,31 @@ class SimulationEngine:
                 if new_opinion == "accept":
                     if language == "ar":
                         return (
-                            f"{prefix} ({archetype}) أصبحت ميّالاً للقبول لأن {_idea_label()} تبدو قابلة للتنفيذ، "
-                            f"ونقطة {peer} حول {focal} قللت ترددي."
+                            f"{prefix} ({archetype}) أصبحت ميّالاً للقبول لأن {idea_local} تبدو قابلة للتنفيذ، "
+                            f"ونقطة {peer} حول {focal} قللت ترددي، لكن ما زلت أراقب مخاطر {_idea_concerns()}."
                         )
                     return (
-                        f"{prefix} ({archetype}), I now lean accept because {_idea_label()} feels feasible "
-                        f"and the {focal} case is convincing after {peer}'s point."
+                        f"{prefix} ({archetype}), I now lean accept because {idea_local} feels feasible "
+                        f"and the {focal} case is convincing after {peer}'s point, though {_idea_concerns()} still matters."
                     )
                 if new_opinion == "reject":
                     if language == "ar":
                         return (
-                            f"{prefix} ({archetype}) اتجهت للرفض لأن {_idea_label()} تثير مخاطر تخص "
-                            f"{_idea_concerns()}، وتحذير {peer} عزز ذلك."
+                            f"{prefix} ({archetype}) اتجهت للرفض لأن {idea_local} تثير مخاطر تخص "
+                            f"{_idea_concerns()}، وتحذير {peer} عزز ذلك، ولم أجد ميزة قوية في {focal}."
                         )
                     return (
-                        f"{prefix} ({archetype}), I moved to reject because {_idea_label()} raises "
-                        f"risks around {_idea_concerns()}, and {peer}'s caution reinforced it."
+                        f"{prefix} ({archetype}), I moved to reject because {idea_local} raises "
+                        f"risks around {_idea_concerns()}, and {peer}'s caution reinforced it while {focal} looked weak."
                     )
                 if language == "ar":
                     return (
-                        f"{prefix} ({archetype}) انتقلت للموقف المحايد تجاه {_idea_label()} لأن المؤشرات "
-                        "مختلطة وما زلت أحتاج أدلة أوضح."
+                        f"{prefix} ({archetype}) انتقلت للموقف المحايد تجاه {idea_local} لأن المؤشرات "
+                        f"مختلطة: هناك فائدة في {focal} لكن مخاطر {_idea_concerns()} ما زالت بلا إجابة."
                     )
                 return (
-                    f"{prefix} ({archetype}), I moved to neutral on {_idea_label()} because the signals "
-                    "are mixed and I need more evidence."
+                    f"{prefix} ({archetype}), I moved to neutral on {idea_local} because the signals "
+                    f"are mixed: {focal} looks promising but {_idea_concerns()} is still unresolved."
                 )
             # Not changed
             if agent.current_opinion == "accept":
@@ -490,8 +585,8 @@ class SimulationEngine:
                 if skepticism > 0.6:
                     reason = f"{focal} واضحة لكني أريد ضمانات" if language == "ar" else f"{focal} is clear, but I still want safeguards"
                 if language == "ar":
-                    return f"{prefix} ({archetype}) ما زلت أميل للقبول بخصوص {_idea_label()} لأن {reason}."
-                return f"{prefix} ({archetype}), I still lean accept on {_idea_label()} because {reason}."
+                    return f"{prefix} ({archetype}) ما زلت أميل للقبول بخصوص {idea_local} لأن {reason}، مع تحفظ حول {_idea_concerns()}."
+                return f"{prefix} ({archetype}), I still lean accept on {idea_local} because {reason}, though {_idea_concerns()} needs safeguards."
             if agent.current_opinion == "reject":
                 reason = _pick_phrase(
                     f"{agent.agent_id}-reject-{iteration}",
@@ -510,26 +605,26 @@ class SimulationEngine:
                 if risk_tolerance > 0.7:
                     reason = f"{focal} مرتفعة والقيمة غير واضحة" if language == "ar" else f"{focal} is high and the value is unclear"
                 if language == "ar":
-                    return f"{prefix} ({archetype}) أميل للرفض بخصوص {_idea_label()} لأن {reason}."
-                return f"{prefix} ({archetype}), I'm leaning reject on {_idea_label()} because {reason}."
+                    return f"{prefix} ({archetype}) أميل للرفض بخصوص {idea_local} لأن {reason}، ولا أرى ميزة حقيقية في {focal} بعد."
+                return f"{prefix} ({archetype}), I'm leaning reject on {idea_local} because {reason}, and {focal} doesn't offset it yet."
             if optimism > 0.6:
                 if language == "ar":
                     return (
-                        f"{prefix} ({archetype}) ما زلت محايداً تجاه {_idea_label()}: "
-                        "أرى إمكانات، لكن الأدلة ليست قوية بعد."
+                        f"{prefix} ({archetype}) ما زلت محايداً تجاه {idea_local}: "
+                        f"أرى إمكانات في {focal}، لكن الأدلة ليست قوية بعد."
                     )
                 return (
-                    f"{prefix} ({archetype}), I stay neutral on {_idea_label()}: "
-                    "I see potential, but the evidence is not strong yet."
+                    f"{prefix} ({archetype}), I stay neutral on {idea_local}: "
+                    f"I see potential in {focal}, but the evidence is not strong yet."
                 )
             if language == "ar":
                 return (
                     f"{prefix} ({archetype}) ما زلت محايداً لأن بيانات {focal} غير كافية لدي الآن، "
-                    "وأحتاج توضيحاً عملياً قبل الحسم."
+                    f"ومخاطر {_idea_concerns()} تحتاج توضيحاً عملياً قبل الحسم."
                 )
             return (
                 f"{prefix} ({archetype}), I'm still neutral because {focal} evidence feels thin, "
-                "and I need concrete proof before committing."
+                f"and {_idea_concerns()} still needs concrete proof."
             )
 
         # Main simulation loop
@@ -558,8 +653,14 @@ class SimulationEngine:
                 msg_b = _dedupe_message(msg_b, b, iteration)
                 a.record_reasoning_step(iteration=iteration, message=msg_a, triggered_by="debate", opinion_change=None)
                 b.record_reasoning_step(iteration=iteration, message=msg_b, triggered_by="debate", opinion_change=None)
-                await emitter("reasoning_step", {"agent_id": a.agent_id, "iteration": iteration, "message": msg_a})
-                await emitter("reasoning_step", {"agent_id": b.agent_id, "iteration": iteration, "message": msg_b})
+                await emitter(
+                    "reasoning_step",
+                    {"agent_id": a.agent_id, "iteration": iteration, "message": msg_a, "opinion": a.current_opinion},
+                )
+                await emitter(
+                    "reasoning_step",
+                    {"agent_id": b.agent_id, "iteration": iteration, "message": msg_b, "opinion": b.current_opinion},
+                )
 
             # Phase 2: Apply opinion updates
             any_changed = False
@@ -599,8 +700,9 @@ class SimulationEngine:
                             True,
                             research_summary,
                             language,
-                            _idea_label(),
+                            idea_label_for_llm,
                             peer_label,
+                            _constraints_summary(),
                         )
                     except Exception:
                         explanation = _human_reasoning(
@@ -633,6 +735,7 @@ class SimulationEngine:
                             "agent_id": agent.agent_id,
                             "iteration": iteration,
                             "message": explanation,
+                            "opinion": agent.current_opinion,
                         },
                     )
                 else:
@@ -660,8 +763,9 @@ class SimulationEngine:
                                 False,
                                 research_summary,
                                 language,
-                                _idea_label(),
+                                idea_label_for_llm,
                                 peer_label,
+                                _constraints_summary(),
                             )
                         except Exception:
                             explanation = _human_reasoning(agent, iteration, influence_weights, False)
@@ -682,6 +786,7 @@ class SimulationEngine:
                             "agent_id": agent.agent_id,
                             "iteration": iteration,
                             "message": explanation,
+                            "opinion": agent.current_opinion,
                         },
                     )
             if not any_changed:
@@ -735,6 +840,7 @@ class SimulationEngine:
                         "agent_id": wild_agent.agent_id,
                         "iteration": iteration,
                         "message": wild_message,
+                        "opinion": wild_agent.current_opinion,
                     },
                 )
 
@@ -765,7 +871,7 @@ class SimulationEngine:
                 },
             )
             # Small delay to simulate asynchronous processing and allow UI to update
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.25 / speed)
 
         # After all iterations, compute final metrics
         final_metrics = compute_metrics(agents)

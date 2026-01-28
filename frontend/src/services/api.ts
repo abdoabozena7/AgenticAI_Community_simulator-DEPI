@@ -14,6 +14,7 @@ export interface SimulationConfig {
   research_summary?: string;
   research_sources?: SearchResult[];
   language?: 'ar' | 'en';
+  speed?: number;
 }
 
 export interface SimulationResponse {
@@ -58,6 +59,7 @@ export interface SimulationStateResponse {
     agent_id: string;
     iteration: number;
     message: string;
+    opinion?: 'accept' | 'reject' | 'neutral';
   }[];
   summary?: string;
   error?: string;
@@ -91,7 +93,9 @@ class ApiService {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ message: 'Request failed' }));
-      throw new Error(error.message || 'Request failed');
+      const err = new Error(error.detail || error.message || 'Request failed');
+      (err as Error & { status?: number }).status = response.status;
+      throw err;
     }
 
     return response.json();
@@ -112,7 +116,19 @@ class ApiService {
 
   async getSimulationState(simulationId: string): Promise<SimulationStateResponse> {
     // Backend contract: GET /simulation/state?simulation_id=...
-    return this.request<SimulationStateResponse>(`/simulation/state?simulation_id=${encodeURIComponent(simulationId)}`);
+    try {
+      return await this.request<SimulationStateResponse>(`/simulation/state?simulation_id=${encodeURIComponent(simulationId)}`);
+    } catch (err) {
+      const status = (err as Error & { status?: number }).status;
+      if (status === 404) {
+        return {
+          simulation_id: simulationId,
+          status: 'completed',
+          error: 'Simulation not found',
+        };
+      }
+      throw err;
+    }
   }
 
   async generateMessage(prompt: string, system?: string): Promise<string> {
@@ -145,6 +161,13 @@ class ApiService {
     return this.request('/llm/intent', {
       method: 'POST',
       body: JSON.stringify({ message, context }),
+    });
+  }
+
+  async detectMessageMode(message: string, context?: string, language?: 'ar' | 'en'): Promise<{ mode: 'update' | 'discuss'; reason?: string | null }> {
+    return this.request('/llm/message_mode', {
+      method: 'POST',
+      body: JSON.stringify({ message, context, language }),
     });
   }
 
