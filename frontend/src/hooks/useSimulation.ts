@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useReducer } from 'react';
+import { useState, useCallback, useEffect, useReducer, useRef } from 'react';
 import { websocketService, WebSocketEvent, MetricsEvent, ReasoningStepEvent, AgentsEvent } from '@/services/websocket';
 import { apiService, SimulationConfig, SimulationStateResponse } from '@/services/api';
 import { Agent, ReasoningMessage, SimulationMetrics, SimulationStatus } from '@/types/simulation';
@@ -10,6 +10,7 @@ interface SimulationState {
   metrics: SimulationMetrics;
   reasoningFeed: ReasoningMessage[];
   summary: string | null;
+  activePulses: { from: string; to: string; active: boolean; pulseProgress: number }[];
 }
 
 type SimulationAction =
@@ -20,6 +21,8 @@ type SimulationAction =
   | { type: 'SET_REASONING'; payload: ReasoningMessage[] }
   | { type: 'ADD_REASONING'; payload: ReasoningStepEvent }
   | { type: 'SET_SUMMARY'; payload: string | null }
+  | { type: 'SET_PULSES'; payload: { from: string; to: string; active: boolean; pulseProgress: number }[] }
+  | { type: 'ADD_PULSES'; payload: { from: string; to: string; active: boolean; pulseProgress: number }[] }
   | { type: 'RESET' };
 
 const initialMetrics: SimulationMetrics = {
@@ -40,6 +43,7 @@ const initialState: SimulationState = {
   metrics: initialMetrics,
   reasoningFeed: [],
   summary: null,
+  activePulses: [],
 };
 
 const hashString = (value: string) => {
@@ -51,13 +55,26 @@ const hashString = (value: string) => {
   return Math.abs(hash);
 };
 
-const createPosition = (seed: string): [number, number, number] => {
+const createPosition = (seed: string, index: number, total: number): [number, number, number] => {
   const base = hashString(seed) || 1;
   const rand = (n: number) => {
     const x = Math.sin(base * n) * 10000;
     return x - Math.floor(x);
   };
-  return [rand(1) * 8 - 4, rand(2) * 8 - 4, rand(3) * 2 - 1];
+  const phi = Math.acos(-1 + (2 * index) / Math.max(total, 1));
+  const theta = Math.sqrt(Math.max(total, 1) * Math.PI) * phi;
+  const radius = 4 + rand(1) * 1.5;
+  return [
+    radius * Math.cos(theta) * Math.sin(phi),
+    radius * Math.sin(theta) * Math.sin(phi),
+    radius * Math.cos(phi),
+  ];
+};
+
+const mapOpinionToStatus = (opinion: string): Agent['status'] => {
+  if (opinion === 'accept') return 'accepted';
+  if (opinion === 'reject') return 'rejected';
+  return 'neutral';
 };
 
 const buildConnections = (agentIds: string[]) => {
@@ -68,7 +85,7 @@ const buildConnections = (agentIds: string[]) => {
       connections.set(id, []);
       return;
     }
-    const picks = 3 + (hashString(`${id}-c`) % 3);
+    const picks = (hashString(`${id}-c`) % 3) + 1;
     const targets = new Set<string>();
     for (let i = 0; i < picks; i += 1) {
       const offset = 1 + (hashString(`${id}-${i}`) % (total - 1));
@@ -80,12 +97,6 @@ const buildConnections = (agentIds: string[]) => {
     connections.set(id, Array.from(targets));
   });
   return connections;
-};
-
-const mapOpinionToStatus = (opinion: string): Agent['status'] => {
-  if (opinion === 'accept') return 'accepted';
-  if (opinion === 'reject') return 'rejected';
-  return 'neutral';
 };
 
 function simulationReducer(state: SimulationState, action: SimulationAction): SimulationState {
@@ -116,24 +127,20 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
     case 'UPDATE_AGENTS': {
       const nextAgents = new Map(state.agents);
       const ts = Date.now();
-      action.payload.agents.forEach((agent) => {
+      const incomingIds = action.payload.agents.map((agent) => agent.agent_id);
+      const allIds = Array.from(new Set([...nextAgents.keys(), ...incomingIds]));
+      const connectionMap = buildConnections(allIds);
+      action.payload.agents.forEach((agent, index) => {
         const existing = nextAgents.get(agent.agent_id);
+        const position = existing?.position ?? createPosition(agent.agent_id, index, allIds.length);
         nextAgents.set(agent.agent_id, {
           id: agent.agent_id,
           status: mapOpinionToStatus(agent.opinion),
-          position: existing?.position ?? createPosition(agent.agent_id),
-          connections: existing?.connections ?? [],
+          position,
+          connections: connectionMap.get(agent.agent_id) ?? existing?.connections ?? [],
           category: agent.category_id,
           lastUpdate: ts,
         });
-      });
-      const ids = Array.from(nextAgents.keys());
-      const connectionMap = buildConnections(ids);
-      ids.forEach((id) => {
-        const existing = nextAgents.get(id);
-        if (existing) {
-          nextAgents.set(id, { ...existing, connections: connectionMap.get(id) ?? [] });
-        }
       });
       return {
         ...state,
@@ -161,10 +168,18 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
           lastUpdate: ts,
         });
       }
+      const pulseTargets = existing?.connections ?? [];
+      const newPulses = pulseTargets.map((to) => ({
+        from: event.agent_id,
+        to,
+        active: true,
+        pulseProgress: 0,
+      }));
       return {
         ...state,
         agents: nextAgents,
         reasoningFeed: [...state.reasoningFeed.slice(-99), newMessage],
+        activePulses: [...state.activePulses, ...newPulses],
       };
     }
 
@@ -179,6 +194,20 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
       return {
         ...state,
         summary: action.payload,
+      };
+    }
+
+    case 'SET_PULSES': {
+      return {
+        ...state,
+        activePulses: action.payload,
+      };
+    }
+
+    case 'ADD_PULSES': {
+      return {
+        ...state,
+        activePulses: [...state.activePulses, ...action.payload],
       };
     }
     
@@ -449,20 +478,27 @@ export function useSimulation() {
     dispatch({ type: 'RESET' });
   }, [pollTask]);
 
-  const activePulses = Array.from(state.agents.values()).flatMap((agent, idx) =>
-    agent.connections.map((to) => ({
-      from: agent.id,
-      to,
-      active: state.status === 'running',
-      pulseProgress: ((state.metrics.currentIteration + idx) % 10) / 10,
-    }))
-  );
+  const pulsesRef = useRef(state.activePulses);
+  useEffect(() => {
+    pulsesRef.current = state.activePulses;
+  }, [state.activePulses]);
+
+  useEffect(() => {
+    if (state.status !== 'running') return;
+    const pulseId = window.setInterval(() => {
+      const next = pulsesRef.current
+        .map((p) => ({ ...p, pulseProgress: p.pulseProgress + 0.08 }))
+        .filter((p) => p.pulseProgress < 1);
+      dispatch({ type: 'SET_PULSES', payload: next });
+    }, 80);
+    return () => window.clearInterval(pulseId);
+  }, [state.status]);
 
   return {
     ...state,
     error,
     startSimulation,
     stopSimulation,
-    activePulses,
+    activePulses: state.activePulses,
   };
 }
