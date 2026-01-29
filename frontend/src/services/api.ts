@@ -13,6 +13,7 @@ export interface SimulationConfig {
   iterations?: number;
   research_summary?: string;
   research_sources?: SearchResult[];
+  research_structured?: SearchStructured;
   language?: 'ar' | 'en';
   speed?: number;
 }
@@ -31,6 +32,7 @@ export interface SimulationResultResponse {
     rejected: number;
     neutral: number;
     acceptance_rate: number;
+    polarization?: number;
     total_iterations?: number;
     per_category?: Record<string, number>;
   };
@@ -39,12 +41,15 @@ export interface SimulationResultResponse {
 export interface SimulationStateResponse {
   simulation_id: string;
   status: 'running' | 'completed';
+  summary_ready?: boolean;
+  summary_at?: string;
   metrics?: {
     total_agents?: number;
     accepted: number;
     rejected: number;
     neutral: number;
     acceptance_rate: number;
+    polarization?: number;
     total_iterations?: number;
     per_category?: Record<string, number>;
     iteration?: number;
@@ -79,6 +84,19 @@ export interface SearchResponse {
   is_live: boolean;
   answer: string;
   results: SearchResult[];
+  structured?: SearchStructured;
+}
+
+export interface SearchStructured {
+  summary?: string;
+  signals?: string[];
+  competition_level?: 'low' | 'medium' | 'high';
+  demand_level?: 'low' | 'medium' | 'high';
+  regulatory_risk?: 'low' | 'medium' | 'high';
+  price_sensitivity?: 'low' | 'medium' | 'high';
+  notable_locations?: string[];
+  gaps?: string[];
+  sources?: { title?: string; url?: string; domain?: string }[];
 }
 
 class ApiService {

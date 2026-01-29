@@ -53,6 +53,10 @@ def compute_pairwise_influences(agents: List[Agent], dataset: Dataset) -> Dict[s
             else:
                 base_multiplier = rule.influence_multiplier
             base_weight = base_multiplier * influencer.influence_weight
+            # Boost influence for high-base-weight personas and leaders
+            base_boost = 1.0 + max(0.0, influencer.base_influence_weight - 1.0) * 0.35
+            if getattr(influencer, "is_leader", False):
+                base_boost *= 1.6
             # Homophily bonus: same category or same archetype increases influence
             homophily = 1.0
             if target.category_id == influencer.category_id:
@@ -67,7 +71,7 @@ def compute_pairwise_influences(agents: List[Agent], dataset: Dataset) -> Dict[s
             # Random noise to preserve stochastic behaviour
             noise = random.uniform(-0.03, 0.03)
             # Compute final influence weight
-            weight = base_weight * homophily * skepticism_factor * susceptibility
+            weight = base_weight * base_boost * homophily * skepticism_factor * susceptibility
             weight += noise
             # Clamp weight to non-negative values
             weight = max(weight, 0.0)
@@ -80,6 +84,7 @@ def decide_opinion_change(
     current_opinion: str,
     influence_weights: Dict[str, float],
     skepticism: float,
+    stubbornness: float = 0.0,
 ) -> Tuple[str, bool]:
     """Decide whether to change opinion based on accumulated influence weights.
 
@@ -99,17 +104,25 @@ def decide_opinion_change(
         A tuple of (new_opinion, changed_flag). If no change occurs,
         new_opinion will equal current_opinion and changed_flag is False.
     """
-    # Sort opinions by descending weight
-    sorted_opinions = sorted(
-        influence_weights.items(), key=lambda item: item[1], reverse=True
-    )
-    top_opinion, top_weight = sorted_opinions[0]
-    second_weight = sorted_opinions[1][1] if len(sorted_opinions) > 1 else 0.0
-    # Compute difference
-    diff = top_weight - second_weight
-    # Determine threshold based on skepticism; more skeptical agents need bigger difference
-    threshold = 0.1 + 0.3 * skepticism  # base threshold plus extra for skepticism
-    # Change opinion only if new opinion is different and diff exceeds threshold
-    if top_opinion != current_opinion and diff > threshold:
-        return top_opinion, True
-    return current_opinion, False
+    weights = {
+        "accept": influence_weights.get("accept", 0.0),
+        "reject": influence_weights.get("reject", 0.0),
+        "neutral": influence_weights.get("neutral", 0.0),
+    }
+    base_threshold = 0.08 + (0.25 * skepticism) + (0.25 * stubbornness)
+
+    # Make neutral less attractive unless it's clearly dominant
+    if weights["accept"] > weights["neutral"] + base_threshold and weights["accept"] >= weights["reject"]:
+        candidate = "accept"
+    elif weights["reject"] > weights["neutral"] + base_threshold and weights["reject"] >= weights["accept"]:
+        candidate = "reject"
+    else:
+        candidate = "neutral"
+
+    # Additional stubbornness to leave current opinion
+    if candidate != current_opinion:
+        stay_threshold = 0.05 + (0.2 * stubbornness) + (0.1 * skepticism)
+        if (weights[candidate] - weights.get(current_opinion, 0.0)) < stay_threshold:
+            candidate = current_opinion
+
+    return candidate, candidate != current_opinion

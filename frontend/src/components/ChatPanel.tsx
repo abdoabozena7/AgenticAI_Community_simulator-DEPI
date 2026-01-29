@@ -14,6 +14,20 @@ interface ChatPanelProps {
   isWaitingForCity?: boolean;
   isWaitingForCountry?: boolean;
   isThinking?: boolean;
+  showRetry?: boolean;
+  onRetryLlm?: () => void;
+  insights?: {
+    idea?: string;
+    location?: string;
+    category?: string;
+    audience?: string[];
+    goals?: string[];
+    maturity?: string;
+    risk?: number;
+    summary?: string;
+    rejectAdvice?: string;
+    rejectReasons?: string[];
+  };
   searchState?: {
     status: 'idle' | 'searching' | 'done';
     query?: string;
@@ -37,11 +51,14 @@ export function ChatPanel({
   isWaitingForCity = false,
   isWaitingForCountry = false,
   isThinking = false,
+  showRetry = false,
+  onRetryLlm,
+  insights,
   searchState,
   settings,
 }: ChatPanelProps) {
   const [inputValue, setInputValue] = useState('');
-  const [activeTab, setActiveTab] = useState<'chat' | 'reasoning'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'reasoning' | 'insights'>('chat');
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const [thinkingOpen, setThinkingOpen] = useState(false);
@@ -124,6 +141,24 @@ export function ChatPanel({
             <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />
           )}
         </button>
+        <button
+          onClick={() => setActiveTab('insights')}
+          className={cn(
+            'flex-1 px-4 py-3 text-sm font-medium transition-all relative',
+            activeTab === 'insights'
+              ? 'text-primary'
+              : 'text-muted-foreground hover:text-foreground'
+          )}
+          data-testid="tab-insights"
+        >
+          <span className="flex items-center justify-center gap-2">
+            <Sparkles className="w-4 h-4" />
+            {settings.language === 'ar' ? 'ملخص الفكرة' : 'Idea Insights'}
+          </span>
+          {activeTab === 'insights' && (
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />
+          )}
+        </button>
       </div>
 
       <div
@@ -139,6 +174,20 @@ export function ChatPanel({
       >
         {activeTab === 'chat' ? (
           <div className="space-y-4">
+            {showRetry && (
+              <div className="poll-card">
+                <p>{settings.language === 'ar' ? 'الـ LLM مشغول الآن.' : 'LLM is busy right now.'}</p>
+                <div className="poll-options">
+                  <button
+                    type="button"
+                    className="poll-option"
+                    onClick={onRetryLlm}
+                  >
+                    {settings.language === 'ar' ? 'أعد المحاولة' : 'Retry'}
+                  </button>
+                </div>
+              </div>
+            )}
             {(isThinking || (searchState && searchState.status === 'searching')) && (
               <div className={cn('thinking-container', thinkingOpen && 'expanded')}>
                 <div
@@ -225,7 +274,7 @@ export function ChatPanel({
               </div>
             )}
           </div>
-        ) : (
+        ) : activeTab === 'reasoning' ? (
           <div className="space-y-3">
             {reasoningFeed.length === 0 ? (
               <div className="text-center py-8">
@@ -263,6 +312,66 @@ export function ChatPanel({
                   <p className="text-sm text-foreground/90 pl-8">{msg.message}</p>
                 </div>
               ))
+            )}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="p-4 rounded-lg bg-secondary/40 border border-border/40">
+              <h4 className="text-sm font-semibold text-foreground mb-2">
+                {settings.language === 'ar' ? 'تفاصيل الفكرة' : 'Idea Details'}
+              </h4>
+              <div className="text-sm text-muted-foreground space-y-1">
+                <div>{settings.language === 'ar' ? 'الفكرة:' : 'Idea:'} <span className="text-foreground">{insights?.idea || '-'}</span></div>
+                <div>{settings.language === 'ar' ? 'الموقع:' : 'Location:'} <span className="text-foreground">{insights?.location || '-'}</span></div>
+                <div>{settings.language === 'ar' ? 'الفئة:' : 'Category:'} <span className="text-foreground">{insights?.category || '-'}</span></div>
+                <div>{settings.language === 'ar' ? 'الجمهور:' : 'Audience:'} <span className="text-foreground">{(insights?.audience || []).join(', ') || '-'}</span></div>
+                <div>{settings.language === 'ar' ? 'الأهداف:' : 'Goals:'} <span className="text-foreground">{(insights?.goals || []).join(', ') || '-'}</span></div>
+                <div>{settings.language === 'ar' ? 'النضج:' : 'Maturity:'} <span className="text-foreground">{insights?.maturity || '-'}</span></div>
+                <div>{settings.language === 'ar' ? 'المخاطرة:' : 'Risk:'} <span className="text-foreground">{typeof insights?.risk === 'number' ? `${insights.risk}%` : '-'}</span></div>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-lg bg-secondary/40 border border-border/40">
+              <h4 className="text-sm font-semibold text-foreground mb-2">
+                {settings.language === 'ar' ? 'لماذا يرفض البعض؟' : 'Why some reject'}
+              </h4>
+              {insights?.rejectReasons && insights.rejectReasons.length > 0 ? (
+                <ul className="text-sm text-muted-foreground space-y-2 list-disc list-inside">
+                  {insights.rejectReasons.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  {settings.language === 'ar'
+                    ? 'سيظهر هنا بعد انتهاء المحاكاة.'
+                    : 'Appears after simulation completes.'}
+                </p>
+              )}
+            </div>
+
+            <div className="p-4 rounded-lg bg-secondary/40 border border-border/40">
+              <h4 className="text-sm font-semibold text-foreground mb-2">
+                {settings.language === 'ar' ? 'كيف نجعلها مقبولة؟' : 'How to make it acceptable'}
+              </h4>
+              {insights?.rejectAdvice ? (
+                <p className="text-sm text-muted-foreground">{insights.rejectAdvice}</p>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  {settings.language === 'ar'
+                    ? 'سنجمع اقتراحات عملية هنا بعد التحليل.'
+                    : 'Actionable tips will appear here after analysis.'}
+                </p>
+              )}
+            </div>
+
+            {insights?.summary && (
+              <div className="p-4 rounded-lg bg-secondary/40 border border-border/40">
+                <h4 className="text-sm font-semibold text-foreground mb-2">
+                  {settings.language === 'ar' ? 'الملخص النهائي' : 'Final Summary'}
+                </h4>
+                <p className="text-sm text-foreground/90 whitespace-pre-wrap">{insights.summary}</p>
+              </div>
             )}
           </div>
         )}

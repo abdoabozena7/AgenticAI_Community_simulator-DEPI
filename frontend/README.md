@@ -1,4 +1,4 @@
-# AgentSim Frontend
+# Point of return Frontend
 
 React + Vite UI for the multi-agent social simulation.
 

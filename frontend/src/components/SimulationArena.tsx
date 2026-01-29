@@ -188,7 +188,7 @@ export const SimulationArena = ({ agents, activePulses }: SimulationArenaProps) 
       {/* Stats overlay */}
       <div className="absolute top-4 right-4 z-10 p-3 rounded-lg bg-card/80 backdrop-blur-sm border border-border">
         <div className="text-xs text-muted-foreground">
-          {agents.length} Nodes ? {agents.reduce((acc, a) => acc + a.connections.length, 0)} Connections
+          {agents.length} Nodes | {agents.reduce((acc, a) => acc + a.connections.length, 0)} Connections
         </div>
       </div>
       
@@ -213,7 +213,7 @@ export const SimulationArena = ({ agents, activePulses }: SimulationArenaProps) 
         {/* Background sphere */}
         <Sphere args={[25, 64, 64]}>
           <meshBasicMaterial 
-            color="#0a0a1a" 
+            color="#1d1d2b" 
             side={THREE.BackSide}
           />
         </Sphere>

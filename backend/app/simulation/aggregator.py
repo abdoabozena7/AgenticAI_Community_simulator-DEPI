@@ -44,11 +44,18 @@ def compute_metrics(agents: List[Agent]) -> Dict[str, float | int | Dict[str, in
             per_category[agent.category_id] += 1
     total = len(agents)
     acceptance_rate = counts["accept"] / total if total > 0 else 0.0
+    decided = counts["accept"] + counts["reject"]
+    if decided > 0:
+        balance = 1.0 - (abs(counts["accept"] - counts["reject"]) / decided)
+        polarization = max(0.0, min(1.0, balance * (decided / total)))
+    else:
+        polarization = 0.0
     return {
         "total_agents": total,
         "accepted": counts["accept"],
         "rejected": counts["reject"],
         "neutral": counts["neutral"],
         "acceptance_rate": acceptance_rate,
+        "polarization": polarization,
         "per_category": dict(per_category),
     }

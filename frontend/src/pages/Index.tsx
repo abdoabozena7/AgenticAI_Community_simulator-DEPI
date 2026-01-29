@@ -198,12 +198,17 @@ const Index = () => {
     theme: 'dark',
     autoFocusInput: true,
   });
+  const [showSettings, setShowSettings] = useState(false);
 
   const [activePanel, setActivePanel] = useState<'config' | 'chat'>('chat');
   const [missingFields, setMissingFields] = useState<string[]>([]);
   const [pendingConfigReview, setPendingConfigReview] = useState(false);
   const [isConfigSearching, setIsConfigSearching] = useState(false);
   const [isChatThinking, setIsChatThinking] = useState(false);
+  const [llmBusy, setLlmBusy] = useState(false);
+  const [llmRetryMessage, setLlmRetryMessage] = useState<string | null>(null);
+  const [summaryAdvice, setSummaryAdvice] = useState<string>('');
+  const [summaryReasons, setSummaryReasons] = useState<string[]>([]);
   const [searchState, setSearchState] = useState<{
     status: 'idle' | 'searching' | 'done';
     query?: string;
@@ -214,16 +219,15 @@ const Index = () => {
   }>({ status: 'idle' });
   const [pendingUpdate, setPendingUpdate] = useState<string | null>(null);
   const [simulationSpeed, setSimulationSpeed] = useState(1);
-  const [researchContext, setResearchContext] = useState<{ summary: string; sources: SearchResponse['results'] }>({
+  const [researchContext, setResearchContext] = useState<{
+    summary: string;
+    sources: SearchResponse['results'];
+    structured?: SearchResponse['structured'];
+  }>({
     summary: '',
     sources: [],
+    structured: undefined,
   });
-
-  const inferLocation = useCallback((_text: string): { country?: string; city?: string } => {
-    return {};
-  }, []);
-
-  
 
   const getAssistantMessage = useCallback(async (prompt: string) => {
     const context = chatMessages
@@ -248,6 +252,26 @@ const Index = () => {
     }
   }, [chatMessages, settings.language]);
 
+  const extractWithRetry = useCallback(async (message: string, schemaPayload: Record<string, unknown>) => {
+    const timeoutMs = 10000;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const result = await Promise.race([
+          apiService.extractSchema(message, schemaPayload),
+          new Promise<ReturnType<typeof apiService.extractSchema>>((_, reject) =>
+            setTimeout(() => reject(new Error('Extract timeout')), timeoutMs)
+          ),
+        ]);
+        return result;
+      } catch (err) {
+        if (attempt == 1) {
+          throw err;
+        }
+      }
+    }
+    throw new Error('Extract failed');
+  }, []);
+
   const addSystemMessage = useCallback((content: string, options?: ChatMessage['options']) => {
     const message: ChatMessage = {
       id: `sys-${Date.now()}`,
@@ -263,8 +287,25 @@ const Index = () => {
     if (!simulation.summary) return;
     if (simulation.summary === summaryRef.current) return;
     addSystemMessage(simulation.summary);
+    const arMatch = simulation.summary.split('نصيحة لإقناع المعارضين:')[1];
+    const enMatch = simulation.summary.split('Advice to persuade rejecters:')[1];
+    const advice = (arMatch || enMatch || '').trim();
+    if (advice) {
+      setSummaryAdvice(advice);
+    }
+    const reasonKeywords = settings.language === 'ar'
+      ? ['مخاطر', 'قلق', 'رفض', 'غير واضح', 'غير حاسم', 'امتثال', 'ثقة', 'خصوصية', 'تكلفة', 'منافس']
+      : ['risk', 'concern', 'reject', 'unclear', 'inconclusive', 'compliance', 'trust', 'privacy', 'cost', 'competition'];
+    const sentences = simulation.summary
+      .split(/[.\n]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const reasons = sentences.filter((s) => reasonKeywords.some((k) => s.toLowerCase().includes(k)));
+    if (reasons.length) {
+      setSummaryReasons(reasons.slice(0, 4));
+    }
     summaryRef.current = simulation.summary;
-  }, [simulation.summary, addSystemMessage]);
+  }, [simulation.summary, addSystemMessage, settings.language]);
 
   useEffect(() => {
     const saved = localStorage.getItem('appSettings');
@@ -315,6 +356,7 @@ const Index = () => {
       goals: input.goals,
       research_summary: researchContext.summary,
       research_sources: researchContext.sources,
+      research_structured: researchContext.structured,
       language: settings.language,
       speed: simulationSpeed,
     };
@@ -508,12 +550,13 @@ const Index = () => {
         isLive: searchData.is_live,
         results: searchData.results,
       });
-      const summary = searchData.answer
+      const summary = searchData.structured?.summary
+        || searchData.answer
         || searchData.results.map((r) => r.snippet).filter(Boolean).slice(0, 3).join(' ');
-      setResearchContext({ summary, sources: searchData.results });
+      setResearchContext({ summary, sources: searchData.results, structured: searchData.structured });
     } catch {
       setSearchState({ status: 'done', query: ideaText, answer: '', provider: 'none', isLive: false, results: [] });
-      setResearchContext({ summary: '', sources: [] });
+      setResearchContext({ summary: '', sources: [], structured: undefined });
       addSystemMessage(settings.language === 'ar'
         ? 'لم أجد معلومات كافية سريعاً، سأكمل بالـ LLM مباشرة.'
         : 'Not enough information quickly; asking the LLM directly.');
@@ -603,19 +646,17 @@ const Index = () => {
             };
             let extraction = null;
             try {
-              extraction = await Promise.race([
-                apiService.extractSchema(trimmed, schemaPayload),
-                new Promise<ReturnType<typeof apiService.extractSchema>>((_, reject) =>
-                  setTimeout(() => reject(new Error('Extract timeout')), 6000)
-                ),
-              ]);
+              extraction = await extractWithRetry(trimmed, schemaPayload);
             } catch {
-              extraction = {
-                country: null,
-                city: null,
-                question: null,
-              } as any;
+              addSystemMessage(settings.language === 'ar'
+                ? '??? LLM ????? ??????. ???? ???? ??? ?????.'
+                : 'LLM is busy right now. Please try again in a moment.');
+              setLlmBusy(true);
+              setLlmRetryMessage(trimmed);
+              return;
             }
+            setLlmBusy(false);
+            setLlmRetryMessage(null);
 
             const nextInput: UserInput = {
               ...userInput,
@@ -689,7 +730,6 @@ If rejection is about competition or location, suggest searching for a better lo
             return;
           }
 
-          const inferred = inferLocation(trimmed);
           const schemaPayload = {
             idea: userInput.idea,
             country: userInput.country,
@@ -699,32 +739,21 @@ If rejection is about competition or location, suggest searching for a better lo
             goals: userInput.goals,
             risk_appetite: (userInput.riskAppetite ?? 50) / 100,
             idea_maturity: userInput.ideaMaturity,
-            ...inferred,
           };
           let extraction = null;
           try {
-            const timeoutMs = 6000;
-            extraction = await Promise.race([
-              apiService.extractSchema(trimmed, schemaPayload),
-              new Promise<ReturnType<typeof apiService.extractSchema>>((_, reject) =>
-                setTimeout(() => reject(new Error('Extract timeout')), timeoutMs)
-              ),
-            ]);
+            extraction = await extractWithRetry(trimmed, schemaPayload);
           } catch (extractErr) {
-            console.warn('Schema extraction timed out, using heuristic fallback.', extractErr);
-            extraction = {
-              idea: trimmed,
-              country: inferred.country || userInput.country,
-              city: inferred.city || userInput.city,
-              category: userInput.category,
-              target_audience: userInput.targetAudience,
-              goals: userInput.goals,
-              risk_appetite: (userInput.riskAppetite ?? 50) / 100,
-              idea_maturity: userInput.ideaMaturity,
-              missing: [],
-              question: null,
-            };
+            console.warn('Schema extraction failed.', extractErr);
+            addSystemMessage(settings.language === 'ar'
+              ? '??? LLM ????? ??????. ???? ???? ??? ?????.'
+              : 'LLM is busy right now. Please try again in a moment.');
+            setLlmBusy(true);
+            setLlmRetryMessage(trimmed);
+            return;
           }
+          setLlmBusy(false);
+          setLlmRetryMessage(null);
 
           const normalizedCategory = normalizeCategoryValue(extraction.category);
           const normalizedAudiences = normalizeOptionList(extraction.target_audience, AUDIENCE_OPTIONS);
@@ -735,8 +764,8 @@ If rejection is about competition or location, suggest searching for a better lo
           const nextInput: UserInput = {
             ...userInput,
             idea: extraction.idea || userInput.idea || trimmed,
-            country: userInput.country || extraction.country || inferred.country || '',
-            city: userInput.city || extraction.city || inferred.city || '',
+            country: userInput.country || extraction.country || '',
+            city: userInput.city || extraction.city || '',
             category: touched.category
               ? userInput.category
               : normalizedCategory || userInput.category || DEFAULT_CATEGORY,
@@ -786,11 +815,11 @@ If rejection is about competition or location, suggest searching for a better lo
     },
       [
         addSystemMessage,
+        extractWithRetry,
         getAssistantMessage,
         getMissingForStart,
         handleConfigSubmit,
         handleStart,
-        inferLocation,
         pendingConfigReview,
         pendingUpdate,
         promptForMissing,
@@ -877,6 +906,14 @@ If rejection is about competition or location, suggest searching for a better lo
     ]
   );
 
+  const handleRetryLlm = useCallback(() => {
+    if (!llmRetryMessage) return;
+    setLlmBusy(false);
+    const retryText = llmRetryMessage;
+    setLlmRetryMessage(null);
+    handleSendMessage(retryText);
+  }, [handleSendMessage, llmRetryMessage]);
+
   useEffect(() => {
     const handleMove = (event: MouseEvent) => {
       if (!dragRef.current.side || !containerRef.current) return;
@@ -922,48 +959,11 @@ If rejection is about competition or location, suggest searching for a better lo
         simulationStatus={simulation.status}
         isConnected={websocketService.isConnected()}
         language={settings.language}
+        settings={settings}
+        showSettings={showSettings}
+        onToggleSettings={() => setShowSettings((prev) => !prev)}
+        onSettingsChange={(updates) => setSettings((prev) => ({ ...prev, ...updates }))}
       />
-
-      <div className="glass-panel border-b border-border/50 px-6 py-3">
-        <div className="flex flex-wrap items-center gap-4">
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-muted-foreground">{settings.language === 'ar' ? 'اللغة' : 'Language'}</span>
-            <button
-              type="button"
-              className={settings.language === 'ar' ? 'px-3 py-1 rounded-md bg-primary text-primary-foreground' : 'px-3 py-1 rounded-md bg-secondary text-foreground'}
-              onClick={() => setSettings((prev) => ({ ...prev, language: 'ar' }))}
-            >
-              عربي
-            </button>
-            <button
-              type="button"
-              className={settings.language === 'en' ? 'px-3 py-1 rounded-md bg-primary text-primary-foreground' : 'px-3 py-1 rounded-md bg-secondary text-foreground'}
-              onClick={() => setSettings((prev) => ({ ...prev, language: 'en' }))}
-            >
-              English
-            </button>
-          </div>
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-muted-foreground">{settings.language === 'ar' ? 'الثيم' : 'Theme'}</span>
-            <select
-              className="rounded-md bg-secondary border border-border/50 px-2 py-1"
-              value={settings.theme}
-              onChange={(e) => setSettings((prev) => ({ ...prev, theme: e.target.value }))}
-            >
-              <option value="dark">{settings.language === 'ar' ? 'داكن' : 'Dark'}</option>
-              <option value="light">{settings.language === 'ar' ? 'فاتح' : 'Light'}</option>
-            </select>
-          </div>
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-muted-foreground">{settings.language === 'ar' ? 'تركيز تلقائي' : 'Auto focus'}</span>
-            <input
-              type="checkbox"
-              checked={settings.autoFocusInput}
-              onChange={(e) => setSettings((prev) => ({ ...prev, autoFocusInput: e.target.checked }))}
-            />
-          </div>
-        </div>
-      </div>
 
       {/* Main Content */}
       <div
@@ -1029,6 +1029,20 @@ If rejection is about competition or location, suggest searching for a better lo
               isWaitingForCountry={isWaitingForCountry}
               searchState={searchState}
               isThinking={isChatThinking}
+              showRetry={llmBusy}
+              onRetryLlm={handleRetryLlm}
+              insights={{
+                idea: userInput.idea,
+                location: `${userInput.city || ""}${userInput.city && userInput.country ? ", " : ""}${userInput.country || ""}`.trim(),
+                category: userInput.category,
+                audience: userInput.targetAudience,
+                goals: userInput.goals,
+                maturity: userInput.ideaMaturity,
+                risk: userInput.riskAppetite,
+                summary: simulation.summary || "",
+                rejectAdvice: summaryAdvice,
+                rejectReasons: summaryReasons,
+              }}
               settings={settings}
             />
           )}

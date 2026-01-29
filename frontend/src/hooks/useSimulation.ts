@@ -31,6 +31,7 @@ const initialMetrics: SimulationMetrics = {
   rejected: 0,
   neutral: 0,
   acceptanceRate: 0,
+  polarization: 0,
   currentIteration: 0,
   totalIterations: 0,
   perCategoryAccepted: {},
@@ -117,6 +118,7 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
           rejected: event.rejected,
           neutral: event.neutral,
           acceptanceRate: event.acceptance_rate * 100,
+          polarization: typeof event.polarization === 'number' ? event.polarization : state.metrics.polarization,
           currentIteration: event.iteration,
           totalIterations: event.total_iterations ?? state.metrics.totalIterations,
           perCategoryAccepted: event.per_category || {},
@@ -235,6 +237,9 @@ export function useSimulation() {
       case 'agents':
         dispatch({ type: 'UPDATE_AGENTS', payload: event });
         break;
+      case 'summary':
+        dispatch({ type: 'SET_SUMMARY', payload: event.summary });
+        break;
     }
   }, []);
 
@@ -277,6 +282,7 @@ export function useSimulation() {
               rejected: prime.metrics.rejected,
               neutral: prime.metrics.neutral,
               acceptance_rate: prime.metrics.acceptance_rate,
+              polarization: prime.metrics.polarization,
               total_agents: prime.metrics.total_agents || state.metrics.totalAgents,
               iteration: prime.metrics.iteration ?? 0,
               per_category: prime.metrics.per_category || {},
@@ -338,6 +344,7 @@ export function useSimulation() {
                 rejected: stateResponse.metrics.rejected,
                 neutral: stateResponse.metrics.neutral,
                 acceptance_rate: stateResponse.metrics.acceptance_rate,
+                polarization: stateResponse.metrics.polarization,
                 total_agents: stateResponse.metrics.total_agents || state.metrics.totalAgents,
                 iteration: stateResponse.metrics.iteration ?? state.metrics.currentIteration,
                 per_category: stateResponse.metrics.per_category || {},
@@ -382,15 +389,18 @@ export function useSimulation() {
                 rejected: res.metrics.rejected,
                 neutral: res.metrics.neutral,
                 acceptance_rate: res.metrics.acceptance_rate,
+                polarization: res.metrics.polarization,
                 total_agents: res.metrics.total_agents || state.metrics.totalAgents,
                 iteration: state.metrics.currentIteration,
                 per_category: res.metrics.per_category || {},
                 total_iterations: res.metrics.total_iterations,
               },
             });
-            dispatch({ type: 'SET_STATUS', payload: 'completed' });
-            window.clearInterval(intervalId);
-            setPollTask(null);
+            if (stateResponse?.summary || stateResponse?.summary_ready) {
+              dispatch({ type: 'SET_STATUS', payload: 'completed' });
+              window.clearInterval(intervalId);
+              setPollTask(null);
+            }
           }
         } catch {
           // Ignore polling errors.
@@ -420,6 +430,7 @@ export function useSimulation() {
                 rejected: stateResponse.metrics.rejected,
                 neutral: stateResponse.metrics.neutral,
                 acceptance_rate: stateResponse.metrics.acceptance_rate,
+                polarization: stateResponse.metrics.polarization,
                 total_agents: stateResponse.metrics.total_agents || state.metrics.totalAgents,
                 iteration: stateResponse.metrics.iteration ?? state.metrics.currentIteration,
                 per_category: stateResponse.metrics.per_category || {},
@@ -453,9 +464,11 @@ export function useSimulation() {
           }
 
           if (stateResponse.status === 'completed') {
-            dispatch({ type: 'SET_STATUS', payload: 'completed' });
-            window.clearInterval(fastId);
-            setPollTask(null);
+            if (stateResponse.summary || stateResponse.summary_ready) {
+              dispatch({ type: 'SET_STATUS', payload: 'completed' });
+              window.clearInterval(fastId);
+              setPollTask(null);
+            }
           }
         } catch (e) {
           // ignore polling errors

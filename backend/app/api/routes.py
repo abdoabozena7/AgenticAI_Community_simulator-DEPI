@@ -11,6 +11,7 @@ WebSocket connectivity is unavailable.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import uuid
 from typing import Any, Dict, Optional
 
@@ -19,6 +20,7 @@ from fastapi import APIRouter, HTTPException, status
 from ..core.dataset_loader import Dataset
 from ..simulation.engine import SimulationEngine
 from ..core.ollama_client import generate_ollama
+from ..core.context_store import save_context
 from ..api.websocket import manager
 from pathlib import Path
 import hashlib
@@ -42,6 +44,8 @@ def _init_state(simulation_id: str) -> None:
         "reasoning": [],
         "metrics": None,
         "summary": None,
+        "summary_ready": False,
+        "summary_at": None,
     }
 
 
@@ -54,7 +58,7 @@ def _store_event(simulation_id: str, event_type: str, data: Dict[str, Any]) -> N
     """
     state = _simulation_state.setdefault(
         simulation_id,
-        {"agents": [], "reasoning": [], "metrics": None, "summary": None},
+        {"agents": [], "reasoning": [], "metrics": None, "summary": None, "summary_ready": False, "summary_at": None},
     )
     if event_type == "agents":
         state["agents"] = data.get("agents", [])
@@ -68,6 +72,54 @@ def _store_event(simulation_id: str, event_type: str, data: Dict[str, Any]) -> N
             state["reasoning"] = reasoning[-200:]
 
 
+def _analyze_rejectors(reasoning: list[Dict[str, Any]], language: str) -> str:
+    reject_msgs = [step.get("message", "") for step in reasoning if step.get("opinion") == "reject"]
+    if not reject_msgs:
+        return ""
+    text_blob = " ".join(reject_msgs).lower()
+
+    themes = {
+        "competition": ["competition", "crowded", "saturated", "many similar", "?????", "??????", "????", "????", "?????? ????"],
+        "trust": ["trust", "privacy", "data", "security", "?????", "??????", "??????", "????"],
+        "regulation": ["regulation", "compliance", "legal", "liability", "?????", "??????", "?????", "???????"],
+        "economics": ["cost", "price", "roi", "margin", "??????", "???", "?????", "????", "???"],
+        "feasibility": ["feasible", "implementation", "maintenance", "scale", "?????", "?????", "?????", "????"],
+        "adoption": ["adoption", "behavior", "usage", "????", "????", "????", "???????"],
+    }
+
+    hits = []
+    for key, keywords in themes.items():
+        if any(k in text_blob for k in keywords):
+            hits.append(key)
+
+    if not hits:
+        hits = ["trust", "feasibility"]
+
+    if language == "ar":
+        advice_map = {
+            "competition": "???? ????? ?? ???????? ?????? ???? ????? ????? ?? ?????? ??/????? ??? ????????.",
+            "trust": "???? ????? ??? ????? ????? ????????? ?????? ????????? ??????? ????????? ?????.",
+            "regulation": "???? ??? ?????? ????? ?????? ??????? ?????? ??????? ?????????.",
+            "economics": "???? ????? ????? ???????? ???????? ????? ?? ??????? ?????? ???????.",
+            "feasibility": "???? ??? ????? ?????? ?????? ????? ?? ????? ???????.",
+            "adoption": "???? ??? ????? ????? ?????????? ??? ????? ????? ?????? ?????.",
+        }
+        tips = " ".join(advice_map[k] for k in hits[:2])
+        return f"????? ?????? ?????????: {tips}"
+
+    advice_map_en = {
+        "competition": "Address competition by highlighting a unique differentiator or targeting a less crowded location.",
+        "trust": "Build trust with clear privacy, data protection, and safety guarantees.",
+        "regulation": "Provide a concrete compliance plan to reduce regulatory risk.",
+        "economics": "Clarify ROI and pricing so the value clearly outweighs cost.",
+        "feasibility": "Show a realistic execution and maintenance plan with phased rollout.",
+        "adoption": "Explain how you will drive adoption with simple UX and clear incentives.",
+    }
+    tips = " ".join(advice_map_en[k] for k in hits[:2])
+    return f"Advice to persuade rejecters: {tips}"
+
+
+
 async def _build_summary(user_context: Dict[str, Any], metrics: Dict[str, Any], reasoning: list[Dict[str, Any]]) -> str:
     idea = user_context.get("idea", "")
     research_summary = user_context.get("research_summary", "")
@@ -76,59 +128,72 @@ async def _build_summary(user_context: Dict[str, Any], metrics: Dict[str, Any], 
     rejected = metrics.get("rejected", 0)
     neutral = metrics.get("neutral", 0)
     acceptance_rate = metrics.get("acceptance_rate", 0.0)
+    polarization = metrics.get("polarization", 0.0)
     per_category = metrics.get("per_category", {})
     sample_reasoning = " | ".join([step.get("message", "") for step in reasoning[-6:]])
+
+    rejecter_advice = _analyze_rejectors(reasoning, language)
 
     response_language = "Arabic" if language == "ar" else "English"
     prompt = (
         "You are summarising a multi-agent market simulation. "
-        "Write 6-9 short sentences in a friendly, human tone. "
-        "Explicitly list 2-3 pros and 2-3 cons as part of the summary. "
-        "Mention acceptance rate and key concerns. "
-        "Give a realistic recommendation (e.g., improve, validate, or proceed). "
+        "Write 8-12 short sentences in a friendly, human tone. "
+        "Explicitly list 2-3 pros and 2-3 cons. "
+        "Add a brief viability judgment (realistic vs risky) and 1-2 alternatives or pivots. "
+        "Mention acceptance rate, polarization, and key concerns. "
+        "Give a realistic recommendation (improve, validate, or proceed). "
+        "End with a short, targeted advice to persuade the rejecting segment. "
         f"Idea: {idea}\n"
         f"Research context: {research_summary}\n"
         f"Metrics: accepted={accepted}, rejected={rejected}, neutral={neutral}, "
-        f"acceptance_rate={acceptance_rate:.2f}\n"
+        f"acceptance_rate={acceptance_rate:.2f}, polarization={polarization:.2f}\n"
         f"Category acceptance counts: {per_category}\n"
         f"Sample reasoning: {sample_reasoning}\n"
+        f"Rejecter advice seed: {rejecter_advice}\n"
         f"Respond in {response_language}.\n"
     )
     try:
-        return await generate_ollama(prompt=prompt, temperature=0.3)
+        summary = await generate_ollama(prompt=prompt, temperature=0.3)
+        return f"{summary}\n\n{rejecter_advice}" if rejecter_advice else summary
     except Exception:
         if language == "ar":
             if acceptance_rate >= 0.6:
-                return (
+                base = (
                     "الانطباع العام إيجابي. أبرز الإيجابيات: وضوح القيمة، قابلية التنفيذ، وإمكانية توسع السوق. "
                     "أما السلبيات: مخاطر الامتثال، ثقة المستخدمين، وبعض الشكوك حول الجدوى التشغيلية. "
                     "يوصى بتجربة نموذج صغير مع مؤشرات أداء واضحة قبل التوسع."
-                )
+)
+                return f"{base}\n{rejecter_advice}" if rejecter_advice else base
             if acceptance_rate >= 0.35:
-                return (
+                base = (
                     "الآراء متباينة. الإيجابيات تشمل فائدة محتملة ونقطة تميز واضحة، لكن السلبيات تدور حول المخاطر "
                     "والثقة والجدوى المالية. من الأفضل تقليص النطاق، وتأكيد الدليل العملي، وتجربة سوق محدود أولاً."
-                )
-            return (
+)
+                return f"{base}\n{rejecter_advice}" if rejecter_advice else base
+            base = (
                 "معظم الوكلاء متحفظون حالياً. الإيجابيات قليلة مقارنة بالسلبيات التي تشمل مخاطر الامتثال والثقة "
                 "وضعف الدليل العملي. يُنصح بتعديل الفكرة وبناء مصداقية أقوى قبل الاستثمار."
-            )
+)
+            return f"{base}\n{rejecter_advice}" if rejecter_advice else base
         if acceptance_rate >= 0.6:
-            return (
+            base = (
                 "Overall feedback is positive. Pros: clear value, feasible execution, and promising market pull. "
                 "Cons: compliance risk, trust concerns, and operational uncertainty. "
                 "Recommendation: validate with a small pilot and tighten safeguards before scaling."
-            )
+)
+            return f"{base}\n{rejecter_advice}" if rejecter_advice else base
         if acceptance_rate >= 0.35:
-            return (
+            base = (
                 "Feedback is mixed. Pros include potential adoption and differentiation. "
                 "Cons include risk, trust, and unclear economics. "
                 "Recommendation: refine scope, add safeguards, and test with a narrow segment."
-            )
-        return (
+)
+            return f"{base}\n{rejecter_advice}" if rejecter_advice else base
+        base = (
             "Most agents are skeptical right now. Pros are limited, while cons include risk, feasibility, and trust. "
             "Recommendation: simplify the promise and build credibility before further investment."
-        )
+)
+        return f"{base}\n{rejecter_advice}" if rejecter_advice else base
 
 
 @router.post("/start")
@@ -145,6 +210,11 @@ async def start_simulation(user_context: Dict[str, Any]) -> Dict[str, Any]:
     # Generate a unique ID for this simulation
     simulation_id = str(uuid.uuid4())
     _init_state(simulation_id)
+    try:
+        save_context(simulation_id, user_context)
+    except Exception:
+        # Persistence is best-effort; ignore failures.
+        pass
     # Create a simulation engine instance
     engine = SimulationEngine(dataset=dataset)
 
@@ -166,7 +236,12 @@ async def start_simulation(user_context: Dict[str, Any]) -> Dict[str, Any]:
                 metrics=result,
                 reasoning=_simulation_state.get(simulation_id, {}).get("reasoning", []),
             )
-            _simulation_state.setdefault(simulation_id, {})["summary"] = summary
+            state = _simulation_state.setdefault(simulation_id, {})
+            state["summary"] = summary
+            state["summary_ready"] = True
+            state["summary_at"] = datetime.utcnow().isoformat() + "Z"
+            # Broadcast summary explicitly for clients that listen on WS.
+            await manager.broadcast_json({"type": "summary", "summary": summary})
         except Exception as exc:  # noqa: BLE001
             _simulation_state.setdefault(simulation_id, {})["error"] = str(exc)
     # Launch simulation in background

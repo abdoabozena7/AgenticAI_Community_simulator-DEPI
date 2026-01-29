@@ -39,6 +39,7 @@ class SimulationEngine:
 
     def __init__(self, dataset: Dataset) -> None:
         self.dataset = dataset
+        self._llm_semaphore = asyncio.Semaphore(4)
 
     async def _llm_reasoning(
         self,
@@ -48,10 +49,12 @@ class SimulationEngine:
         influence_weights: Dict[str, float],
         changed: bool,
         research_summary: str,
+        research_signals: str,
         language: str,
         idea_label: str,
         peer_label: str,
         constraints_summary: str,
+        recent_phrases: List[str],
     ) -> str:
         """Invoke the LLM to produce a short explanation for an opinion change.
 
@@ -93,6 +96,7 @@ class SimulationEngine:
             latin = sum(1 for ch in text if "a" <= ch.lower() <= "z")
             arabic = sum(1 for ch in text if "\u0600" <= ch <= "\u06ff")
             return latin > arabic * 2 and latin > 10
+        recent_block = "; ".join(recent_phrases[-6:]) if recent_phrases else "None"
         prompt = (
             f"You are a {agent.archetype_name or 'participant'} with skepticism level {agent.traits.get('skepticism', 0.5):.2f}. "
             f"Evaluate this idea: {idea_label}. "
@@ -100,28 +104,34 @@ class SimulationEngine:
             "Rule: Use your professional jargon and concrete trade-offs. "
             "Rule: Do NOT use generic sentences or templates. "
             "Rule: Reference another agent's point if it helps. "
-            "Examples (Arabic): ??? ????? ??? ????? ????? ???????. ??? ????? ?????? ????? ??. ????? ??? ??????? ?? ??????? ?????? "
+            "Rule: Avoid repeating phrases already used by other agents. "
+            "Rule: Start with a surprising or non-standard opener; avoid predictable starts like "
+            "'I think', 'In my view', or 'From my perspective'. "
             "Rule: Use the settings and research as real-world context, but do NOT list them or show numbers. "
             "Rule: If responding in Arabic, avoid the English words accept/reject/neutral. "
+            "Rule: If research contradicts your current stance, show doubt and lower your confidence in words. "
             f"Speak like a human {archetype_lower or 'participant'} {style}. "
             f"Your last thoughts: {memory_context}. "
             f"Research summary: {research_summary}. "
+            f"Research signals: {research_signals}. "
             f"Constraints (do NOT list, just consider): {constraints_summary}. "
+            f"Avoid these phrases (already used): {recent_block}. "
             f"Respond in {response_language}. If {response_language} is Arabic, do not use any English words or Latin characters."
         )
         try:
-            response = await asyncio.wait_for(
-                generate_ollama(
-                    prompt=prompt,
-                    temperature=0.9,
-                    options={
-                        "repeat_penalty": 1.2,
-                        "top_p": 0.9,
-                        "frequency_penalty": 0.6,
-                    },
-                ),
-                timeout=4.0,
-            )
+            async with self._llm_semaphore:
+                response = await asyncio.wait_for(
+                    generate_ollama(
+                        prompt=prompt,
+                        temperature=0.9,
+                        options={
+                            "repeat_penalty": 1.25,
+                            "top_p": 0.9,
+                            "frequency_penalty": 0.7,
+                        },
+                    ),
+                    timeout=4.0,
+                )
             # Truncate to ensure brevity
             explanation = response.strip().split("\n")[0]
             if response_language == "Arabic":
@@ -381,6 +391,17 @@ class SimulationEngine:
             for agent in sorted_agents[-swing:]:
                 agent.current_opinion = "reject"
 
+        # Inject a couple of strong-leader agents to avoid full neutrality
+        leader_count = min(2, len(agents))
+        if leader_count:
+            leaders = random.sample(agents, k=leader_count)
+            for idx, leader in enumerate(leaders):
+                leader.is_leader = True
+                leader.influence_weight *= 2.0
+                leader.fixed_opinion = "accept" if idx % 2 == 0 else "reject"
+                leader.current_opinion = leader.fixed_opinion
+                leader.confidence = max(0.7, leader.confidence)
+
         # Determine number of iterations (3-6 inclusive)
         requested_iterations = user_context.get("iterations")
         if isinstance(requested_iterations, int) and 1 <= requested_iterations <= 12:
@@ -413,6 +434,7 @@ class SimulationEngine:
                 "rejected": initial_metrics["rejected"],
                 "neutral": initial_metrics["neutral"],
                 "acceptance_rate": initial_metrics["acceptance_rate"],
+                "polarization": initial_metrics.get("polarization", 0.0),
                 "total_agents": initial_metrics["total_agents"],
                 "per_category": initial_metrics["per_category"],
                 "iteration": 0,
@@ -543,7 +565,7 @@ class SimulationEngine:
             risk_tolerance = agent.traits.get("risk_tolerance", 0.5)
             top_opinion = max(influence_weights, key=influence_weights.get)
             archetype = agent.archetype_name or category
-            idea_local = _idea_label_localized() if language == "ar" else idea_local
+            idea_local = _idea_label_localized() if language == "ar" else _idea_label()
             prefix = _pick_phrase(
                 f"{agent.agent_id}-{iteration}",
                 [
@@ -658,6 +680,134 @@ class SimulationEngine:
                 f"and {_idea_concerns()} still needs concrete proof."
             )
 
+        def _research_signals_text() -> str:
+            structured = user_context.get("research_structured") or {}
+            signals = structured.get("signals") if isinstance(structured, dict) else []
+            if isinstance(signals, list) and signals:
+                return "; ".join(str(s) for s in signals[:6])
+            return ""
+
+        def _apply_research_grounding(agent: Agent, weights: Dict[str, float]) -> None:
+            structured = user_context.get("research_structured") or {}
+            if not isinstance(structured, dict):
+                return
+            competition = str(structured.get("competition_level") or "").lower()
+            demand = str(structured.get("demand_level") or "").lower()
+            regulatory = str(structured.get("regulatory_risk") or "").lower()
+            price = str(structured.get("price_sensitivity") or "").lower()
+            penalty = 0.0
+            if competition in {"high", "crowded", "saturated"}:
+                weights["reject"] += 0.08
+                penalty += 0.05
+            if demand in {"low", "weak"}:
+                weights["reject"] += 0.06
+                penalty += 0.04
+            if regulatory in {"high", "strict"}:
+                weights["reject"] += 0.06
+                penalty += 0.04
+            if price in {"high"}:
+                weights["reject"] += 0.04
+                penalty += 0.03
+            if demand in {"high", "strong"}:
+                weights["accept"] += 0.05
+            if competition in {"low"}:
+                weights["accept"] += 0.04
+            if penalty > 0 and agent.current_opinion == "accept":
+                agent.confidence = max(0.2, agent.confidence - penalty)
+            if demand in {"high", "strong"} and agent.current_opinion == "reject":
+                agent.confidence = max(0.2, agent.confidence - 0.04)
+
+        async def _emit_reasoning(
+            agent: Agent,
+            iteration: int,
+            influence_weights: Dict[str, float],
+            changed: bool,
+            prev_opinion: str,
+            new_opinion: str,
+            peer_label: str,
+            recent_phrases: List[str],
+        ) -> None:
+            if changed:
+                try:
+                    explanation = await self._llm_reasoning(
+                        agent,
+                        prev_opinion,
+                        new_opinion,
+                        influence_weights,
+                        True,
+                        research_summary,
+                        _research_signals_text(),
+                        language,
+                        idea_label_for_llm,
+                        peer_label,
+                        _constraints_summary(),
+                        recent_phrases,
+                    )
+                except Exception:
+                    explanation = _human_reasoning(
+                        agent,
+                        iteration,
+                        influence_weights,
+                        True,
+                        prev_opinion,
+                        new_opinion,
+                    )
+                if _is_template_message(explanation):
+                    explanation = _human_reasoning(
+                        agent,
+                        iteration,
+                        influence_weights,
+                        True,
+                        prev_opinion,
+                        new_opinion,
+                    )
+                explanation = _dedupe_message(explanation, agent, iteration)
+                agent.record_reasoning_step(
+                    iteration=iteration,
+                    message=explanation,
+                    triggered_by="environment",
+                    opinion_change={"from": prev_opinion, "to": new_opinion},
+                )
+            else:
+                if random.random() < 0.8:
+                    try:
+                        explanation = await self._llm_reasoning(
+                            agent,
+                            agent.current_opinion,
+                            agent.current_opinion,
+                            influence_weights,
+                            False,
+                            research_summary,
+                            _research_signals_text(),
+                            language,
+                            idea_label_for_llm,
+                            peer_label,
+                            _constraints_summary(),
+                            recent_phrases,
+                        )
+                    except Exception:
+                        explanation = _human_reasoning(agent, iteration, influence_weights, False)
+                else:
+                    explanation = _human_reasoning(agent, iteration, influence_weights, False)
+                if _is_template_message(explanation):
+                    explanation = _human_reasoning(agent, iteration, influence_weights, False)
+                explanation = _dedupe_message(explanation, agent, iteration)
+                agent.record_reasoning_step(
+                    iteration=iteration,
+                    message=explanation,
+                    triggered_by="environment",
+                    opinion_change=None,
+                )
+            await emitter(
+                "reasoning_step",
+                {
+                    "agent_id": agent.agent_id,
+                    "iteration": iteration,
+                    "message": explanation,
+                    "opinion": agent.current_opinion,
+                },
+            )
+
         # Main simulation loop
         for iteration in range(1, num_iterations + 1):
             # Phase 1: Compute pairwise influences
@@ -695,82 +845,38 @@ class SimulationEngine:
 
             # Phase 2: Apply opinion updates
             any_changed = False
+            reasoning_tasks: List[asyncio.Task] = []
             for agent in agents:
                 influence_weights = influences[agent.agent_id]
+                _apply_research_grounding(agent, influence_weights)
                 sorted_weights = sorted(influence_weights.items(), key=lambda item: item[1], reverse=True)
                 top_opinion, top_weight = sorted_weights[0]
                 second_weight = sorted_weights[1][1] if len(sorted_weights) > 1 else 0.0
                 diff = max(0.0, top_weight - second_weight)
                 peer_label = _pick_phrase(
                     f"{agent.agent_id}-peer-{iteration}",
-                    ["Agent A", "Agent B", "Agent C"] if language != "ar" else ["الوكيل أ", "الوكيل ب", "الوكيل ج"],
+                    ["Agent A", "Agent B", "Agent C"] if language != "ar" else ["???????????? ??", "???????????? ??", "???????????? ??"],
                 )
-                new_opinion, changed = decide_opinion_change(
-                    current_opinion=agent.current_opinion,
-                    influence_weights=influence_weights,
-                    skepticism=agent.traits.get("skepticism", 0.0),
-                )
-                if not changed:
-                    if influence_weights[top_opinion] > 0 and random.random() < 0.12:
+                prev_opinion = agent.current_opinion
+                if agent.fixed_opinion:
+                    new_opinion = agent.fixed_opinion
+                    changed = new_opinion != prev_opinion
+                else:
+                    new_opinion, changed = decide_opinion_change(
+                        current_opinion=agent.current_opinion,
+                        influence_weights=influence_weights,
+                        skepticism=agent.traits.get("skepticism", 0.0),
+                        stubbornness=agent.stubbornness,
+                    )
+                    if not changed and influence_weights[top_opinion] > 0 and random.random() < 0.12:
                         new_opinion = top_opinion
                         changed = new_opinion != agent.current_opinion
                 if changed:
                     any_changed = True
-                    prev_opinion = agent.current_opinion
                     agent.current_opinion = new_opinion
                     agent.neutral_streak = 0
-                    # Adjust confidence: drop when changed, scaled by conflict strength
                     agent.confidence = max(0.3, agent.confidence - (0.08 + min(0.08, diff)))
-                    # Generate an LLM explanation for the opinion change
-                    try:
-                        explanation = await self._llm_reasoning(
-                            agent,
-                            prev_opinion,
-                            new_opinion,
-                            influence_weights,
-                            True,
-                            research_summary,
-                            language,
-                            idea_label_for_llm,
-                            peer_label,
-                            _constraints_summary(),
-                        )
-                    except Exception:
-                        explanation = _human_reasoning(
-                            agent,
-                            iteration,
-                            influence_weights,
-                            True,
-                            prev_opinion,
-                            new_opinion,
-                        )
-                    if _is_template_message(explanation):
-                        explanation = _human_reasoning(
-                            agent,
-                            iteration,
-                            influence_weights,
-                            True,
-                            prev_opinion,
-                            new_opinion,
-                        )
-                    explanation = _dedupe_message(explanation, agent, iteration)
-                    agent.record_reasoning_step(
-                        iteration=iteration,
-                        message=explanation,
-                        triggered_by="environment",
-                        opinion_change={"from": prev_opinion, "to": new_opinion},
-                    )
-                    await emitter(
-                        "reasoning_step",
-                        {
-                            "agent_id": agent.agent_id,
-                            "iteration": iteration,
-                            "message": explanation,
-                            "opinion": agent.current_opinion,
-                        },
-                    )
                 else:
-                    # Confidence adjustment based on alignment strength
                     if agent.current_opinion == "neutral":
                         agent.neutral_streak += 1
                         decay = 0.04 + min(0.04, diff / 2)
@@ -783,45 +889,27 @@ class SimulationEngine:
                     else:
                         agent.neutral_streak = 0
                         agent.confidence = max(0.25, agent.confidence - 0.05)
-                    # Generate reasoning for stable opinion (LLM sometimes, otherwise human)
-                    if random.random() < 0.8:
-                        try:
-                            explanation = await self._llm_reasoning(
-                                agent,
-                                agent.current_opinion,
-                                agent.current_opinion,
-                                influence_weights,
-                                False,
-                                research_summary,
-                                language,
-                                idea_label_for_llm,
-                                peer_label,
-                                _constraints_summary(),
-                            )
-                        except Exception:
-                            explanation = _human_reasoning(agent, iteration, influence_weights, False)
-                    else:
-                        explanation = _human_reasoning(agent, iteration, influence_weights, False)
-                    if _is_template_message(explanation):
-                        explanation = _human_reasoning(agent, iteration, influence_weights, False)
-                    explanation = _dedupe_message(explanation, agent, iteration)
-                    agent.record_reasoning_step(
-                        iteration=iteration,
-                        message=explanation,
-                        triggered_by="environment",
-                        opinion_change=None,
+                reasoning_tasks.append(
+                    asyncio.create_task(
+                        _emit_reasoning(
+                            agent,
+                            iteration,
+                            influence_weights,
+                            changed,
+                            prev_opinion,
+                            new_opinion,
+                            peer_label,
+                            recent_messages,
+                        )
                     )
-                    await emitter(
-                        "reasoning_step",
-                        {
-                            "agent_id": agent.agent_id,
-                            "iteration": iteration,
-                            "message": explanation,
-                            "opinion": agent.current_opinion,
-                        },
-                    )
+                )
+            if reasoning_tasks:
+                await asyncio.gather(*reasoning_tasks)
+
             if not any_changed:
                 for agent in random.sample(agents, k=max(1, len(agents) // 10)):
+                    if agent.fixed_opinion:
+                        continue
                     flip = random.choice(["accept", "reject"])
                     if agent.current_opinion != flip:
                         agent.current_opinion = flip
@@ -836,6 +924,8 @@ class SimulationEngine:
                 else:
                     flip_to = "neutral"
                 for agent in random.sample(agents, k=max(1, len(agents) // 12)):
+                    if agent.fixed_opinion:
+                        continue
                     if agent.current_opinion != flip_to:
                         agent.current_opinion = flip_to
                         agent.confidence = max(0.3, agent.confidence - 0.1)
@@ -845,13 +935,19 @@ class SimulationEngine:
                 sorted_agents = sorted(agents, key=_opinion_score, reverse=True)
                 swing = max(1, len(agents) // 8)
                 for agent in sorted_agents[:swing]:
+                    if agent.fixed_opinion:
+                        continue
                     agent.current_opinion = "accept"
                 for agent in sorted_agents[-swing:]:
+                    if agent.fixed_opinion:
+                        continue
                     agent.current_opinion = "reject"
 
             # External noise: occasional wild-card shift with a human explanation
             if random.random() < 0.15:
                 wild_agent = random.choice(agents)
+                if wild_agent.fixed_opinion:
+                    wild_agent = random.choice([a for a in agents if not a.fixed_opinion] or [wild_agent])
                 wild_agent.current_opinion = random.choice(["accept", "reject"])
                 wild_agent.confidence = max(0.3, wild_agent.confidence - 0.05)
                 wild_message = (
@@ -885,6 +981,7 @@ class SimulationEngine:
                     "rejected": metrics["rejected"],
                     "neutral": metrics["neutral"],
                     "acceptance_rate": metrics["acceptance_rate"],
+                    "polarization": metrics.get("polarization", 0.0),
                     # Include total agents for context
                     "total_agents": metrics["total_agents"],
                     "per_category": metrics["per_category"],

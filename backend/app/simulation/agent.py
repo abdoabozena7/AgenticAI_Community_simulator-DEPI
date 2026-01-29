@@ -36,7 +36,13 @@ class Agent:
         # Copy trait values from the persona template
         self.traits: Dict[str, float] = dict(template.traits)
         # Compute baseline influence weight combining category base weight and susceptibility
+        self.base_influence_weight: float = category.base_influence_weight
         self.influence_weight: float = category.base_influence_weight * template.influence_susceptibility
+        # Stubbornness makes opinion changes harder (0-1 range)
+        self.stubbornness: float = min(1.0, max(0.0, float(template.traits.get("stubbornness", 0.4))))
+        # Leader/propagandist flags (set by engine)
+        self.is_leader: bool = False
+        self.fixed_opinion: Optional[str] = None
         # Set initial opinion and moderate starting confidence
         self.current_opinion: str = initial_opinion
         self.confidence: float = 0.5

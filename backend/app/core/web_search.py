@@ -120,6 +120,46 @@ async def _llm_fallback(query: str) -> Dict[str, Any]:
     }
 
 
+def _validate_structured(data: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    required = ["summary", "signals", "competition_level", "demand_level", "regulatory_risk"]
+    if not all(key in data for key in required):
+        return {}
+    if not isinstance(data.get("signals"), list):
+        return {}
+    return data
+
+
+async def _extract_structured(query: str, answer: str, results: List[Dict[str, Any]], language: str) -> Dict[str, Any]:
+    snippets = "\n".join(
+        f"- {r.get('title','')}: {r.get('snippet','')}" for r in results[:5]
+    )
+    prompt = (
+        "You turn web search results into a structured market signal summary. "
+        "Return JSON only with keys: summary (string), signals (array of short bullets), "
+        "competition_level (low/medium/high), demand_level (low/medium/high), "
+        "regulatory_risk (low/medium/high), price_sensitivity (low/medium/high), "
+        "notable_locations (array), gaps (array of missing info), sources (array of {title,url,domain}). "
+        "Use the query and snippets; do not invent specific facts. "
+        f"Language: {language}. "
+        f"Query: {query}\n"
+        f"Answer: {answer}\n"
+        f"Snippets:\n{snippets}\n"
+    )
+    raw = await generate_ollama(prompt=prompt, temperature=0.3, response_format="json")
+    data = json.loads(raw)
+    sources = []
+    for r in results[:5]:
+        sources.append({
+            "title": r.get("title"),
+            "url": r.get("url"),
+            "domain": r.get("domain"),
+        })
+    data.setdefault("sources", sources)
+    return data
+
+
 async def search_web(query: str, max_results: int = 5, language: str = "en") -> Dict[str, Any]:
     normalized = _normalize_query(query)
     if not normalized:
@@ -130,6 +170,42 @@ async def search_web(query: str, max_results: int = 5, language: str = "en") -> 
             "results": [],
         }
     try:
-        return await _tavily_search(normalized, max_results=max_results, language=language)
+        result = await _tavily_search(normalized, max_results=max_results, language=language)
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, RuntimeError):
-        return await _llm_fallback(normalized)
+        result = await _llm_fallback(normalized)
+
+    # Structured summary with timeout and fallback
+    structured: Dict[str, Any] = {}
+    for _ in range(2):
+        try:
+            structured = await asyncio.wait_for(
+                _extract_structured(
+                    normalized,
+                    result.get("answer", ""),
+                    result.get("results", []),
+                    language or "en",
+                ),
+                timeout=6.0,
+            )
+            structured = _validate_structured(structured)
+            if structured:
+                break
+        except Exception:
+            structured = {}
+    if not structured:
+        structured = {
+            "summary": (result.get("answer") or "").strip(),
+            "signals": [],
+            "competition_level": "medium",
+            "demand_level": "medium",
+            "regulatory_risk": "medium",
+            "price_sensitivity": "medium",
+            "notable_locations": [],
+            "gaps": [],
+            "sources": [
+                {"title": r.get("title"), "url": r.get("url"), "domain": r.get("domain")}
+                for r in result.get("results", [])[:5]
+            ],
+        }
+    result["structured"] = structured
+    return result

@@ -29,6 +29,7 @@ export interface SimulationMetrics {
   rejected: number;
   neutral: number;
   acceptanceRate: number;
+  polarization?: number;
   currentIteration: number;
   totalIterations: number;
   // Backend provides per-category acceptance counts only.

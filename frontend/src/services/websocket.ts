@@ -1,4 +1,4 @@
-export type MessageType = 'reasoning_step' | 'metrics' | 'agents';
+export type MessageType = 'reasoning_step' | 'metrics' | 'agents' | 'summary';
 
 export interface ReasoningStepEvent {
   type: 'reasoning_step';
@@ -16,6 +16,7 @@ export interface MetricsEvent {
   rejected: number;
   neutral: number;
   acceptance_rate: number;
+  polarization?: number;
   total_agents: number;
   iteration: number;
   total_iterations?: number;
@@ -37,7 +38,12 @@ export interface AgentsEvent {
   total_agents?: number;
 }
 
-export type WebSocketEvent = ReasoningStepEvent | MetricsEvent | AgentsEvent;
+export interface SummaryEvent {
+  type: 'summary';
+  summary: string;
+}
+
+export type WebSocketEvent = ReasoningStepEvent | MetricsEvent | AgentsEvent | SummaryEvent;
 
 type EventCallback = (event: WebSocketEvent) => void;
 

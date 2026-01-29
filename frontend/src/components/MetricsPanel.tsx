@@ -74,6 +74,7 @@ export function MetricsPanel({ metrics, language }: MetricsPanelProps) {
     rejected,
     neutral,
     acceptanceRate,
+    polarization,
     currentIteration,
     perCategoryAccepted,
   } = metrics;
@@ -113,6 +114,13 @@ export function MetricsPanel({ metrics, language }: MetricsPanelProps) {
             color={acceptanceRate >= 60 ? 'success' : acceptanceRate >= 40 ? 'warning' : 'destructive'}
             animate={currentIteration > 0}
             dataTestId="metric-acceptance-rate"
+          />
+          <MetricCard
+            icon={<Activity className="w-5 h-5" />}
+            label={language === 'ar' ? 'الاستقطاب' : 'Polarization'}
+            value={`${(((polarization ?? 0) * 100)).toFixed(0)}%`}
+            color={(polarization ?? 0) >= 0.6 ? 'warning' : 'neutral'}
+            dataTestId="metric-polarization"
           />
         </div>
 

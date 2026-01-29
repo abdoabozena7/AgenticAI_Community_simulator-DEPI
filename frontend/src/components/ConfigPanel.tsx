@@ -100,13 +100,7 @@ export function ConfigPanel({
         </p>
       </div>
       <div className="space-y-2">
-        <label className="text-sm text-muted-foreground flex items-center gap-2">
-          <Lightbulb className="w-4 h-4" />
-          {language === 'ar' ? 'ملخص الفكرة' : 'Idea Summary'}
-        </label>
-        <div className="rounded-lg border border-border/50 bg-secondary/50 px-3 py-2 text-sm text-foreground/90">
-          {value.idea || (language === 'ar' ? 'لم يتم إدخال فكرة بعد.' : 'No idea provided yet.')}
-        </div>
+      
       </div>
 
       <div className="grid grid-cols-2 gap-3">
