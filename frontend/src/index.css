@@ -6,84 +6,105 @@
 
 @layer base {
   :root {
-    --background: 222 47% 6%;
-    --foreground: 210 40% 98%;
+    /* Black / White modern palette */
+    --background: 0 0% 4%;
+    --foreground: 0 0% 98%;
 
-    --card: 222 47% 8%;
-    --card-foreground: 210 40% 98%;
+    --card: 0 0% 7%;
+    --card-foreground: 0 0% 98%;
 
-    --popover: 222 47% 10%;
-    --popover-foreground: 210 40% 98%;
+    --popover: 0 0% 9%;
+    --popover-foreground: 0 0% 98%;
 
-    --primary: 187 85% 53%;
-    --primary-foreground: 222 47% 6%;
+    /* Primary is now WHITE (instead of blue/cyan) */
+    --primary: 0 0% 98%;
+    --primary-foreground: 0 0% 6%;
 
-    --secondary: 222 30% 14%;
-    --secondary-foreground: 210 40% 90%;
+    --secondary: 0 0% 12%;
+    --secondary-foreground: 0 0% 92%;
 
-    --muted: 222 30% 12%;
-    --muted-foreground: 215 20% 55%;
+    --muted: 0 0% 10%;
+    --muted-foreground: 0 0% 60%;
 
-    --accent: 187 85% 53%;
-    --accent-foreground: 222 47% 6%;
+    --accent: 0 0% 98%;
+    --accent-foreground: 0 0% 6%;
 
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 210 40% 98%;
+    /* Keep status colors subtle, still readable */
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 0 0% 98%;
 
-    --success: 142 71% 45%;
-    --success-foreground: 210 40% 98%;
+    --success: 142 55% 42%;
+    --success-foreground: 0 0% 98%;
 
-    --warning: 38 92% 50%;
-    --warning-foreground: 222 47% 6%;
+    --warning: 38 80% 52%;
+    --warning-foreground: 0 0% 6%;
 
-    --border: 222 30% 18%;
-    --input: 222 30% 14%;
-    --ring: 187 85% 53%;
+    --border: 0 0% 16%;
+    --input: 0 0% 12%;
+    --ring: 0 0% 98%;
 
     --radius: 0.75rem;
 
-    --sidebar-background: 222 47% 7%;
-    --sidebar-foreground: 210 40% 90%;
-    --sidebar-primary: 187 85% 53%;
-    --sidebar-primary-foreground: 222 47% 6%;
-    --sidebar-accent: 222 30% 14%;
-    --sidebar-accent-foreground: 210 40% 90%;
-    --sidebar-border: 222 30% 18%;
-    --sidebar-ring: 187 85% 53%;
+    --sidebar-background: 0 0% 6%;
+    --sidebar-foreground: 0 0% 92%;
+    --sidebar-primary: 0 0% 98%;
+    --sidebar-primary-foreground: 0 0% 6%;
+    --sidebar-accent: 0 0% 12%;
+    --sidebar-accent-foreground: 0 0% 92%;
+    --sidebar-border: 0 0% 16%;
+    --sidebar-ring: 0 0% 98%;
 
     /* Custom simulation colors */
-    --agent-accepted: 142 71% 45%;
-    --agent-rejected: 0 72% 51%;
-    --agent-neutral: 215 20% 55%;
-    --glow-primary: 187 85% 53%;
-    --glow-secondary: 280 80% 60%;
-    
-    /* Gradient definitions */
-    --gradient-primary: linear-gradient(135deg, hsl(187 85% 53%) 0%, hsl(220 80% 60%) 100%);
-    --gradient-card: linear-gradient(180deg, hsl(222 47% 10%) 0%, hsl(222 47% 7%) 100%);
-    --gradient-glow: radial-gradient(ellipse at center, hsl(187 85% 53% / 0.15) 0%, transparent 70%);
+    --agent-accepted: 142 55% 42%;
+    --agent-rejected: 0 72% 55%;
+    --agent-neutral: 0 0% 60%;
+
+    /* Glow is now WHITE instead of cyan/purple */
+    --glow-primary: 0 0% 98%;
+    --glow-secondary: 0 0% 80%;
+
+    /* Gradient definitions (white -> black, grayscale card) */
+    --gradient-primary: linear-gradient(135deg, hsl(0 0% 98%) 0%, hsl(0 0% 0%) 100%);
+    --gradient-card: linear-gradient(180deg, hsl(0 0% 10%) 0%, hsl(0 0% 4%) 100%);
+    --gradient-glow: radial-gradient(ellipse at center, hsl(0 0% 98% / 0.12) 0%, transparent 70%);
   }
 
   .theme-dark {
-    --background: 222 47% 6%;
-    --foreground: 210 40% 98%;
-    --primary: 187 85% 53%;
-    --secondary: 222 30% 14%;
-    --accent: 187 85% 53%;
+    --background: 0 0% 4%;
+    --foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --secondary: 0 0% 12%;
+    --accent: 0 0% 98%;
   }
 
   .theme-light {
-    --background: 210 40% 96%;
-    --foreground: 222 47% 10%;
-    --primary: 187 75% 45%;
-    --secondary: 210 20% 90%;
-    --accent: 200 70% 45%;
-    --border: 210 16% 75%;
+    --background: 0 0% 97%;
+    --foreground: 0 0% 10%;
+    --primary: 0 0% 10%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 0 0% 92%;
+    --secondary-foreground: 0 0% 12%;
+    --accent: 0 0% 10%;
+    --accent-foreground: 0 0% 98%;
+    --border: 0 0% 78%;
+    --ring: 0 0% 10%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 10%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 10%;
+    --muted: 0 0% 94%;
+    --muted-foreground: 0 0% 45%;
+    --input: 0 0% 92%;
+
+    /* Light theme gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(0 0% 10%) 0%, hsl(0 0% 100%) 100%);
+    --gradient-card: linear-gradient(180deg, hsl(0 0% 100%) 0%, hsl(0 0% 96%) 100%);
+    --gradient-glow: radial-gradient(ellipse at center, hsl(0 0% 10% / 0.10) 0%, transparent 70%);
   }
 
   .dark {
-    --background: 222 47% 6%;
-    --foreground: 210 40% 98%;
+    --background: 0 0% 4%;
+    --foreground: 0 0% 98%;
   }
 }
 
@@ -133,10 +154,10 @@
 @layer components {
   .glass-panel {
     @apply bg-card/80 backdrop-blur-xl border border-border/50 rounded-lg;
-    box-shadow: 
-      0 0 0 1px hsl(var(--border) / 0.3),
-      0 4px 24px -4px hsl(222 47% 0% / 0.5),
-      inset 0 1px 0 hsl(210 40% 98% / 0.05);
+    box-shadow:
+      0 0 0 1px hsl(var(--border) / 0.35),
+      0 6px 28px -6px hsl(0 0% 0% / 0.55),
+      inset 0 1px 0 hsl(0 0% 100% / 0.06);
   }
 
   .glow-border {
@@ -146,11 +167,11 @@
   .glow-border::before {
     content: '';
     @apply absolute inset-0 rounded-lg opacity-50 pointer-events-none;
-    background: linear-gradient(135deg, hsl(var(--primary) / 0.2) 0%, transparent 50%);
+    background: linear-gradient(135deg, hsl(var(--primary) / 0.18) 0%, transparent 55%);
   }
 
   .text-glow {
-    text-shadow: 0 0 20px hsl(var(--primary) / 0.5);
+    text-shadow: 0 0 18px hsl(var(--primary) / 0.35);
   }
 
   .metric-card {
@@ -159,16 +180,16 @@
 
   .metric-card:hover {
     @apply border-primary/30;
-    box-shadow: 
-      0 0 0 1px hsl(var(--primary) / 0.2),
-      0 0 30px -10px hsl(var(--primary) / 0.3);
+    box-shadow:
+      0 0 0 1px hsl(var(--primary) / 0.14),
+      0 0 28px -10px hsl(var(--primary) / 0.22);
   }
 
   .simulation-canvas {
     @apply rounded-lg overflow-hidden;
-    background: 
-      radial-gradient(ellipse at 50% 50%, hsl(var(--primary) / 0.05) 0%, transparent 50%),
-      linear-gradient(180deg, hsl(222 47% 8%) 0%, hsl(222 47% 5%) 100%);
+    background:
+      radial-gradient(ellipse at 50% 50%, hsl(var(--primary) / 0.04) 0%, transparent 55%),
+      linear-gradient(180deg, hsl(0 0% 7%) 0%, hsl(0 0% 4%) 100%);
   }
 
   .pulse-glow {
@@ -177,10 +198,10 @@
 
   @keyframes pulse-glow {
     0%, 100% {
-      box-shadow: 0 0 5px hsl(var(--primary) / 0.3);
+      box-shadow: 0 0 6px hsl(var(--primary) / 0.22);
     }
     50% {
-      box-shadow: 0 0 20px hsl(var(--primary) / 0.5);
+      box-shadow: 0 0 18px hsl(var(--primary) / 0.32);
     }
   }
 
@@ -196,7 +217,7 @@
     }
     50% {
       transform: scale(1.2);
-      opacity: 0.8;
+      opacity: 0.82;
     }
   }
 
@@ -235,7 +256,7 @@
   }
 
   .resize-handle {
-    @apply bg-border/40 hover:bg-primary/40 transition-colors;
+    @apply bg-border/40 hover:bg-primary/30 transition-colors;
     cursor: col-resize;
   }
 }
@@ -243,7 +264,8 @@
 @layer utilities {
   .text-gradient {
     @apply bg-clip-text text-transparent;
-    background-image: var(--gradient-primary);
+    background-image: none;
+    color: hsl(var(--foreground));
   }
 
   .border-gradient {
@@ -281,7 +303,7 @@
   .message.bot .bubble {
     background: hsl(var(--card));
     border-radius: 16px 16px 16px 6px;
-    box-shadow: 0 2px 10px hsl(222 47% 0% / 0.35);
+    box-shadow: 0 2px 10px hsl(0 0% 0% / 0.35);
     border: 1px solid hsl(var(--border));
   }
 
@@ -289,7 +311,7 @@
     background: hsl(var(--primary));
     color: hsl(var(--primary-foreground));
     border-radius: 16px 16px 6px 16px;
-    box-shadow: 0 2px 10px hsl(var(--primary) / 0.35);
+    box-shadow: 0 2px 10px hsl(var(--primary) / 0.18);
   }
 
   .thinking-container {
@@ -440,7 +462,7 @@
   .poll-option:hover,
   .multi-option:hover {
     border-color: hsl(var(--primary));
-    background: hsl(var(--primary) / 0.15);
+    background: hsl(var(--primary) / 0.08);
   }
 
   .multi-option.selected {
@@ -464,10 +486,134 @@
     border-top: 1px solid hsl(var(--border));
   }
 
+  .chat-input-locked {
+    display: flex;
+    justify-content: center;
+  }
+
+  .quick-replies {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+  }
+
+  .quick-reply-btn {
+    padding: 8px 14px;
+    border-radius: 999px;
+    background: hsl(var(--secondary));
+    border: 1px solid hsl(var(--border));
+    font-size: 13px;
+    font-weight: 600;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .quick-reply-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 14px hsl(var(--foreground) / 0.08);
+  }
+
   .chat-input-wrapper {
     display: flex;
     gap: 8px;
     align-items: center;
+  }
+
+  .search-action-anchor {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+
+  .search-action-popover {
+    position: absolute;
+    bottom: 52px;
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    border-radius: 14px;
+    background: hsl(var(--card));
+    border: 1px solid hsl(var(--border));
+    box-shadow: 0 14px 30px hsl(var(--foreground) / 0.10);
+    animation: actionPopIn 0.2s ease-out;
+    z-index: 10;
+    min-width: 220px;
+  }
+
+  .search-action-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px;
+    border-radius: 12px;
+    transition: background 0.2s ease;
+    width: 100%;
+    text-align: start;
+  }
+
+  .search-action-item:hover {
+    background: hsl(var(--primary) / 0.06);
+  }
+
+  .search-action-item:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .status-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: 999px;
+    border: 1px solid hsl(var(--border));
+    background: hsl(var(--secondary));
+    font-size: 12px;
+    color: hsl(var(--muted-foreground));
+    width: fit-content;
+  }
+
+  .search-action-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    background: hsl(var(--secondary));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid hsl(var(--border));
+    flex-shrink: 0;
+  }
+
+  .search-action-text {
+    font-size: 13px;
+    font-weight: 600;
+    color: hsl(var(--foreground));
+    text-align: start;
+  }
+
+  .send-btn-active {
+    box-shadow: 0 0 0 3px hsl(var(--primary) / 0.16);
+    transform: translateY(-1px);
+  }
+
+  .retry-llm-btn {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    box-shadow: 0 8px 18px hsl(var(--destructive) / 0.22);
+  }
+
+  .confirm-start-btn {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: hsl(var(--success));
+    color: hsl(var(--success-foreground));
+    box-shadow: 0 8px 18px hsl(var(--success) / 0.22);
+    animation: confirmPulse 1.6s ease-in-out infinite;
   }
 
   .chat-input {
@@ -482,13 +628,23 @@
     width: 44px;
     height: 44px;
     border-radius: 50%;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .send-btn:hover {
+    transform: translateY(-1px) scale(1.02);
+    box-shadow: 0 10px 20px hsl(var(--primary) / 0.10);
   }
 }
 
 @keyframes messageIn {
   0% {
     opacity: 0;
-    transform: translateY(20px) scale(0.95);
+    transform: translateY(12px) scale(0.98);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1);
   }
   100% {
     opacity: 1;
@@ -523,6 +679,27 @@
   }
 }
 
+@keyframes actionPopIn {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes confirmPulse {
+  0%,
+  100% {
+    box-shadow: 0 8px 18px hsl(var(--success) / 0.22);
+  }
+  50% {
+    box-shadow: 0 10px 24px hsl(var(--success) / 0.34);
+  }
+}
+
 @keyframes bounce {
   0%, 60%, 100% {
     transform: translateY(0);
@@ -548,3 +725,386 @@
     transform: translateX(0);
   }
 }
+@layer components {
+  /* Compact message bubbles */
+  .message-compact {
+    max-width: 88%;
+    opacity: 0;
+    transform: translateY(10px);
+    animation: msgPop 260ms cubic-bezier(0.2, 0.9, 0.2, 1) forwards;
+  }
+
+  .bubble-compact {
+    padding: 10px 12px;
+    border-radius: 14px;
+    font-size: 14px;
+    line-height: 1.55;
+  }
+
+  .message.bot .bubble-compact {
+    background: hsl(var(--card));
+    border-radius: 14px 14px 14px 6px;
+    box-shadow: 0 2px 10px hsl(0 0% 0% / 0.22);
+    border: 1px solid hsl(var(--border));
+  }
+
+  .message.user .bubble-compact {
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+    border-radius: 14px 14px 6px 14px;
+    box-shadow: 0 2px 10px hsl(var(--primary) / 0.14);
+  }
+
+  /* "ChatGPT-like" inline thinking row (no borders/boxes) */
+  .inline-disclosure {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: hsl(var(--secondary));
+    color: hsl(var(--muted-foreground));
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+    transition: transform 160ms ease, background 160ms ease, color 160ms ease;
+  }
+
+  .inline-disclosure:hover {
+    background: hsl(var(--secondary) / 0.9);
+    color: hsl(var(--foreground));
+    transform: translateY(-1px);
+  }
+
+  .inline-disclosure-content {
+    overflow: hidden;
+    max-height: 0;
+    transition: max-height 220ms ease;
+  }
+
+  .inline-disclosure-open .inline-disclosure-content {
+    max-height: 260px;
+  }
+
+  .inline-steps {
+    margin-top: 10px;
+    padding-left: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    color: hsl(var(--muted-foreground));
+    font-size: 12px;
+  }
+
+  .inline-step {
+    opacity: 0;
+    transform: translateY(6px);
+    animation: stepIn 220ms ease forwards;
+  }
+
+  /* Send glow + popover */
+  .send-glow {
+    box-shadow:
+      0 0 0 3px hsl(var(--primary) / 0.14),
+      0 10px 24px -10px hsl(var(--primary) / 0.22);
+    animation: glowPulse 1.35s ease-in-out infinite;
+  }
+
+  @keyframes glowPulse {
+    0%, 100% { box-shadow: 0 0 0 3px hsl(var(--primary) / 0.14), 0 10px 24px -10px hsl(var(--primary) / 0.22); }
+    50% { box-shadow: 0 0 0 5px hsl(var(--primary) / 0.18), 0 14px 34px -12px hsl(var(--primary) / 0.28); }
+  }
+
+  .action-pop {
+    position: absolute;
+    bottom: 56px;
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px;
+    border-radius: 16px;
+    background: hsl(var(--card));
+    box-shadow: 0 18px 50px hsl(0 0% 0% / 0.35);
+    transform-origin: bottom right;
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+    animation: popOpen 180ms cubic-bezier(0.2, 0.9, 0.2, 1) forwards;
+    z-index: 20;
+    min-width: 240px;
+  }
+
+  .action-pop.closing {
+    animation: popClose 140ms ease forwards;
+  }
+
+  @keyframes popOpen {
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes popClose {
+    to { opacity: 0; transform: translateY(10px) scale(0.96); }
+  }
+
+  .action-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 8px;
+    border-radius: 14px;
+    background: transparent;
+    transition: background 160ms ease, transform 160ms ease;
+    text-align: start;
+  }
+  .action-item:hover {
+    background: hsl(var(--primary) / 0.06);
+    transform: translateY(-1px);
+  }
+  .action-ico {
+    width: 44px;
+    height: 44px;
+    border-radius: 14px;
+    background: hsl(var(--secondary));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .action-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: hsl(var(--foreground));
+    line-height: 1.2;
+  }
+  .action-sub {
+    font-size: 12px;
+    color: hsl(var(--muted-foreground));
+    margin-top: 2px;
+  }
+
+  /* Read more */
+  .readmore {
+    margin-top: 8px;
+    font-size: 12px;
+    color: hsl(var(--muted-foreground));
+    cursor: pointer;
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .readmore:hover {
+    color: hsl(var(--foreground));
+  }
+
+  @keyframes msgPop {
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes stepIn {
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
+@layer components {
+  /* =========================
+     FIX WHITE ITER CARDS
+     ========================= */
+
+  /* أي عنصر داخل reasoning ما يبقاش أبيض */
+  [data-testid="reasoning-messages"] div {
+    background-color: transparent;
+  }
+
+  /* لو فيه card افتراضي */
+  .card {
+    background: transparent !important;
+    color: inherit !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+  }
+
+  /* رسالة reasoning نفسها */
+  .message.reasoning,
+  .message.reasoning .bubble,
+  .message.reasoning .bubble-compact {
+    background: hsl(var(--card)) !important;
+    color: hsl(var(--foreground)) !important;
+    border: 1px solid hsl(var(--border));
+    border-radius: 14px;
+  }
+
+  /* لو فيه Iter label لوحده */
+  .iteration-card,
+  .iter-card,
+  .iteration {
+    background: hsl(var(--card)) !important;
+    color: hsl(var(--muted-foreground)) !important;
+    border: 1px solid hsl(var(--border));
+    border-radius: 12px;
+    padding: 8px 10px;
+    text-align: center;
+    font-size: 12px;
+  }
+}
+/* ------------------------------------------------------------------
+   POP‑UP ACTIONS (search‑timeout / retry actions)
+   ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------
+   1️⃣  POSITIONING – attach the pop‑up to the *button* that opens it.
+   ------------------------------------------------------------------ */
+.action-pop-wrapper {
+  /* the wrapper is the element that contains the button + the pop‑up */
+  position: relative;               /* needed for absolute child positioning */
+}
+
+/* ------------------------------------------------------------------
+   2️⃣  POP‑UP PANEL – transparent background, thin border,
+        and appear **above** the button.
+   ------------------------------------------------------------------ */
+.action-pop {
+  position: absolute;
+  bottom: 100%;                     /* place it *above* the button */
+  right: 0;                         /* align to the right edge of the button */
+  margin-bottom: 6px;               /* tiny gap between button & panel */
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 12px;
+  background: transparent;          /* <‑‑ fully transparent */
+  border: 1px solid hsla(var(--border), 0.3);  /* faint border so the panel is still visible */
+  box-shadow: 0 6px 14px hsla(var(--foreground), 0.07);
+  transform-origin: bottom right;
+  opacity: 0;
+  transform: translateY(8px) scale(0.96);
+  animation: popOpen 180ms cubic-bezier(0.2, 0.9, 0.2, 1) forwards;
+  z-index: 20;
+}
+
+/* closing animation (used when the user clicks outside) */
+.action-pop.closing {
+  animation: popClose 140ms ease forwards;
+}
+
+/* ------------------------------------------------------------------
+   3️⃣  POP‑UP ITEM (each button inside the panel)
+   ------------------------------------------------------------------ */
+.action-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 10px;
+  background: transparent;
+  transition: background 160ms ease, transform 160ms ease;
+  cursor: pointer;
+}
+
+/* hover effect – a subtle primary‑tint */
+.action-item:hover {
+  background: hsla(var(--primary), 0.06);
+  transform: translateY(-1px);
+}
+
+/* ------------------------------------------------------------------
+   4️⃣  ICON (left side of each item)
+   ------------------------------------------------------------------ */
+.action-ico {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: hsla(var(--secondary), 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* ------------------------------------------------------------------
+   5️⃣  TITLE & VERY SHORT DESCRIPTION
+   ------------------------------------------------------------------ */
+.action-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: hsla(var(--foreground));
+  white-space: nowrap;               /* keep on one line */
+  overflow: hidden;
+  text-overflow: ellipsis;          /* show … if longer than one line */
+}
+
+/* Description is now limited to **one‑or‑two words**.
+   We use `max-width: 8rem` (≈ 2‑Word width) and truncate the rest. */
+.action-sub {
+  font-size: 12px;
+  color: hsla(var(--muted-foreground));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 8rem;                  /* 2‑word limit; adjust if you need a bit more */
+}
+
+/* ------------------------------------------------------------------
+   6️⃣  ANIMATIONS
+   ------------------------------------------------------------------ */
+@keyframes popOpen {
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes popClose {
+  to {
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+  }
+}
+/* ────────────────────────────────────────────────────────────────
+   POP‑UP ACTIONS – HORIZONTAL MIRROR (icon on the right,
+   text on the left)
+   ──────────────────────────────────────────────────────────────── */
+
+/* 1️⃣  Put the whole panel in RTL mode so its children start
+    from the right edge.  This does **not** affect the overall
+    layout of the chat – only the pop‑up itself. */
+.action-pop {
+  direction: rtl;               /* flip the reading direction */
+}
+
+/* 2️⃣  Reverse the flex order of each action item.
+    .action-item is already `display:flex; align-items:center;`
+    – we only need to flip the axis. */
+.action-item {
+  flex-direction: row-reverse; /* icon → right, text → left */
+}
+
+/* 3️⃣  The text container (`.min-w-0`) must stay left‑aligned,
+    otherwise it would become right‑aligned in RTL mode. */
+.action-item .min-w-0 {
+  text-align: left;            /* keep title / subtitle left‑aligned */
+}
+
+/* 4️⃣  Give a little gap *after* the icon (now on the right). */
+.action-ico {
+  margin-left: 0;               /* remove any left margin */
+  margin-right: 8px;           /* space between icon and the text */
+}
+
+/* 5️⃣  Ensure the one‑line‑only, ellipsis behaviour still works
+    (the rules you already had are kept, we just repeat them for
+    safety). */
+.action-title,
+.action-sub {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------------------------------------------------------------
+   OPTIONAL: If you ever need the original LTR layout for a
+   specific locale, just wrap the panel with a container that forces
+   LTR again, e.g.:
+
+   <div class="action-pop ltr"> … </div>
+
+   and add:
+
+   .ltr { direction: ltr; }
+   --------------------------------------------------------------- */

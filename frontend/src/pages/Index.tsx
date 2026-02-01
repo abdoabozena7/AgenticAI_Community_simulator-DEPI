@@ -91,6 +91,9 @@ const CATEGORY_KEYWORDS: Record<string, string> = {
 const DEFAULT_CATEGORY = 'technology';
 const DEFAULT_AUDIENCE = ['Consumers'];
 const DEFAULT_GOALS = ['Market Validation'];
+const SEARCH_TIMEOUT_BASE_MS = 10000;
+const SEARCH_TIMEOUT_STEP_MS = 7000;
+const SEARCH_TIMEOUT_MAX_MS = 30000;
 
 const canonicalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '');
 
@@ -185,6 +188,8 @@ const Index = () => {
   const [hasStarted, setHasStarted] = useState(false);
   const summaryRef = useRef<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const searchPromptedRef = useRef(false);
+  const searchAttemptRef = useRef(0);
   const [leftWidth, setLeftWidth] = useState(320);
   const [rightWidth, setRightWidth] = useState(320);
   const dragRef = useRef<{ side: 'left' | 'right' | null; startX: number; startLeft: number; startRight: number }>({
@@ -209,13 +214,19 @@ const Index = () => {
   const [llmRetryMessage, setLlmRetryMessage] = useState<string | null>(null);
   const [summaryAdvice, setSummaryAdvice] = useState<string>('');
   const [summaryReasons, setSummaryReasons] = useState<string[]>([]);
+  const [pendingResearchReview, setPendingResearchReview] = useState(false);
+  const [reportBusy, setReportBusy] = useState(false);
+  const [reasoningActive, setReasoningActive] = useState(false);
+  const reasoningTimerRef = useRef<number | null>(null);
   const [searchState, setSearchState] = useState<{
-    status: 'idle' | 'searching' | 'done';
+    status: 'idle' | 'searching' | 'done' | 'timeout';
     query?: string;
     answer?: string;
     provider?: string;
     isLive?: boolean;
     results?: SearchResponse['results'];
+    timeoutMs?: number;
+    attempts?: number;
   }>({ status: 'idle' });
   const [pendingUpdate, setPendingUpdate] = useState<string | null>(null);
   const [simulationSpeed, setSimulationSpeed] = useState(1);
@@ -306,6 +317,19 @@ const Index = () => {
     }
     summaryRef.current = simulation.summary;
   }, [simulation.summary, addSystemMessage, settings.language]);
+
+  useEffect(() => {
+    const last = simulation.reasoningFeed.at(-1);
+    if (!last) return;
+    if (simulation.status !== 'running') return;
+    setReasoningActive(true);
+    if (reasoningTimerRef.current) {
+      window.clearTimeout(reasoningTimerRef.current);
+    }
+    reasoningTimerRef.current = window.setTimeout(() => {
+      setReasoningActive(false);
+    }, 2200);
+  }, [simulation.reasoningFeed, simulation.status]);
 
   useEffect(() => {
     const saved = localStorage.getItem('appSettings');
@@ -509,6 +533,10 @@ const Index = () => {
 
     if (hasStarted || simulation.status === 'running') return;
     setHasStarted(true);
+    setReasoningActive(false);
+    if (reasoningTimerRef.current) {
+      window.clearTimeout(reasoningTimerRef.current);
+    }
     try {
       await simulation.startSimulation(buildConfig(userInput));
       const startMessage = await getAssistantMessage('Confirm you are starting the simulation now in one short sentence.');
@@ -519,6 +547,301 @@ const Index = () => {
     }
   }, [addSystemMessage, buildConfig, getAssistantMessage, getMissingForStart, hasStarted, promptForMissing, settings.language, simulation, userInput]);
 
+  const getSearchLocationLabel = useCallback(() => {
+    const city = userInput.city?.trim();
+    const country = userInput.country?.trim();
+    const label = [city, country].filter(Boolean).join(', ');
+    if (label) return label;
+    return settings.language === 'ar' ? 'المكان اللي كتبته' : 'the location you entered';
+  }, [settings.language, userInput.city, userInput.country]);
+
+  const getSearchTimeoutPrompt = useCallback((locationLabel: string) => (
+    settings.language === 'ar'
+      ? `قعدت ادور كتير ومش لاقي بيانات كفاية عن ${locationLabel} (زي وجود الفكرة، رينج الاسعار، أو رأي الناس). تحب ادور تاني بس اخد وقت اكتر ولا ممكن استخدم حاجة زي ChatGPT اسأله؟`
+      : `I searched for a while but couldn't find enough data for ${locationLabel} (like whether the idea exists, price ranges, or public sentiment). Want me to search longer, or should I use the LLM instead?`
+  ), [settings.language]);
+
+  const formatLevel = useCallback((value?: 'low' | 'medium' | 'high') => {
+    if (!value) return '';
+    if (settings.language === 'ar') {
+      if (value === 'low') return 'منخفض';
+      if (value === 'medium') return 'متوسط';
+      return 'مرتفع';
+    }
+    return value;
+  }, [settings.language]);
+
+  const buildSearchSummary = useCallback((data: SearchResponse, locationLabel: string) => {
+    const structured = data.structured;
+    const answer = data.answer?.trim();
+    if (!structured && !answer) return '';
+
+    const prefix = settings.language === 'ar'
+      ? `لقيت بيانات عن ${locationLabel} بخصوص الفكرة دي:`
+      : `I found data about ${locationLabel} for this idea:`;
+    const parts: string[] = [];
+
+    if (structured?.competition_level) {
+      parts.push(settings.language === 'ar'
+        ? `انتشار الفكرة حاليًا: ${formatLevel(structured.competition_level)}`
+        : `Current presence: ${formatLevel(structured.competition_level)}`);
+    }
+    if (structured?.demand_level) {
+      parts.push(settings.language === 'ar'
+        ? `مستوى الطلب: ${formatLevel(structured.demand_level)}`
+        : `Demand: ${formatLevel(structured.demand_level)}`);
+    }
+    if (structured?.price_sensitivity) {
+      parts.push(settings.language === 'ar'
+        ? `رينج الأسعار/حساسية السعر: ${formatLevel(structured.price_sensitivity)}`
+        : `Price sensitivity: ${formatLevel(structured.price_sensitivity)}`);
+    }
+    if (structured?.regulatory_risk) {
+      parts.push(settings.language === 'ar'
+        ? `المخاطر التنظيمية: ${formatLevel(structured.regulatory_risk)}`
+        : `Regulatory risk: ${formatLevel(structured.regulatory_risk)}`);
+    }
+    if (structured?.signals?.length) {
+      const signals = structured.signals.slice(0, 3).join(settings.language === 'ar' ? '، ' : ', ');
+      parts.push(settings.language === 'ar'
+        ? `إشارات السوق/آراء الناس: ${signals}`
+        : `Market signals: ${signals}`);
+    }
+    if (structured?.gaps?.length) {
+      const gaps = structured.gaps.slice(0, 3).join(settings.language === 'ar' ? '، ' : ', ');
+      parts.push(settings.language === 'ar'
+        ? `فرص/ثغرات: ${gaps}`
+        : `Gaps/opportunities: ${gaps}`);
+    }
+    if (structured?.notable_locations?.length) {
+      const notable = structured.notable_locations.slice(0, 3).join(settings.language === 'ar' ? '، ' : ', ');
+      parts.push(settings.language === 'ar'
+        ? `أماكن ملحوظة: ${notable}`
+        : `Notable locations: ${notable}`);
+    }
+    if (structured?.summary) {
+      parts.push(settings.language === 'ar'
+        ? `الخلاصة: ${structured.summary}`
+        : `Summary: ${structured.summary}`);
+    }
+    if (!parts.length && structured?.summary) {
+      parts.push(structured.summary);
+    }
+    if (!parts.length && answer) {
+      parts.push(answer);
+    }
+
+    return parts.length ? `${prefix} ${parts.join(settings.language === 'ar' ? ' | ' : ' | ')}` : '';
+  }, [formatLevel, settings.language]);
+
+  const parseStructuredFromLlm = useCallback((text: string): SearchResponse['structured'] | undefined => {
+    if (!text) return undefined;
+    const trimmed = text.trim();
+    const direct = (() => {
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        return undefined;
+      }
+    })();
+    if (direct && typeof direct === 'object') return direct as SearchResponse['structured'];
+
+    const match = trimmed.match(/\{[\s\S]*\}/);
+    if (!match) return undefined;
+    try {
+      return JSON.parse(match[0]) as SearchResponse['structured'];
+    } catch {
+      return undefined;
+    }
+  }, []);
+
+  const normalizeStructured = useCallback((structured?: SearchResponse['structured']) => {
+    if (!structured) return undefined;
+    const normalizeLevel = (value?: string) => {
+      const lower = value?.toLowerCase().trim();
+      if (lower === 'low' || lower === 'medium' || lower === 'high') return lower as 'low' | 'medium' | 'high';
+      return undefined;
+    };
+    return {
+      ...structured,
+      competition_level: normalizeLevel(structured.competition_level),
+      demand_level: normalizeLevel(structured.demand_level),
+      regulatory_risk: normalizeLevel(structured.regulatory_risk),
+      price_sensitivity: normalizeLevel(structured.price_sensitivity),
+    } as SearchResponse['structured'];
+  }, []);
+
+  const escapeHtml = useCallback((value: string) => (
+    value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+  ), []);
+
+  const handleDownloadReport = useCallback(async () => {
+    if (reportBusy) return;
+    setReportBusy(true);
+    try {
+      const structured = researchContext.structured || {};
+      const prompt = settings.language === 'ar'
+        ? `عايز تقرير تحليل عميق للفكرة دي في ملف منظم بعناوين واضحة ونقاط قصيرة.
+لا تبالغ في السلبية؛ اذكر النواقص فقط لو موجودة في البيانات.
+اربط التحليل بالبحث التالي وبملخص المحاكاة لو موجود.
+
+الفكرة: ${userInput.idea}
+المكان: ${userInput.city || '-'}, ${userInput.country || '-'}
+ملخص البحث: ${researchContext.summary || 'لا يوجد'}
+إشارات السوق: ${(structured.signals || []).join('، ') || 'غير متاح'}
+المنافسة: ${structured.competition_level || 'غير متاح'}
+الطلب: ${structured.demand_level || 'غير متاح'}
+حساسية السعر: ${structured.price_sensitivity || 'غير متاح'}
+المخاطر التنظيمية: ${structured.regulatory_risk || 'غير متاح'}
+الفجوات: ${(structured.gaps || []).join('، ') || 'غير متاح'}
+أماكن ملحوظة: ${(structured.notable_locations || []).join('، ') || 'غير متاح'}
+ملخص المحاكاة: ${simulation.summary || 'غير متاح'}
+
+المطلوب بالترتيب:
+1) ملخص تنفيذي
+2) تحليل السوق والطلب
+3) المنافسة والتموضع
+4) التسعير وحساسية السعر
+5) المخاطر التنظيمية
+6) فرص التحسين (لو موجودة)
+7) أسباب تجعل الفكرة قابلة للتنفيذ
+8) توصيات عملية قصيرة`
+        : `Write a deep analysis report for this idea with clear headings and concise bullet points.
+Avoid unnecessary negativity; mention gaps only if data indicates them.
+Tie the analysis to the research context and simulation summary if available.
+
+Idea: ${userInput.idea}
+Location: ${userInput.city || '-'}, ${userInput.country || '-'}
+Research summary: ${researchContext.summary || 'N/A'}
+Market signals: ${(structured.signals || []).join(', ') || 'N/A'}
+Competition: ${structured.competition_level || 'N/A'}
+Demand: ${structured.demand_level || 'N/A'}
+Price sensitivity: ${structured.price_sensitivity || 'N/A'}
+Regulatory risk: ${structured.regulatory_risk || 'N/A'}
+Gaps: ${(structured.gaps || []).join(', ') || 'N/A'}
+Notable locations: ${(structured.notable_locations || []).join(', ') || 'N/A'}
+Simulation summary: ${simulation.summary || 'N/A'}
+
+Required sections:
+1) Executive summary
+2) Market & demand
+3) Competition & positioning
+4) Pricing & sensitivity
+5) Regulatory risk
+6) Gaps/opportunities (if any)
+7) Why the idea is feasible
+8) Actionable recommendations`;
+
+      const text = await apiService.generateMessage(prompt);
+      const html = `<!doctype html><html><head><meta charset="utf-8" /></head><body><pre style="font-family: Arial, sans-serif; white-space: pre-wrap;">${escapeHtml(text)}</pre></body></html>`;
+      const blob = new Blob([html], { type: 'application/msword' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = settings.language === 'ar' ? 'تحليل-الفكرة.doc' : 'idea-analysis.doc';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.warn('Report generation failed', err);
+      addSystemMessage(settings.language === 'ar'
+        ? 'حصل مشكلة أثناء تجهيز التقرير.'
+        : 'Report generation failed.');
+    } finally {
+      setReportBusy(false);
+    }
+  }, [addSystemMessage, escapeHtml, reportBusy, researchContext.summary, researchContext.structured, settings.language, simulation.summary, userInput.city, userInput.country, userInput.idea]);
+
+  const runSearch = useCallback(async (query: string, timeoutMs: number) => {
+    searchAttemptRef.current += 1;
+    const attempt = searchAttemptRef.current;
+    setSearchState({ status: 'searching', query, timeoutMs, attempts: attempt });
+    setIsConfigSearching(true);
+    try {
+      const locationLabel = getSearchLocationLabel();
+      const search = await Promise.race([
+        apiService.searchWeb(query, settings.language === 'ar' ? 'ar' : 'en', 5),
+        new Promise<SearchResponse>((_, reject) =>
+          setTimeout(() => reject(new Error('Search timeout')), timeoutMs)
+        ),
+      ]);
+      const searchData = search as SearchResponse;
+      const hasStructured =
+        Boolean(searchData.structured?.summary)
+        || Boolean(searchData.structured?.signals?.length)
+        || Boolean(searchData.structured?.gaps?.length)
+        || Boolean(searchData.structured?.notable_locations?.length)
+        || Boolean(searchData.structured?.competition_level)
+        || Boolean(searchData.structured?.demand_level)
+        || Boolean(searchData.structured?.price_sensitivity)
+        || Boolean(searchData.structured?.regulatory_risk);
+      const hasAnswer = Boolean(searchData.answer?.trim());
+      if (!hasStructured && !hasAnswer) {
+        setSearchState({
+          status: 'timeout',
+          query,
+          answer: '',
+          provider: searchData.provider || 'none',
+          isLive: searchData.is_live,
+          results: searchData.results,
+          timeoutMs,
+          attempts: attempt,
+        });
+        setResearchContext({ summary: '', sources: [], structured: undefined });
+        if (!searchPromptedRef.current) {
+          addSystemMessage(getSearchTimeoutPrompt(locationLabel));
+          searchPromptedRef.current = true;
+        }
+        return { status: 'timeout' as const };
+      }
+      setSearchState({
+        status: 'done',
+        query,
+        answer: searchData.answer,
+        provider: searchData.provider,
+        isLive: searchData.is_live,
+        results: searchData.results,
+        timeoutMs,
+        attempts: attempt,
+      });
+      const summary = searchData.structured?.summary
+        || searchData.answer
+        || searchData.results.map((r) => r.snippet).filter(Boolean).slice(0, 3).join(' ');
+      setResearchContext({ summary, sources: searchData.results, structured: searchData.structured });
+      const report = buildSearchSummary(searchData, locationLabel);
+      if (report) {
+        addSystemMessage(report);
+      }
+      searchPromptedRef.current = false;
+      return { status: 'done' as const };
+    } catch {
+      setSearchState({
+        status: 'timeout',
+        query,
+        answer: '',
+        provider: 'none',
+        isLive: false,
+        results: [],
+        timeoutMs,
+        attempts: attempt,
+      });
+      setResearchContext({ summary: '', sources: [], structured: undefined });
+      if (!searchPromptedRef.current) {
+        addSystemMessage(getSearchTimeoutPrompt(getSearchLocationLabel()));
+        searchPromptedRef.current = true;
+      }
+      return { status: 'timeout' as const };
+    } finally {
+      setIsConfigSearching(false);
+    }
+  }, [addSystemMessage, buildSearchSummary, getSearchLocationLabel, getSearchTimeoutPrompt, settings.language, setSearchState, setResearchContext]);
+
 
   const handleConfigSubmit = useCallback(async () => {
     const missing = getMissingForStart(userInput);
@@ -528,60 +851,166 @@ const Index = () => {
     }
 
     setPendingConfigReview(false);
+    setPendingResearchReview(false);
     setActivePanel('chat');
-    setIsConfigSearching(true);
     const ideaText = userInput.idea.trim();
-    setSearchState({ status: 'searching', query: ideaText });
+    searchAttemptRef.current = 0;
+    searchPromptedRef.current = false;
 
+    const result = await runSearch(ideaText, SEARCH_TIMEOUT_BASE_MS);
+    if (result.status === 'done') {
+      await handleStart();
+    }
+  }, [getMissingForStart, handleStart, runSearch, userInput, setPendingConfigReview, setActivePanel]);
+
+  const handleSearchRetry = useCallback(async () => {
+    if (searchState.status !== 'timeout') return;
+    const query = searchState.query || userInput.idea.trim();
+    if (!query) return;
+    const nextTimeout = Math.min(
+      (searchState.timeoutMs ?? SEARCH_TIMEOUT_BASE_MS) + SEARCH_TIMEOUT_STEP_MS,
+      SEARCH_TIMEOUT_MAX_MS
+    );
+    const result = await runSearch(query, nextTimeout);
+    if (result.status === 'done') {
+      await handleStart();
+    }
+  }, [handleStart, runSearch, searchState, userInput.idea]);
+
+  const handleSearchUseLlm = useCallback(async () => {
+    if (searchState.status !== 'timeout') return;
+    const locationLabel = getSearchLocationLabel();
+    setSearchState({
+      status: 'done',
+      query: searchState.query,
+      answer: '',
+      provider: 'llm',
+      isLive: false,
+      results: [],
+    });
+    setResearchContext({ summary: '', sources: [], structured: undefined });
+    searchPromptedRef.current = false;
+    setIsChatThinking(true);
+    let structured: SearchResponse['structured'] | undefined;
+    let summaryText = '';
     try {
-      const timeoutMs = 10000;
-      const search = await Promise.race([
-        apiService.searchWeb(ideaText, settings.language === 'ar' ? 'ar' : 'en', 5),
-        new Promise<SearchResponse>((_, reject) =>
-          setTimeout(() => reject(new Error('Search timeout')), timeoutMs)
-        ),
-      ]);
-      const searchData = search as SearchResponse;
-      setSearchState({
-        status: 'done',
-        query: ideaText,
-        answer: searchData.answer,
-        provider: searchData.provider,
-        isLive: searchData.is_live,
-        results: searchData.results,
-      });
-      const summary = searchData.structured?.summary
-        || searchData.answer
-        || searchData.results.map((r) => r.snippet).filter(Boolean).slice(0, 3).join(' ');
-      setResearchContext({ summary, sources: searchData.results, structured: searchData.structured });
-    } catch {
-      setSearchState({ status: 'done', query: ideaText, answer: '', provider: 'none', isLive: false, results: [] });
-      setResearchContext({ summary: '', sources: [], structured: undefined });
-      addSystemMessage(settings.language === 'ar'
-        ? 'لم أجد معلومات كافية سريعاً، سأكمل بالـ LLM مباشرة.'
-        : 'Not enough information quickly; asking the LLM directly.');
-    } finally {
-      setIsConfigSearching(false);
+      const prompt = settings.language === 'ar'
+        ? `انت مساعد بحث. مطلوب منك توليد بيانات مبدئية عن الفكرة حسب المكان.
+الفكرة: "${userInput.idea}"
+المكان: "${locationLabel}"
+ارجع JSON فقط بدون شرح. استخدم هذا الشكل:
+{
+  "summary": "",
+  "signals": ["", ""],
+  "competition_level": "low|medium|high",
+  "demand_level": "low|medium|high",
+  "regulatory_risk": "low|medium|high",
+  "price_sensitivity": "low|medium|high",
+  "notable_locations": ["", ""],
+  "gaps": ["", ""]
+}
+لو مش متأكد، خليك صريح في summary.`
+        : `You are a research assistant. Produce initial data about the idea for the given location.
+Idea: "${userInput.idea}"
+Location: "${locationLabel}"
+Return JSON only, no explanation, using:
+{
+  "summary": "",
+  "signals": ["", ""],
+  "competition_level": "low|medium|high",
+  "demand_level": "low|medium|high",
+  "regulatory_risk": "low|medium|high",
+  "price_sensitivity": "low|medium|high",
+  "notable_locations": ["", ""],
+  "gaps": ["", ""]
+}
+If unsure, say so in summary.`;
+
+      const raw = await apiService.generateMessage(prompt);
+      structured = normalizeStructured(parseStructuredFromLlm(raw));
+      summaryText = structured?.summary?.trim() || raw.trim();
+    } catch (err) {
+      console.warn('LLM research fallback failed', err);
+      summaryText = settings.language === 'ar'
+        ? 'لم أستطع توليد بيانات كافية الآن.'
+        : 'I could not generate enough data right now.';
     }
 
+    setIsChatThinking(false);
+    if (summaryText) {
+      setResearchContext({ summary: summaryText, sources: [], structured });
+      const report = buildSearchSummary(
+        {
+          provider: 'llm',
+          is_live: false,
+          answer: summaryText,
+          results: [],
+          structured,
+        },
+        locationLabel
+      );
+      if (report) {
+        addSystemMessage(report);
+      }
+    }
+
+    setPendingResearchReview(true);
+    addSystemMessage(settings.language === 'ar'
+      ? 'تحب أبدأ المحاكاة؟ ولا عايز تصححلي معلومة معينة؟'
+      : 'Do you want me to start the simulation, or do you want to correct any specific detail?');
+  }, [
+    addSystemMessage,
+    buildSearchSummary,
+    getSearchLocationLabel,
+    normalizeStructured,
+    parseStructuredFromLlm,
+    searchState,
+    setSearchState,
+    setResearchContext,
+    settings.language,
+    userInput.idea,
+  ]);
+
+  const handleConfirmStart = useCallback(async () => {
+    if (!pendingResearchReview) return;
+    setPendingResearchReview(false);
     await handleStart();
-  }, [addSystemMessage, getMissingForStart, handleStart, settings.language, userInput, setSearchState, setResearchContext, setPendingConfigReview, setActivePanel]);
+  }, [handleStart, pendingResearchReview]);
 
   const handleSendMessage = useCallback(
-    (content: string) => {
+    (content: string, options?: { skipUserMessage?: boolean }) => {
       const trimmed = content.trim();
       if (!trimmed) return;
 
-      const userMessage: ChatMessage = {
-        id: `user-${Date.now()}`,
-        type: 'user',
-        content,
-        timestamp: Date.now(),
-      };
-      setChatMessages((prev) => [...prev, userMessage]);
+      if (!options?.skipUserMessage) {
+        const userMessage: ChatMessage = {
+          id: `user-${Date.now()}`,
+          type: 'user',
+          content,
+          timestamp: Date.now(),
+        };
+        setChatMessages((prev) => [...prev, userMessage]);
+      }
 
       void (async () => {
         try {
+          if (pendingResearchReview) {
+            if (trimmed) {
+              const correctionPrefix = settings.language === 'ar' ? 'تصحيح المستخدم: ' : 'User correction: ';
+              const nextSummary = `${researchContext.summary ? `${researchContext.summary}\n` : ''}${correctionPrefix}${trimmed}`;
+              const nextStructured = researchContext.structured
+                ? { ...researchContext.structured, summary: nextSummary }
+                : { summary: nextSummary };
+              setResearchContext({ summary: nextSummary, sources: researchContext.sources, structured: nextStructured });
+              addSystemMessage(settings.language === 'ar'
+                ? 'تمام، حدثت البيانات بناءً على ملاحظتك.'
+                : 'Got it. I updated the data based on your note.');
+              addSystemMessage(settings.language === 'ar'
+                ? 'تحب أبدأ المحاكاة؟ ولا عايز تصحح حاجة تانية؟'
+                : 'Start the simulation, or correct anything else?');
+            }
+            return;
+          }
           if (pendingConfigReview) {
             const lower = trimmed.toLowerCase();
             const confirm = ['yes', 'ok', 'okay', 'go', 'start', 'run', 'y', '\u062a\u0645', '\u062a\u0645\u0627\u0645', '\u0645\u0648\u0627\u0641\u0642', '\u0646\u0639\u0645', '\u0627\u0628\u062f\u0623', '\u0627\u0628\u062f\u0621'];
@@ -612,8 +1041,11 @@ const Index = () => {
               addSystemMessage(settings.language === 'ar'
                 ? 'تم تأكيد التحديث، سأرسله للمجتمع الآن.'
                 : 'Update confirmed. Sending it to the agents now.');
-              await simulation.stopSimulation();
-              await simulation.startSimulation(buildConfig(nextInput));
+              setReasoningActive(false);
+              if (reasoningTimerRef.current) {
+                window.clearTimeout(reasoningTimerRef.current);
+              }
+              await simulation.startSimulation(buildConfig(nextInput), { carryOver: true });
               return;
             }
             if (no.includes(lower)) {
@@ -649,7 +1081,7 @@ const Index = () => {
               extraction = await extractWithRetry(trimmed, schemaPayload);
             } catch {
               addSystemMessage(settings.language === 'ar'
-                ? '??? LLM ????? ??????. ???? ???? ??? ?????.'
+                ? 'الـ LLM مشغول الآن. حاول مرة أخرى بعد قليل.'
                 : 'LLM is busy right now. Please try again in a moment.');
               setLlmBusy(true);
               setLlmRetryMessage(trimmed);
@@ -746,7 +1178,7 @@ If rejection is about competition or location, suggest searching for a better lo
           } catch (extractErr) {
             console.warn('Schema extraction failed.', extractErr);
             addSystemMessage(settings.language === 'ar'
-              ? '??? LLM ????? ??????. ???? ???? ??? ?????.'
+              ? 'الـ LLM مشغول الآن. حاول مرة أخرى بعد قليل.'
               : 'LLM is busy right now. Please try again in a moment.');
             setLlmBusy(true);
             setLlmRetryMessage(trimmed);
@@ -820,10 +1252,12 @@ If rejection is about competition or location, suggest searching for a better lo
         getMissingForStart,
         handleConfigSubmit,
         handleStart,
+        pendingResearchReview,
         pendingConfigReview,
         pendingUpdate,
         promptForMissing,
         researchContext,
+        setResearchContext,
         settings.language,
         simulation,
         touched,
@@ -911,8 +1345,12 @@ If rejection is about competition or location, suggest searching for a better lo
     setLlmBusy(false);
     const retryText = llmRetryMessage;
     setLlmRetryMessage(null);
-    handleSendMessage(retryText);
+    handleSendMessage(retryText, { skipUserMessage: true });
   }, [handleSendMessage, llmRetryMessage]);
+
+  const handleQuickReply = useCallback((value: string) => {
+    handleSendMessage(value);
+  }, [handleSendMessage]);
 
   useEffect(() => {
     const handleMove = (event: MouseEvent) => {
@@ -951,6 +1389,23 @@ If rejection is about competition or location, suggest searching for a better lo
       setHasStarted(false);
     }
   }, [simulation.status]);
+
+  const hasProgress = simulation.metrics.currentIteration > 0 || simulation.reasoningFeed.length > 0;
+  const isSummarizing = simulation.status === 'running'
+    && hasProgress
+    && !simulation.summary
+    && !reasoningActive;
+  const quickReplies = pendingUpdate
+    ? [
+        { label: settings.language === 'ar' ? 'موافق' : 'Yes', value: 'yes' },
+        { label: settings.language === 'ar' ? 'مش موافق' : 'No', value: 'no' },
+      ]
+    : pendingConfigReview
+    ? [
+        { label: settings.language === 'ar' ? 'ابدأ' : 'Start', value: 'yes' },
+        { label: settings.language === 'ar' ? 'تعديل' : 'Edit', value: 'edit' },
+      ]
+    : null;
 
   return (
     <div className="h-screen w-screen bg-background flex flex-col overflow-hidden">
@@ -1031,6 +1486,18 @@ If rejection is about competition or location, suggest searching for a better lo
               isThinking={isChatThinking}
               showRetry={llmBusy}
               onRetryLlm={handleRetryLlm}
+              onSearchRetry={handleSearchRetry}
+              onSearchUseLlm={handleSearchUseLlm}
+              canConfirmStart={pendingResearchReview}
+              onConfirmStart={handleConfirmStart}
+              simulationStatus={simulation.status}
+              reasoningActive={reasoningActive}
+              isSummarizing={isSummarizing}
+              rejectedCount={simulation.metrics.rejected}
+              quickReplies={quickReplies || undefined}
+              onQuickReply={handleQuickReply}
+              reportBusy={reportBusy}
+              onDownloadReport={handleDownloadReport}
               insights={{
                 idea: userInput.idea,
                 location: `${userInput.city || ""}${userInput.city && userInput.country ? ", " : ""}${userInput.country || ""}`.trim(),
@@ -1042,6 +1509,17 @@ If rejection is about competition or location, suggest searching for a better lo
                 summary: simulation.summary || "",
                 rejectAdvice: summaryAdvice,
                 rejectReasons: summaryReasons,
+              }}
+              research={{
+                summary: researchContext.summary,
+                signals: researchContext.structured?.signals,
+                competition: researchContext.structured?.competition_level,
+                demand: researchContext.structured?.demand_level,
+                priceSensitivity: researchContext.structured?.price_sensitivity,
+                regulatoryRisk: researchContext.structured?.regulatory_risk,
+                gaps: researchContext.structured?.gaps,
+                notableLocations: researchContext.structured?.notable_locations,
+                sourcesCount: researchContext.sources.length,
               }}
               settings={settings}
             />

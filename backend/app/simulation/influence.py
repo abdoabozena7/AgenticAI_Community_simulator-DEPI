@@ -1,12 +1,4 @@
-"""
-Influence computation logic for the social simulation backend.
 
-This module contains functions that compute the probability and effect
-of social influence between agents. It encapsulates the rules
-described in the specification, including base influence from
-interaction rules, homophily bonuses, skepticism resistance,
-influence susceptibility and random noise.
-"""
 
 from __future__ import annotations
 
@@ -19,22 +11,7 @@ from ..core.dataset_loader import Dataset
 
 
 def compute_pairwise_influences(agents: List[Agent], dataset: Dataset) -> Dict[str, Dict[str, float]]:
-    """Compute cumulative influence weights for each agent from all other agents.
 
-    For each directed pair (j influences i), this function calculates a
-    weighted influence score based on the specification and adds it to
-    the target agent's accumulated scores by opinion category. The
-    resulting structure can be used by the simulation engine to decide
-    on opinion updates for each agent.
-
-    Args:
-        agents: List of all agents participating in the simulation.
-        dataset: The loaded dataset containing categories, templates and rules.
-
-    Returns:
-        A mapping from agent_id to a dictionary mapping opinion strings
-        ('accept', 'neutral', 'reject') to cumulative influence weights.
-    """
     # Initialise influence accumulators for each agent
     accum: Dict[str, Dict[str, float]] = {
         agent.agent_id: {"accept": 0.0, "neutral": 0.0, "reject": 0.0} for agent in agents
@@ -86,24 +63,7 @@ def decide_opinion_change(
     skepticism: float,
     stubbornness: float = 0.0,
 ) -> Tuple[str, bool]:
-    """Decide whether to change opinion based on accumulated influence weights.
 
-    The agent will adopt the opinion category with the largest cumulative
-    weight if it differs from its current opinion and if the difference
-    between the highest and second-highest weights exceeds a threshold
-    scaled by (1 - skepticism). This threshold prevents trivial
-    oscillations and models the agent's resistance to change.
-
-    Args:
-        current_opinion: The agent's existing opinion.
-        influence_weights: Mapping from opinion strings to total
-            influence weights.
-        skepticism: The agent's skepticism trait (0–1 range).
-
-    Returns:
-        A tuple of (new_opinion, changed_flag). If no change occurs,
-        new_opinion will equal current_opinion and changed_flag is False.
-    """
     weights = {
         "accept": influence_weights.get("accept", 0.0),
         "reject": influence_weights.get("reject", 0.0),

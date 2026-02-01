@@ -97,11 +97,21 @@ export function Header({
             )}
           </div>
           <div>
-            <h1 className="text-xl font-bold text-foreground">
-              <span className="text-gradient">Point of return</span>
+            <h1 className="text-xl font-bold">
+              <span className="text-gradient">
+              {language === 'ar' ? (
+                <>
+                نقطة <span className="line-through text-destructive">الا</span> العودة
+                </>
+              ) : (
+                <>
+                Point of <span className="line-through text-destructive">no</span> return
+                </>
+              )}
+              </span>
             </h1>
             <p className="text-xs text-muted-foreground">
-              {language === 'ar' ? 'محاكاة اجتماعية متعددة الوكلاء' : 'Multi-Agent Social Simulation'}
+              {language === 'ar' ? 'جرب افكارك  قبل اطلاقها' : 'Test your ideas before launching them'}
             </p>
           </div>
         </div>

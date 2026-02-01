@@ -225,33 +225,90 @@ export function useSimulation() {
   const [state, dispatch] = useReducer(simulationReducer, initialState);
   const [error, setError] = useState<string | null>(null);
   const [pollTask, setPollTask] = useState<number | null>(null);
+  const stateRef = useRef(state);
+  const carryOverRef = useRef({ active: false, skipInitial: false, iterationOffset: 0 });
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  const shouldSkipInitial = useCallback((iteration?: number) => {
+    return carryOverRef.current.active
+      && carryOverRef.current.skipInitial
+      && (iteration ?? 0) === 0
+      && stateRef.current.metrics.currentIteration > 0;
+  }, []);
+
+  const markCarryOverProgress = useCallback((iteration?: number) => {
+    if (carryOverRef.current.active && carryOverRef.current.skipInitial && (iteration ?? 0) > 0) {
+      carryOverRef.current.skipInitial = false;
+    }
+  }, []);
+
+  const applyIterationOffset = useCallback((iteration?: number) => {
+    if (typeof iteration !== 'number') return iteration;
+    if (!carryOverRef.current.active) return iteration;
+    return iteration + carryOverRef.current.iterationOffset;
+  }, []);
+
+  const applyTotalIterationsOffset = useCallback((total?: number) => {
+    if (typeof total !== 'number') return total;
+    if (!carryOverRef.current.active) return total;
+    return total + carryOverRef.current.iterationOffset;
+  }, []);
+
+  const applyMetricsOffset = useCallback((event: MetricsEvent): MetricsEvent => {
+    if (!carryOverRef.current.active) return event;
+    return {
+      ...event,
+      iteration: (event.iteration ?? 0) + carryOverRef.current.iterationOffset,
+      total_iterations: typeof event.total_iterations === 'number'
+        ? event.total_iterations + carryOverRef.current.iterationOffset
+        : event.total_iterations,
+    };
+  }, []);
 
   const handleWebSocketEvent = useCallback((event: WebSocketEvent) => {
     switch (event.type) {
       case 'metrics':
-        dispatch({ type: 'UPDATE_METRICS', payload: event });
+        if (shouldSkipInitial(event.iteration)) return;
+        markCarryOverProgress(event.iteration);
+        dispatch({ type: 'UPDATE_METRICS', payload: applyMetricsOffset(event) });
         break;
       case 'reasoning_step':
-        dispatch({ type: 'ADD_REASONING', payload: event });
+        dispatch({
+          type: 'ADD_REASONING',
+          payload: {
+            ...event,
+            iteration: applyIterationOffset(event.iteration) ?? event.iteration,
+          },
+        });
         break;
       case 'agents':
+        if (shouldSkipInitial(event.iteration)) return;
         dispatch({ type: 'UPDATE_AGENTS', payload: event });
         break;
       case 'summary':
         dispatch({ type: 'SET_SUMMARY', payload: event.summary });
         break;
     }
-  }, []);
+  }, [markCarryOverProgress, shouldSkipInitial]);
 
   useEffect(() => {
     const unsubscribe = websocketService.subscribe('all', handleWebSocketEvent);
     return () => unsubscribe();
   }, [handleWebSocketEvent]);
 
-  const startSimulation = useCallback(async (config: SimulationConfig) => {
+  const startSimulation = useCallback(async (config: SimulationConfig, options?: { carryOver?: boolean }) => {
     try {
       setError(null);
+      carryOverRef.current.active = Boolean(options?.carryOver);
+      carryOverRef.current.skipInitial = Boolean(options?.carryOver);
+      carryOverRef.current.iterationOffset = options?.carryOver
+        ? stateRef.current.metrics.currentIteration
+        : 0;
       dispatch({ type: 'SET_STATUS', payload: 'configuring' });
+      dispatch({ type: 'SET_SUMMARY', payload: null });
 
       const apiBase = (import.meta.env.VITE_API_URL || 'http://localhost:8000') as string;
       const wsBase = (import.meta.env.VITE_WS_URL as string | undefined) || apiBase;
@@ -273,7 +330,11 @@ export function useSimulation() {
       // Prime state immediately after start
       try {
         const prime = await apiService.getSimulationState(response.simulation_id);
-        if (prime.metrics) {
+        const primeIteration = prime.metrics?.iteration ?? 0;
+        if (prime.metrics && !shouldSkipInitial(primeIteration)) {
+          markCarryOverProgress(primeIteration);
+          const adjustedIteration = applyIterationOffset(primeIteration) ?? primeIteration;
+          const adjustedTotal = applyTotalIterationsOffset(prime.metrics.total_iterations);
           dispatch({
             type: 'UPDATE_METRICS',
             payload: {
@@ -284,19 +345,19 @@ export function useSimulation() {
               acceptance_rate: prime.metrics.acceptance_rate,
               polarization: prime.metrics.polarization,
               total_agents: prime.metrics.total_agents || state.metrics.totalAgents,
-              iteration: prime.metrics.iteration ?? 0,
+              iteration: adjustedIteration,
               per_category: prime.metrics.per_category || {},
-              total_iterations: prime.metrics.total_iterations,
+              total_iterations: adjustedTotal,
             },
           });
         }
-        if (prime.agents && prime.agents.length > 0) {
+        if (prime.agents && prime.agents.length > 0 && !shouldSkipInitial(primeIteration)) {
           dispatch({
             type: 'UPDATE_AGENTS',
             payload: {
               type: 'agents',
               agents: prime.agents,
-              iteration: prime.metrics?.iteration ?? 0,
+              iteration: applyIterationOffset(primeIteration) ?? primeIteration,
               total_agents: prime.metrics?.total_agents,
             },
           });
@@ -307,10 +368,14 @@ export function useSimulation() {
             agentId: step.agent_id,
             message: step.message,
             timestamp: Date.now(),
-            iteration: step.iteration,
+            iteration: applyIterationOffset(step.iteration) ?? step.iteration,
             opinion: step.opinion,
           }));
-          dispatch({ type: 'SET_REASONING', payload: reasoningMessages });
+          if (carryOverRef.current.active) {
+            dispatch({ type: 'SET_REASONING', payload: [...stateRef.current.reasoningFeed, ...reasoningMessages] });
+          } else {
+            dispatch({ type: 'SET_REASONING', payload: reasoningMessages });
+          }
         }
         if (prime.summary) {
           dispatch({ type: 'SET_SUMMARY', payload: prime.summary });
@@ -336,32 +401,41 @@ export function useSimulation() {
             return;
           }
           if (stateResponse?.metrics) {
-            dispatch({
-              type: 'UPDATE_METRICS',
-              payload: {
-                type: 'metrics',
-                accepted: stateResponse.metrics.accepted,
-                rejected: stateResponse.metrics.rejected,
-                neutral: stateResponse.metrics.neutral,
-                acceptance_rate: stateResponse.metrics.acceptance_rate,
-                polarization: stateResponse.metrics.polarization,
-                total_agents: stateResponse.metrics.total_agents || state.metrics.totalAgents,
-                iteration: stateResponse.metrics.iteration ?? state.metrics.currentIteration,
-                per_category: stateResponse.metrics.per_category || {},
-                total_iterations: stateResponse.metrics.total_iterations,
-              },
-            });
+            const rawIteration = stateResponse.metrics.iteration ?? 0;
+            if (!shouldSkipInitial(rawIteration)) {
+              markCarryOverProgress(rawIteration);
+              const adjustedIteration = applyIterationOffset(rawIteration) ?? state.metrics.currentIteration;
+              const adjustedTotal = applyTotalIterationsOffset(stateResponse.metrics.total_iterations);
+              dispatch({
+                type: 'UPDATE_METRICS',
+                payload: {
+                  type: 'metrics',
+                  accepted: stateResponse.metrics.accepted,
+                  rejected: stateResponse.metrics.rejected,
+                  neutral: stateResponse.metrics.neutral,
+                  acceptance_rate: stateResponse.metrics.acceptance_rate,
+                  polarization: stateResponse.metrics.polarization,
+                  total_agents: stateResponse.metrics.total_agents || state.metrics.totalAgents,
+                  iteration: adjustedIteration,
+                  per_category: stateResponse.metrics.per_category || {},
+                  total_iterations: adjustedTotal,
+                },
+              });
+            }
           }
           if (stateResponse?.agents && stateResponse.agents.length > 0) {
-            dispatch({
-              type: 'UPDATE_AGENTS',
-              payload: {
-                type: 'agents',
-                agents: stateResponse.agents,
-                iteration: stateResponse.metrics?.iteration ?? state.metrics.currentIteration,
-                total_agents: stateResponse.metrics?.total_agents,
-              },
-            });
+            const rawIteration = stateResponse.metrics?.iteration ?? 0;
+            if (!shouldSkipInitial(rawIteration)) {
+              dispatch({
+                type: 'UPDATE_AGENTS',
+                payload: {
+                  type: 'agents',
+                  agents: stateResponse.agents,
+                  iteration: applyIterationOffset(rawIteration) ?? state.metrics.currentIteration,
+                  total_agents: stateResponse.metrics?.total_agents,
+                },
+              });
+            }
           }
           if (stateResponse?.reasoning && stateResponse.reasoning.length > 0) {
           const reasoningMessages: ReasoningMessage[] = stateResponse.reasoning.map((step, index) => ({
@@ -369,10 +443,14 @@ export function useSimulation() {
             agentId: step.agent_id,
             message: step.message,
             timestamp: Date.now(),
-            iteration: step.iteration,
+            iteration: applyIterationOffset(step.iteration) ?? step.iteration,
             opinion: step.opinion,
           }));
-            dispatch({ type: 'SET_REASONING', payload: reasoningMessages });
+            if (carryOverRef.current.active) {
+              dispatch({ type: 'SET_REASONING', payload: [...stateRef.current.reasoningFeed, ...reasoningMessages] });
+            } else {
+              dispatch({ type: 'SET_REASONING', payload: reasoningMessages });
+            }
           }
           if (stateResponse?.summary) {
             dispatch({ type: 'SET_SUMMARY', payload: stateResponse.summary });
@@ -422,32 +500,41 @@ export function useSimulation() {
             return;
           }
           if (stateResponse.metrics) {
-            dispatch({
-              type: 'UPDATE_METRICS',
-              payload: {
-                type: 'metrics',
-                accepted: stateResponse.metrics.accepted,
-                rejected: stateResponse.metrics.rejected,
-                neutral: stateResponse.metrics.neutral,
-                acceptance_rate: stateResponse.metrics.acceptance_rate,
-                polarization: stateResponse.metrics.polarization,
-                total_agents: stateResponse.metrics.total_agents || state.metrics.totalAgents,
-                iteration: stateResponse.metrics.iteration ?? state.metrics.currentIteration,
-                per_category: stateResponse.metrics.per_category || {},
-                total_iterations: stateResponse.metrics.total_iterations,
-              },
-            });
+            const rawIteration = stateResponse.metrics.iteration ?? 0;
+            if (!shouldSkipInitial(rawIteration)) {
+              markCarryOverProgress(rawIteration);
+              const adjustedIteration = applyIterationOffset(rawIteration) ?? state.metrics.currentIteration;
+              const adjustedTotal = applyTotalIterationsOffset(stateResponse.metrics.total_iterations);
+              dispatch({
+                type: 'UPDATE_METRICS',
+                payload: {
+                  type: 'metrics',
+                  accepted: stateResponse.metrics.accepted,
+                  rejected: stateResponse.metrics.rejected,
+                  neutral: stateResponse.metrics.neutral,
+                  acceptance_rate: stateResponse.metrics.acceptance_rate,
+                  polarization: stateResponse.metrics.polarization,
+                  total_agents: stateResponse.metrics.total_agents || state.metrics.totalAgents,
+                  iteration: adjustedIteration,
+                  per_category: stateResponse.metrics.per_category || {},
+                  total_iterations: adjustedTotal,
+                },
+              });
+            }
           }
           if (stateResponse.agents && stateResponse.agents.length > 0) {
-            dispatch({
-              type: 'UPDATE_AGENTS',
-              payload: {
-                type: 'agents',
-                agents: stateResponse.agents,
-                iteration: stateResponse.metrics?.iteration ?? state.metrics.currentIteration,
-                total_agents: stateResponse.metrics?.total_agents,
-              },
-            });
+            const rawIteration = stateResponse.metrics?.iteration ?? 0;
+            if (!shouldSkipInitial(rawIteration)) {
+              dispatch({
+                type: 'UPDATE_AGENTS',
+                payload: {
+                  type: 'agents',
+                  agents: stateResponse.agents,
+                  iteration: applyIterationOffset(rawIteration) ?? state.metrics.currentIteration,
+                  total_agents: stateResponse.metrics?.total_agents,
+                },
+              });
+            }
           }
           if (stateResponse.reasoning && stateResponse.reasoning.length > 0) {
             const reasoningMessages: ReasoningMessage[] = stateResponse.reasoning.map((step, index) => ({
@@ -455,9 +542,13 @@ export function useSimulation() {
               agentId: step.agent_id,
               message: step.message,
               timestamp: Date.now(),
-              iteration: step.iteration,
+              iteration: applyIterationOffset(step.iteration) ?? step.iteration,
             }));
-            dispatch({ type: 'SET_REASONING', payload: reasoningMessages });
+            if (carryOverRef.current.active) {
+              dispatch({ type: 'SET_REASONING', payload: [...stateRef.current.reasoningFeed, ...reasoningMessages] });
+            } else {
+              dispatch({ type: 'SET_REASONING', payload: reasoningMessages });
+            }
           }
           if (stateResponse.summary) {
             dispatch({ type: 'SET_SUMMARY', payload: stateResponse.summary });
@@ -480,7 +571,7 @@ export function useSimulation() {
       setError(message);
       dispatch({ type: 'SET_STATUS', payload: 'error' });
     }
-  }, [pollTask, state.metrics.currentIteration, state.metrics.totalAgents]);
+  }, [markCarryOverProgress, pollTask, shouldSkipInitial, state.metrics.currentIteration, state.metrics.totalAgents]);
 
   const stopSimulation = useCallback(() => {
     websocketService.disconnect();

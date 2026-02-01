@@ -217,7 +217,7 @@ export function ConfigPanel({
           {MATURITY_LEVELS.map((level) => {
             const selected = value.ideaMaturity === level.value;
             const label = language === 'ar'
-              ? ({ concept: 'فكرة', prototype: 'نموذج', mvp: 'نسخة أولية', launched: 'أطلق' } as Record<string, string>)[level.value]
+              ? ({ concept: 'فكرة', prototype: ' نموذج صغير', mvp: 'فكره لاول مره', launched: 'موجوده بالفعل' } as Record<string, string>)[level.value]
               : level.label;
             return (
               <button

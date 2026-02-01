@@ -115,13 +115,7 @@ export function MetricsPanel({ metrics, language }: MetricsPanelProps) {
             animate={currentIteration > 0}
             dataTestId="metric-acceptance-rate"
           />
-          <MetricCard
-            icon={<Activity className="w-5 h-5" />}
-            label={language === 'ar' ? 'الاستقطاب' : 'Polarization'}
-            value={`${(((polarization ?? 0) * 100)).toFixed(0)}%`}
-            color={(polarization ?? 0) >= 0.6 ? 'warning' : 'neutral'}
-            dataTestId="metric-polarization"
-          />
+
         </div>
 
         {/* Status Breakdown */}

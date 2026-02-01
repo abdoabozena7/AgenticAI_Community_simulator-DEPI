@@ -213,7 +213,7 @@ export const SimulationArena = ({ agents, activePulses }: SimulationArenaProps) 
         {/* Background sphere */}
         <Sphere args={[25, 64, 64]}>
           <meshBasicMaterial 
-            color="#1d1d2b" 
+            color="#111111" 
             side={THREE.BackSide}
           />
         </Sphere>

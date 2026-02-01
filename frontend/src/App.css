@@ -1,42 +1,264 @@
+/* ================================
+   RESET VITE DEFAULT ROOT STYLES
+   ================================ */
 #root {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  text-align: initial;
+  height: 100%;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: filter 300ms;
-}
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
-}
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafbaa);
+/* Make sure app can fill screen */
+html, body {
+  height: 100%;
 }
 
-@keyframes logo-spin {
-  from {
-    transform: rotate(0deg);
+/* Optional: if you were using Vite logos remove them */
+.logo, .card, .read-the-docs {
+  all: unset;
+}
+
+/* ================================
+   YOUR CHAT UI FIXES
+   ================================ */
+
+/* Compact message bubbles + modern enter animation */
+@layer components {
+  .message-compact {
+    max-width: 88%;
+    opacity: 0;
+    transform: translateY(10px);
+    animation: msgPop 260ms cubic-bezier(0.2, 0.9, 0.2, 1) forwards;
   }
-  to {
-    transform: rotate(360deg);
+
+  .bubble-compact {
+    padding: 10px 12px;
+    border-radius: 14px;
+    font-size: 14px;
+    line-height: 1.55;
+    text-align: start;
+  }
+
+  /* BOT bubble */
+  .message.bot .bubble,
+  .message.bot .bubble-compact {
+    background: hsl(var(--card));
+    color: hsl(var(--foreground));
+    border-radius: 14px 14px 14px 6px;
+    box-shadow: 0 2px 10px hsl(0 0% 0% / 0.22);
+    border: 1px solid hsl(var(--border));
+  }
+
+  /* USER bubble — FIX WHITE BOX ISSUE */
+  .message.user .bubble,
+  .message.user .bubble-compact {
+    background: hsl(var(--foreground));
+    color: hsl(var(--background));
+    border-radius: 14px 14px 6px 14px;
+    box-shadow: 0 2px 10px hsl(0 0% 0% / 0.22);
+    border: none;
+  }
+
+  /* INLINE thinking/search row like ChatGPT (no borders/boxes) */
+  .inline-disclosure {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: hsl(var(--secondary));
+    color: hsl(var(--muted-foreground));
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+    transition: transform 160ms ease, background 160ms ease, color 160ms ease;
+  }
+
+  .inline-disclosure:hover {
+    background: hsl(var(--secondary) / 0.9);
+    color: hsl(var(--foreground));
+    transform: translateY(-1px);
+  }
+
+  .inline-disclosure-content {
+    overflow: hidden;
+    max-height: 0;
+    transition: max-height 220ms ease;
+  }
+
+  .inline-disclosure-open .inline-disclosure-content {
+    max-height: 260px;
+  }
+
+  .inline-steps {
+    margin-top: 10px;
+    padding-left: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    color: hsl(var(--muted-foreground));
+    font-size: 12px;
+  }
+
+  .inline-step {
+    opacity: 0;
+    transform: translateY(6px);
+    animation: stepIn 220ms ease forwards;
+  }
+
+  /* Send glow + popover actions */
+  .send-glow {
+    box-shadow:
+      0 0 0 3px hsl(var(--primary) / 0.14),
+      0 10px 24px -10px hsl(var(--primary) / 0.22);
+    animation: glowPulse 1.35s ease-in-out infinite;
+  }
+
+  @keyframes glowPulse {
+    0%, 100% {
+      box-shadow: 0 0 0 3px hsl(var(--primary) / 0.14),
+                  0 10px 24px -10px hsl(var(--primary) / 0.22);
+    }
+    50% {
+      box-shadow: 0 0 0 5px hsl(var(--primary) / 0.18),
+                  0 14px 34px -12px hsl(var(--primary) / 0.28);
+    }
+  }
+
+  .action-pop {
+    position: absolute;
+    bottom: 56px;
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px;
+    border-radius: 16px;
+    background: hsl(var(--card));
+    box-shadow: 0 18px 50px hsl(0 0% 0% / 0.35);
+    transform-origin: bottom right;
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+    animation: popOpen 180ms cubic-bezier(0.2, 0.9, 0.2, 1) forwards;
+    z-index: 20;
+    min-width: 240px;
+  }
+
+  .action-pop.closing {
+    animation: popClose 140ms ease forwards;
+  }
+
+  @keyframes popOpen {
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  @keyframes popClose {
+    to { opacity: 0; transform: translateY(10px) scale(0.96); }
+  }
+
+  .action-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 8px;
+    border-radius: 14px;
+    background: transparent;
+    border: none;
+    transition: background 160ms ease, transform 160ms ease;
+    text-align: start;
+  }
+
+  .action-item:hover {
+    background: hsl(var(--primary) / 0.06);
+    transform: translateY(-1px);
+  }
+
+  .action-ico {
+    width: 44px;
+    height: 44px;
+    border-radius: 14px;
+    background: hsl(var(--secondary));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .action-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: hsl(var(--foreground));
+    line-height: 1.2;
+  }
+
+  .action-sub {
+    font-size: 12px;
+    color: hsl(var(--muted-foreground));
+    margin-top: 2px;
+  }
+
+  /* Read more */
+  .readmore {
+    margin-top: 8px;
+    font-size: 12px;
+    color: hsl(var(--muted-foreground));
+    cursor: pointer;
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .readmore:hover {
+    color: hsl(var(--foreground));
+  }
+
+  @keyframes msgPop {
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes stepIn {
+    to { opacity: 1; transform: translateY(0); }
   }
 }
+@layer components {
+  /* =========================
+     FIX WHITE ITER CARDS
+     ========================= */
 
-@media (prefers-reduced-motion: no-preference) {
-  a:nth-of-type(2) .logo {
-    animation: logo-spin infinite 20s linear;
+  /* أي عنصر داخل reasoning ما يبقاش أبيض */
+  [data-testid="reasoning-messages"] div {
+    background-color: transparent;
   }
-}
 
-.card {
-  padding: 2em;
-}
+  /* لو فيه card افتراضي */
+  .card {
+    background: transparent !important;
+    color: inherit !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+  }
 
-.read-the-docs {
-  color: #888;
+  /* رسالة reasoning نفسها */
+  .message.reasoning,
+  .message.reasoning .bubble,
+  .message.reasoning .bubble-compact {
+    background: hsl(var(--card)) !important;
+    color: hsl(var(--foreground)) !important;
+    border: 1px solid hsl(var(--border));
+    border-radius: 14px;
+  }
+
+  /* لو فيه Iter label لوحده */
+  .iteration-card,
+  .iter-card,
+  .iteration {
+    background: hsl(var(--card)) !important;
+    color: hsl(var(--muted-foreground)) !important;
+    border: 1px solid hsl(var(--border));
+    border-radius: 12px;
+    padding: 8px 10px;
+    text-align: center;
+    font-size: 12px;
+  }
 }

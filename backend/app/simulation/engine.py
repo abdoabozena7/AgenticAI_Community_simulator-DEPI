@@ -1,14 +1,4 @@
-"""
-Simulation engine for the hybrid multi-agent social simulation backend.
-
-This module orchestrates the lifecycle of a single simulation run. It
 creates agents from the dataset, executes a specified number of
-iterations according to the influence logic and emits reasoning and
-metrics events via a supplied callback. A hybrid approach is used for
-reasoning: mathematical influence rules determine opinion changes,
-while a local LLM (via Ollama) occasionally generates human-readable
-explanations when agents change their opinions.
-"""
 
 from __future__ import annotations
 
@@ -33,9 +23,6 @@ class SimulationEngine:
     carries out multiple iterations of pairwise influence. The engine
     communicates progress through an event emitter callback which
     delivers reasoning steps and metrics updates to the caller (e.g.
-    WebSocket handler). A hybrid reasoning model combines simple
-    mathematical rules with occasional LLM-generated explanations.
-    """
 
     def __init__(self, dataset: Dataset) -> None:
         self.dataset = dataset
@@ -56,22 +43,7 @@ class SimulationEngine:
         constraints_summary: str,
         recent_phrases: List[str],
     ) -> str:
-        """Invoke the LLM to produce a short explanation for an opinion change.
 
-        The prompt includes the agent's traits, previous and new opinions and
-        the influence weights for each opinion category. The LLM is asked
-        to produce a concise explanation (max ~25 words). If the call
-        fails, a fallback deterministic message is returned.
-
-        Args:
-            agent: The agent undergoing the opinion change.
-            prev_opinion: The agent's previous opinion.
-            new_opinion: The agent's new opinion.
-            influence_weights: Dictionary of cumulative influence weights.
-
-        Returns:
-            A textual explanation for the opinion change.
-        """
         traits_desc = ", ".join(f"{k}: {v:.2f}" for k, v in agent.traits.items())
         bias_desc = ", ".join(agent.biases) if agent.biases else "none"
         archetype_lower = (agent.archetype_name or "").lower()
@@ -135,7 +107,7 @@ class SimulationEngine:
             # Truncate to ensure brevity
             explanation = response.strip().split("\n")[0]
             if response_language == "Arabic":
-                for token in ["?????=", "???????=", "?????=", "?????=", "??????=", "????????="]:
+                for token in ["الفئة=", "الجمهور=", "الأهداف=", "النضج=", "الموقع=", "المخاطرة="]:
                     explanation = explanation.replace(token, "")
             else:
                 for token in ["category=", "audience=", "goals=", "maturity=", "location=", "risk="]:
@@ -170,20 +142,7 @@ class SimulationEngine:
         user_context: Dict[str, Any],
         emitter: Callable[[str, Dict[str, Any]], asyncio.Future],
     ) -> Dict[str, Any]:
-        """Execute a social simulation.
 
-        Args:
-            user_context: Structured input provided by the user. The
-                simulation engine does not make decisions based on
-                sensitive characteristics but can utilise context for
-                initial settings if desired.
-            emitter: Async function called with events of the form
-                (event_type, data). Supported event types include
-                'reasoning_step', 'metrics' and 'agents'.
-
-        Returns:
-            Final aggregated metrics summarising the simulation outcome.
-        """
         # Seed randomness so identical inputs produce similar outcomes
         seed_source = json.dumps(
             {
@@ -287,12 +246,12 @@ class SimulationEngine:
             summary = research_summary.lower()
             city = str(user_context.get('city') or '')
             if language == 'ar':
-                if any(token in summary for token in ['?????', '??????', '????', '????', '????', '?????? ??????']):
-                    return f"??? ?????? ????? ?? {city}" if city else "??? ?????? ????? ?? ?????"
-                if any(token in summary for token in ['???', '??????', '?????', '??????']):
-                    return "??? ??? ???? ??? ??????"
-                if any(token in summary for token in ['?????', '????', '???', '?????']):
-                    return "??? ????? ??????? ???? ??????"
+                if any(token in summary for token in ['منافسة', 'ازدحام', 'مشبع', 'تشابه', 'متشابه', 'منتشر جدًا']):
+                    return f"المنافسة تبدو عالية في {city}" if city else "المنافسة تبدو عالية"
+                if any(token in summary for token in ['طلب', 'اهتمام', 'احتياج', 'حاجة']):
+                    return "يبدو أن هناك طلب واضح"
+                if any(token in summary for token in ['مخاطر', 'تنظيم', 'امتثال', 'قانوني', 'ترخيص', 'لوائح']):
+                    return "المخاطر التنظيمية تبدو مرتفعة"
             else:
                 if any(token in summary for token in ['competition', 'crowded', 'saturated', 'many similar']):
                     return f"competition looks high in {city}" if city else "competition looks high"
@@ -855,7 +814,7 @@ class SimulationEngine:
                 diff = max(0.0, top_weight - second_weight)
                 peer_label = _pick_phrase(
                     f"{agent.agent_id}-peer-{iteration}",
-                    ["Agent A", "Agent B", "Agent C"] if language != "ar" else ["???????????? ??", "???????????? ??", "???????????? ??"],
+                    ["Agent A", "Agent B", "Agent C"] if language != "ar" else ["الوكيل أ", "الوكيل ب", "الوكيل ج"],
                 )
                 prev_opinion = agent.current_opinion
                 if agent.fixed_opinion:
