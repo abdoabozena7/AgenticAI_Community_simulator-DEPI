@@ -14,6 +14,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+import urllib.parse
 from typing import Any, Dict, List, Optional
 
 from .ollama_client import generate_ollama
@@ -84,6 +85,102 @@ async def _tavily_search(query: str, max_results: int, language: str) -> Dict[st
         "provider": "tavily",
         "is_live": True,
         "answer": (result.get("answer") or "").strip(),
+        "results": results,
+    }
+
+
+# New search providers: DuckDuckGo and Wikipedia
+async def _ddg_search(query: str, max_results: int, language: str) -> Dict[str, Any]:
+    """Perform a DuckDuckGo Instant Answer search.
+
+    Returns at most ``max_results`` items with title, url, snippet and reason.
+    """
+    try:
+        url = (
+            "https://api.duckduckgo.com/?" + urllib.parse.urlencode({"q": query, "format": "json", "no_html": 1, "t": "agentic"})
+        )
+        data = await asyncio.to_thread(lambda: json.loads(urllib.request.urlopen(url, timeout=10).read().decode("utf-8")))
+    except Exception:
+        return {"provider": "duckduckgo", "is_live": False, "answer": "", "results": []}
+    results: List[Dict[str, Any]] = []
+    # DuckDuckGo returns "RelatedTopics" which can contain nested topics; flatten
+    topics = data.get("RelatedTopics", []) or []
+    def _flatten(items: List[Any]) -> List[Any]:
+        out = []
+        for it in items:
+            if isinstance(it, dict) and it.get("Topics"):
+                out.extend(_flatten(it.get("Topics")))
+            else:
+                out.append(it)
+        return out
+    flat = _flatten(topics)
+    for item in flat:
+        if len(results) >= max_results:
+            break
+        title = item.get("Text") or item.get("Result") or ""
+        url_item = item.get("FirstURL") or item.get("FirstUrl") or ""
+        snippet = item.get("Text") or ""
+        if not url_item or not title:
+            continue
+        results.append(
+            {
+                "title": title,
+                "url": url_item,
+                "domain": _extract_domain(url_item),
+                "snippet": snippet[:280],
+                "score": None,
+                "reason": _keyword_reason(query, title, snippet),
+            }
+        )
+    return {
+        "provider": "duckduckgo",
+        "is_live": True,
+        "answer": "",
+        "results": results,
+    }
+
+
+async def _wikipedia_search(query: str, max_results: int, language: str) -> Dict[str, Any]:
+    """Perform a Wikipedia API search.
+
+    Returns at most ``max_results`` items with title, url, snippet and reason.
+    """
+    # Use English Wikipedia if language not Arabic; for Arabic use ar.wikipedia
+    lang_code = "ar" if language.lower().startswith("ar") else "en"
+    try:
+        url = (
+            f"https://{lang_code}.wikipedia.org/w/api.php?" + urllib.parse.urlencode({
+                "action": "query",
+                "list": "search",
+                "srsearch": query,
+                "utf8": "",
+                "format": "json",
+            })
+        )
+        data = await asyncio.to_thread(lambda: json.loads(urllib.request.urlopen(url, timeout=10).read().decode("utf-8")))
+    except Exception:
+        return {"provider": "wikipedia", "is_live": False, "answer": "", "results": []}
+    results: List[Dict[str, Any]] = []
+    for item in (data.get("query", {}).get("search", []) or [])[:max_results]:
+        title = item.get("title") or ""
+        snippet_html = item.get("snippet") or ""
+        # Remove HTML tags
+        snippet_text = re.sub(r"<[^>]+>", "", snippet_html)
+        page_url = f"https://{lang_code}.wikipedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_"))
+        results.append(
+            {
+                "title": title,
+                "url": page_url,
+                "domain": _extract_domain(page_url),
+                "snippet": snippet_text[:280],
+                "score": None,
+                "reason": _keyword_reason(query, title, snippet_text),
+            }
+        )
+    return {
+        "provider": "wikipedia",
+        "is_live": True,
+        "answer": "",
         "results": results,
     }
 
@@ -207,10 +304,20 @@ async def search_web(query: str, max_results: int = 5, language: str = "en") -> 
             "answer": "",
             "results": [],
         }
+    # Try Tavily first if API key is available
     try:
         result = await _tavily_search(normalized, max_results=max_results, language=language)
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, RuntimeError):
-        result = await _llm_fallback(normalized)
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, RuntimeError, Exception):
+        # If Tavily not configured or fails, try DuckDuckGo
+        result = await _ddg_search(normalized, max_results=max_results, language=language)
+        if not result.get("results"):
+            # Try Wikipedia as fallback
+            wiki_result = await _wikipedia_search(normalized, max_results=max_results, language=language)
+            if wiki_result.get("results"):
+                result = wiki_result
+        # If still no results, use LLM fallback
+        if not result.get("results"):
+            result = await _llm_fallback(normalized)
 
     # Structured summary with timeout and fallback
     structured: Dict[str, Any] = {}

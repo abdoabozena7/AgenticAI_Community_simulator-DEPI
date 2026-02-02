@@ -171,7 +171,7 @@ function InlineDisclosure({
         <div className="inline-steps">
           {steps.map((s, i) => (
             <div
-              key={s}
+              key={`${i}-${s}`}
               className="inline-step"
               style={{ animationDelay: `${i * 60}ms` }}
             >
@@ -514,9 +514,9 @@ export function ChatPanel({
               </div>
             ) : (
               /* ------------ LIST OF CHAT MESSAGES ------------ */
-              messages.map((msg) => (
+              messages.map((msg, idx) => (
                 <div
-                  key={msg.id}
+                  key={`${msg.id}-${idx}`}
                   className={cn(
                     'message message-compact',
                     msg.type === 'user' ? 'user' : 'bot'

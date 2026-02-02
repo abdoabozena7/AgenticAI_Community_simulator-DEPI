@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pydantic
+email-validator
+python-dotenv
+mysql-connector-python
+requests
+beautifulsoup4
+lxml
+aiohttp
+jinja2
