@@ -63,6 +63,7 @@ async def generate_ollama(
     model: Optional[str] = None,
     base_url: Optional[str] = None,
     response_format: Optional[str] = None,
+    seed: Optional[int] = None,
     options: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Generate a single response from Ollama.
@@ -107,6 +108,10 @@ async def generate_ollama(
     }
     if options:
         payload["options"].update(options)
+    env_seed = os.getenv("OLLAMA_SEED")
+    seed_value = seed if seed is not None else (int(env_seed) if env_seed and env_seed.isdigit() else None)
+    if seed_value is not None:
+        payload["options"]["seed"] = seed_value
     if system:
         payload["system"] = system
     if response_format:

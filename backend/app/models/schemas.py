@@ -85,7 +85,7 @@ class PersonaTemplateModel(BaseModel):
 
     @field_validator("traits")
     def validate_traits(cls, v: Dict[str, float]) -> Dict[str, float]:
-        """Ensure that all required trait keys are present and values are within [0,1]."""
+        """Ensure required trait keys exist; allow optional extras like stubbornness."""
         required_keys = {
             "optimism",
             "risk_tolerance",
@@ -93,17 +93,11 @@ class PersonaTemplateModel(BaseModel):
             "skepticism",
             "emotional_reactivity",
         }
-        if set(v.keys()) != required_keys:
-            missing = required_keys - set(v.keys())
-            extra = set(v.keys()) - required_keys
-            msg_parts = []
-            if missing:
-                msg_parts.append(f"missing {missing}")
-            if extra:
-                msg_parts.append(f"unexpected keys {extra}")
+        missing = required_keys - set(v.keys())
+        if missing:
             raise ValueError(
-                f"Traits must contain exactly these keys: {', '.join(sorted(required_keys))}; "
-                f"{'; '.join(msg_parts)}"
+                f"Traits must include required keys: {', '.join(sorted(required_keys))}; "
+                f"missing {missing}"
             )
         for key, value in v.items():
             if not 0.0 <= value <= 1.0:
@@ -144,6 +138,10 @@ class ReasoningStep(BaseModel):
     iteration: int = Field(..., description="Iteration number")
     message: str = Field(..., description="Explanation of the reasoning")
     triggered_by: str = Field(..., description="Agent ID or 'environment'")
+    phase: Optional[str] = Field(default=None, description="Phase label for the dialogue")
+    reply_to_agent_id: Optional[str] = Field(
+        default=None, description="Agent ID this message is responding to"
+    )
     opinion_change: Optional[Dict[str, str]] = Field(
         default=None,
         description="Optional details of opinion change represented as {'from': <prev>, 'to': <new>}"

@@ -156,9 +156,14 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
       const newMessage: ReasoningMessage = {
         id: `${event.agent_id}-${ts}`,
         agentId: event.agent_id,
+        agentShortId: event.agent_short_id ?? event.agent_id.slice(0, 4),
+        archetype: event.archetype,
         message: event.message,
         timestamp: ts,
         iteration: event.iteration,
+        phase: event.phase,
+        replyToAgentId: event.reply_to_agent_id,
+        replyToShortId: event.reply_to_agent_id ? event.reply_to_agent_id.slice(0, 4) : undefined,
         opinion: event.opinion,
       };
       const nextAgents = new Map(state.agents);
@@ -366,9 +371,14 @@ export function useSimulation() {
           const reasoningMessages: ReasoningMessage[] = prime.reasoning.map((step, index) => ({
             id: `${step.agent_id}-${step.iteration}-${index}`,
             agentId: step.agent_id,
+            agentShortId: step.agent_short_id ?? step.agent_id.slice(0, 4),
+            archetype: step.archetype,
             message: step.message,
             timestamp: Date.now(),
             iteration: applyIterationOffset(step.iteration) ?? step.iteration,
+            phase: step.phase,
+            replyToAgentId: step.reply_to_agent_id,
+            replyToShortId: step.reply_to_agent_id ? step.reply_to_agent_id.slice(0, 4) : undefined,
             opinion: step.opinion,
           }));
           if (carryOverRef.current.active) {
@@ -441,9 +451,14 @@ export function useSimulation() {
           const reasoningMessages: ReasoningMessage[] = stateResponse.reasoning.map((step, index) => ({
             id: `${step.agent_id}-${step.iteration}-${index}`,
             agentId: step.agent_id,
+            agentShortId: step.agent_short_id ?? step.agent_id.slice(0, 4),
+            archetype: step.archetype,
             message: step.message,
             timestamp: Date.now(),
             iteration: applyIterationOffset(step.iteration) ?? step.iteration,
+            phase: step.phase,
+            replyToAgentId: step.reply_to_agent_id,
+            replyToShortId: step.reply_to_agent_id ? step.reply_to_agent_id.slice(0, 4) : undefined,
             opinion: step.opinion,
           }));
             if (carryOverRef.current.active) {
@@ -540,9 +555,14 @@ export function useSimulation() {
             const reasoningMessages: ReasoningMessage[] = stateResponse.reasoning.map((step, index) => ({
               id: `${step.agent_id}-${step.iteration}-${index}`,
               agentId: step.agent_id,
+              agentShortId: step.agent_short_id ?? step.agent_id.slice(0, 4),
+              archetype: step.archetype,
               message: step.message,
               timestamp: Date.now(),
               iteration: applyIterationOffset(step.iteration) ?? step.iteration,
+              phase: step.phase,
+              replyToAgentId: step.reply_to_agent_id,
+              replyToShortId: step.reply_to_agent_id ? step.reply_to_agent_id.slice(0, 4) : undefined,
             }));
             if (carryOverRef.current.active) {
               dispatch({ type: 'SET_REASONING', payload: [...stateRef.current.reasoningFeed, ...reasoningMessages] });

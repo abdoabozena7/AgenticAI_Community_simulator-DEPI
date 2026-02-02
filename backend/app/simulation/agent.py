@@ -45,6 +45,7 @@ class Agent:
         self.fixed_opinion: Optional[str] = None
         # Set initial opinion and moderate starting confidence
         self.current_opinion: str = initial_opinion
+        self.initial_opinion: str = initial_opinion
         self.confidence: float = 0.5
         self.neutral_streak: int = 0
         # History of reasoning steps captured during the simulation
@@ -70,6 +71,8 @@ class Agent:
         iteration: int,
         message: str,
         triggered_by: str,
+        phase: Optional[str] = None,
+        reply_to_agent_id: Optional[str] = None,
         opinion_change: Optional[Dict[str, str]] = None,
     ) -> None:
         """Append a new reasoning step to the agent's history."""
@@ -77,10 +80,12 @@ class Agent:
             iteration=iteration,
             message=message,
             triggered_by=triggered_by,
+            phase=phase,
+            reply_to_agent_id=reply_to_agent_id,
             opinion_change=opinion_change,
         )
         self.history.append(step)
         if message:
             self.short_memory.append(message)
-            if len(self.short_memory) > 5:
-                self.short_memory = self.short_memory[-5:]
+            if len(self.short_memory) > 6:
+                self.short_memory = self.short_memory[-6:]

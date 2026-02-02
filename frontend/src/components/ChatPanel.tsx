@@ -382,6 +382,31 @@ export function ChatPanel({
     ? [thinkingSteps[thinkingStepIndex] || thinkingSteps[0]]
     : [];
 
+  const phaseLabelMap = useMemo(() => ({
+    'Information Shock': 'التصادم المعرفي (Information Shock)',
+    'Polarization Phase': 'الاستقطاب (Polarization Phase)',
+    'Clash of Values': 'محاولات الإقناع والجمود (Clash of Values)',
+    'Resolution Pressure': 'النتيجة النهائية (Resolution Pressure)',
+  }), []);
+
+  const phaseGroups = useMemo(() => {
+    const groups: { phase: string; items: ReasoningMessage[] }[] = [];
+    reasoningFeed.forEach((msg) => {
+      const phase = msg.phase || 'Phase';
+      const last = groups[groups.length - 1];
+      if (!last || last.phase !== phase) {
+        groups.push({ phase, items: [msg] });
+      } else {
+        last.items.push(msg);
+      }
+    });
+    return groups;
+  }, [reasoningFeed]);
+
+  const reasoningIndex = useMemo(() => {
+    return new Map(reasoningFeed.map((msg, index) => [msg.id, index]));
+  }, [reasoningFeed]);
+
   const handleThinkingClick = () => {
     if (reasoningActive) {
       setActiveTab('reasoning');
@@ -576,55 +601,70 @@ export function ChatPanel({
                 </p>
               </div>
             ) : (
-              reasoningFeed.map((msg, idx) => {
-                const side = idx % 2 === 0 ? 'user' : 'bot';
-                const tone =
-                  msg.opinion === 'accept'
-                    ? 'text-success'
-                    : msg.opinion === 'reject'
-                    ? 'text-destructive'
-                    : 'text-primary';
-
-                // ------------------------------------------------------------------
-                // ★★  NEW: added the `reasoning` class + explicit background colour ★★
-                // ------------------------------------------------------------------
-                const bubbleBg = side === 'user' ? 'bg-secondary' : 'bg-card';
-
-                return (
-                  <div
-                    key={msg.id}
-                    className={cn('message message-compact reasoning', side)}
-                  >
-                    <div
-                      className={cn(
-                        'bubble bubble-compact',
-                        bubbleBg,
-                        'text-foreground' // ensure readable text colour
-                      )}
-                    >
-                      {/* Header with avatar, agent id, iteration */}
-                      <div className="flex items-center gap-2 mb-2">
-                        <div className="w-6 h-6 rounded-full bg-primary/15 flex items-center justify-center">
-                          <Bot className="w-3 h-3 text-primary" />
-                        </div>
-                        <span className={cn('text-xs font-mono', tone)}>
-                          Agent {msg.agentId.slice(0, 6)}
-                        </span>
-                        <span className="text-xs text-muted-foreground">
-                          Iter {msg.iteration}
-                        </span>
-                      </div>
-
-                      {/* Message body – keep the read‑more component */}
-                      <ReadMoreText
-                        text={msg.message}
-                        collapsedLines={7}
-                        className="text-sm text-foreground/90"
-                      />
-                    </div>
+              phaseGroups.map((group) => (
+                <div key={group.phase} className="space-y-3">
+                  <div className="text-xs uppercase tracking-wide text-muted-foreground/80">
+                    {phaseLabelMap[group.phase] ?? group.phase}
                   </div>
-                );
-              })
+                  {group.items.map((msg) => {
+                    const idx = reasoningIndex.get(msg.id) ?? 0;
+                    const side = idx % 2 === 0 ? 'user' : 'bot';
+                    const tone =
+                      msg.opinion === 'accept'
+                        ? 'text-success'
+                        : msg.opinion === 'reject'
+                        ? 'text-destructive'
+                        : 'text-primary';
+                    const bubbleBg = side === 'user' ? 'bg-secondary' : 'bg-card';
+                    const shortId = msg.agentShortId ?? msg.agentId.slice(0, 4);
+                    const replyShort =
+                      msg.replyToShortId ?? (msg.replyToAgentId ? msg.replyToAgentId.slice(0, 4) : undefined);
+
+                    return (
+                      <div
+                        key={msg.id}
+                        className={cn('message message-compact reasoning', side)}
+                      >
+                        <div
+                          className={cn(
+                            'bubble bubble-compact',
+                            bubbleBg,
+                            'text-foreground'
+                          )}
+                        >
+                          <div className="flex items-center gap-2 mb-2">
+                            <div className="w-6 h-6 rounded-full bg-primary/15 flex items-center justify-center">
+                              <Bot className="w-3 h-3 text-primary" />
+                            </div>
+                            <span className={cn('text-xs font-mono', tone)}>
+                              {shortId}
+                            </span>
+                            {msg.archetype && (
+                              <span className="text-xs text-muted-foreground">
+                                {msg.archetype}
+                              </span>
+                            )}
+                            <span className="text-xs text-muted-foreground">
+                              Iter {msg.iteration}
+                            </span>
+                            {replyShort && (
+                              <span className="text-[11px] text-muted-foreground">
+                                ? {replyShort}
+                              </span>
+                            )}
+                          </div>
+
+                          <ReadMoreText
+                            text={msg.message}
+                            collapsedLines={7}
+                            className="text-sm text-foreground/90"
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))
             )}
           </div>
         ) : (

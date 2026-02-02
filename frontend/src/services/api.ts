@@ -14,6 +14,7 @@ export interface SimulationConfig {
   research_summary?: string;
   research_sources?: SearchResult[];
   research_structured?: SearchStructured;
+  evidence_cards?: string[];
   language?: 'ar' | 'en';
   speed?: number;
 }
@@ -62,7 +63,11 @@ export interface SimulationStateResponse {
   }[];
   reasoning?: {
     agent_id: string;
+    agent_short_id?: string;
+    archetype?: string;
     iteration: number;
+    phase?: string;
+    reply_to_agent_id?: string;
     message: string;
     opinion?: 'accept' | 'reject' | 'neutral';
   }[];
@@ -97,6 +102,7 @@ export interface SearchStructured {
   notable_locations?: string[];
   gaps?: string[];
   sources?: { title?: string; url?: string; domain?: string }[];
+  evidence_cards?: string[];
 }
 
 class ApiService {

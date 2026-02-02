@@ -24,6 +24,12 @@ def save_context(simulation_id: str, payload: Dict[str, Any]) -> None:
     }
     with _STORE_PATH.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    try:
+        from .db import upsert_simulation_context_sync
+        upsert_simulation_context_sync(simulation_id, payload)
+    except Exception:
+        # Database persistence is best-effort here; core API handles failures.
+        pass
 
 
 def load_context(simulation_id: str) -> Optional[Dict[str, Any]]:

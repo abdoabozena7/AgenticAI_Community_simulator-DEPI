@@ -131,6 +131,44 @@ def _validate_structured(data: Dict[str, Any]) -> Dict[str, Any]:
     return data
 
 
+def _build_evidence_cards(structured: Dict[str, Any], language: str) -> List[str]:
+    cards: List[str] = []
+    summary = str(structured.get("summary") or "").strip()
+    if summary:
+        sentences = [s.strip() for s in re.split(r"[.!?؟]", summary) if len(s.strip()) > 12]
+        cards.extend(sentences[:3])
+    signals = structured.get("signals") or []
+    if isinstance(signals, list):
+        cards.extend(str(s).strip() for s in signals[:4] if str(s).strip())
+
+    def _level_label(key: str, value: str) -> Optional[str]:
+        if not value:
+            return None
+        if language == "ar":
+            name_map = {
+                "competition_level": "مستوى المنافسة",
+                "demand_level": "مستوى الطلب",
+                "regulatory_risk": "مخاطر تنظيمية",
+                "price_sensitivity": "حساسية السعر",
+            }
+            return f"{name_map.get(key, key)}: {value}"
+        return f"{key.replace('_', ' ')}: {value}"
+
+    for key in ("competition_level", "demand_level", "regulatory_risk", "price_sensitivity"):
+        label = _level_label(key, str(structured.get(key) or ""))
+        if label:
+            cards.append(label)
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_cards = []
+    for card in cards:
+        if card and card not in seen:
+            seen.add(card)
+            unique_cards.append(card)
+    return unique_cards[:6]
+
+
 async def _extract_structured(query: str, answer: str, results: List[Dict[str, Any]], language: str) -> Dict[str, Any]:
     snippets = "\n".join(
         f"- {r.get('title','')}: {r.get('snippet','')}" for r in results[:5]
@@ -207,5 +245,6 @@ async def search_web(query: str, max_results: int = 5, language: str = "en") -> 
                 for r in result.get("results", [])[:5]
             ],
         }
+    structured["evidence_cards"] = _build_evidence_cards(structured, language or "en")
     result["structured"] = structured
     return result

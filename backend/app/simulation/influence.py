@@ -93,6 +93,7 @@ def decide_opinion_change(
     influence_weights: Dict[str, float],
     skepticism: float,
     stubbornness: float = 0.0,
+    phase_intensity: float = 1.0,
 ) -> Tuple[str, bool]:
 
     weights = {
@@ -104,7 +105,8 @@ def decide_opinion_change(
     if total_weight <= 0:
         return current_opinion, False
     shares = {k: (v / total_weight) for k, v in weights.items()}
-    base_threshold = 0.05 + (0.2 * skepticism) + (0.2 * stubbornness)
+    intensity = max(0.6, min(1.4, phase_intensity))
+    base_threshold = (0.05 + (0.2 * skepticism) + (0.2 * stubbornness)) / intensity
 
     # Make neutral less attractive unless it's clearly dominant
     if shares["accept"] > shares["neutral"] + base_threshold and shares["accept"] >= shares["reject"]:

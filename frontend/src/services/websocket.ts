@@ -2,8 +2,13 @@ export type MessageType = 'reasoning_step' | 'metrics' | 'agents' | 'summary';
 
 export interface ReasoningStepEvent {
   type: 'reasoning_step';
+  simulation_id?: string;
   agent_id: string;
+  agent_short_id?: string;
+  archetype?: string;
   iteration: number;
+  phase?: string;
+  reply_to_agent_id?: string;
   message: string;
   opinion?: 'accept' | 'reject' | 'neutral';
   // Backend does not include timestamp; client adds one for ordering.
@@ -12,6 +17,7 @@ export interface ReasoningStepEvent {
 
 export interface MetricsEvent {
   type: 'metrics';
+  simulation_id?: string;
   accepted: number;
   rejected: number;
   neutral: number;
@@ -33,6 +39,7 @@ export interface AgentSnapshot {
 
 export interface AgentsEvent {
   type: 'agents';
+  simulation_id?: string;
   agents: AgentSnapshot[];
   iteration: number;
   total_agents?: number;
@@ -40,6 +47,7 @@ export interface AgentsEvent {
 
 export interface SummaryEvent {
   type: 'summary';
+  simulation_id?: string;
   summary: string;
 }
 

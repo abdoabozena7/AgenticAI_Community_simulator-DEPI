@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .core.dataset_loader import load_dataset
+from .core.db import init_db
 from .api import routes as simulation_routes
 from .api import websocket as websocket_module
 from .api import llm as llm_routes
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
         # Load dataset and store reference in routes module. Importing
         # here avoids circular import issues.
         from .api import routes  # local import to avoid circular dependency
+        await init_db()
         routes.dataset = load_dataset(data_dir)
 
     return app

@@ -17,9 +17,14 @@ export interface Connection {
 export interface ReasoningMessage {
   id: string;
   agentId: string;
+  agentShortId?: string;
+  archetype?: string;
   message: string;
   timestamp: number;
   iteration: number;
+  phase?: string;
+  replyToAgentId?: string;
+  replyToShortId?: string;
   opinion?: 'accept' | 'reject' | 'neutral';
 }
 

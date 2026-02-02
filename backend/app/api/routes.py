@@ -21,6 +21,7 @@ from ..core.dataset_loader import Dataset
 from ..simulation.engine import SimulationEngine
 from ..core.ollama_client import generate_ollama
 from ..core.context_store import save_context
+from ..core import db as db_core
 from ..api.websocket import manager
 from pathlib import Path
 import hashlib
@@ -215,16 +216,27 @@ async def start_simulation(user_context: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         # Persistence is best-effort; ignore failures.
         pass
+    await db_core.insert_simulation(simulation_id, user_context, status="running")
     # Create a simulation engine instance
     engine = SimulationEngine(dataset=dataset)
 
     async def emitter(event_type: str, data: Dict[str, Any]) -> None:
         """Broadcast events and store a snapshot for polling."""
-        payload = {"type": event_type, **data}
+        payload = {"type": event_type, "simulation_id": simulation_id, **data}
         # Broadcast to all connected WebSocket clients
         await manager.broadcast_json(payload)
         # Persist state for REST polling
         _store_event(simulation_id, event_type, data)
+        try:
+            if event_type == "agents" and data.get("iteration") == 0:
+                await db_core.insert_agents(simulation_id, data.get("agents") or [])
+            elif event_type == "reasoning_step":
+                await db_core.insert_reasoning_step(simulation_id, data)
+            elif event_type == "metrics":
+                await db_core.insert_metrics(simulation_id, data)
+        except Exception:
+            # DB persistence should not break the simulation stream.
+            pass
 
     # Define a coroutine that runs the simulation and stores results
     async def run_and_store() -> None:
@@ -240,10 +252,20 @@ async def start_simulation(user_context: Dict[str, Any]) -> Dict[str, Any]:
             state["summary"] = summary
             state["summary_ready"] = True
             state["summary_at"] = datetime.utcnow().isoformat() + "Z"
+            await db_core.update_simulation(
+                simulation_id=simulation_id,
+                status="completed",
+                summary=summary,
+                ended_at=state["summary_at"],
+            )
             # Broadcast summary explicitly for clients that listen on WS.
-            await manager.broadcast_json({"type": "summary", "summary": summary})
+            await manager.broadcast_json({"type": "summary", "simulation_id": simulation_id, "summary": summary})
         except Exception as exc:  # noqa: BLE001
             _simulation_state.setdefault(simulation_id, {})["error"] = str(exc)
+            try:
+                await db_core.update_simulation(simulation_id=simulation_id, status="error")
+            except Exception:
+                pass
     # Launch simulation in background
     task = asyncio.create_task(run_and_store())
     _simulation_tasks[simulation_id] = task
@@ -287,6 +309,25 @@ async def get_state(simulation_id: str) -> Dict[str, Any]:
         if task is None or task.done():
             status_value = "completed"
     return {"simulation_id": simulation_id, "status": status_value, **state}
+
+
+@router.get("/transcript")
+async def get_transcript(simulation_id: str) -> Dict[str, Any]:
+    """Return the ordered transcript grouped by phase."""
+    transcript = await db_core.fetch_transcript(simulation_id)
+    if not transcript:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcript not found")
+    phase_labels = {
+        "Information Shock": "التصادم المعرفي (Information Shock)",
+        "Polarization Phase": "الاستقطاب (Polarization Phase)",
+        "Clash of Values": "محاولات الإقناع والجمود (Clash of Values)",
+        "Resolution Pressure": "النتيجة النهائية (Resolution Pressure)",
+    }
+    for group in transcript:
+        label = phase_labels.get(group.get("phase"))
+        if label:
+            group["phase"] = label
+    return {"simulation_id": simulation_id, "phases": transcript}
 
 
 @router.get("/debug/version")
