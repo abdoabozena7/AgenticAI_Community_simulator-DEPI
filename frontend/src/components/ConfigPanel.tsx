@@ -284,6 +284,28 @@ export function ConfigPanel({
         </div>
       </div>
 
+      <div className="space-y-2">
+        <label className="text-sm text-muted-foreground flex items-center gap-2">
+          {language === 'ar' ? 'عدد الوكلاء' : 'Agents'}
+          <span className="text-xs text-muted-foreground/80">
+            {language === 'ar' ? '(حتى 500)' : '(up to 500)'}
+          </span>
+        </label>
+        <div className="flex items-center gap-3">
+          <Slider
+            value={[value.agentCount ?? 30]}
+            onValueChange={(v) => onChange({ agentCount: Math.min(500, Math.max(5, v[0])) })}
+            min={5}
+            max={500}
+            step={1}
+            className="w-full"
+          />
+          <div className="w-16 text-right text-sm tabular-nums">
+            {value.agentCount ?? 30}
+          </div>
+        </div>
+      </div>
+
       <div className="pt-2 space-y-2">
         <Button className="w-full" onClick={onSubmit} disabled={!canConfirm || isSearching}>
           {language === 'ar' ? 'تأكيد البيانات' : 'Confirm Data'}

@@ -175,6 +175,7 @@ const Index = () => {
     riskAppetite: 50,
     ideaMaturity: 'concept',
     goals: [],
+    agentCount: 30,
   });
   const [touched, setTouched] = useState({
     category: false,
@@ -185,6 +186,8 @@ const Index = () => {
   });
   const [isWaitingForCity, setIsWaitingForCity] = useState(false);
   const [isWaitingForCountry, setIsWaitingForCountry] = useState(false);
+  const [isWaitingForLocationChoice, setIsWaitingForLocationChoice] = useState(false);
+  const [locationChoice, setLocationChoice] = useState<'yes' | 'no' | null>(null);
   const [hasStarted, setHasStarted] = useState(false);
   const summaryRef = useRef<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -383,19 +386,22 @@ const Index = () => {
       research_structured: researchContext.structured,
       language: settings.language,
       speed: simulationSpeed,
+      agentCount: input.agentCount,
     };
   }, [researchContext, settings.language, simulationSpeed]);
 
-  const getMissingForStart = useCallback((input: UserInput) => {
+  const getMissingForStart = useCallback((input: UserInput, overrideChoice?: 'yes' | 'no' | null) => {
     const missing: string[] = [];
     if (!input.idea.trim()) missing.push('idea');
-    if (!input.country.trim()) missing.push('country');
-    if (!input.city.trim()) missing.push('city');
+    const hasLocation = Boolean(input.city.trim() || input.country.trim());
+    const choice = overrideChoice ?? locationChoice;
+    if (!hasLocation && choice === null) missing.push('location_choice');
+    if (choice === 'yes' && !input.city.trim()) missing.push('city');
     if (!input.category) missing.push('category');
     if (!input.targetAudience.length) missing.push('target_audience');
     if (!input.goals.length) missing.push('goals');
     return missing;
-  }, []);
+  }, [locationChoice]);
 
 
   const addOptionsMessage = useCallback((
@@ -464,29 +470,45 @@ const Index = () => {
     return false;
   }, [addSystemMessage, settings.language]);
 
-  const requestLocationIfNeeded = useCallback(async (missing: string[]) => {
-    const needsCountry = missing.includes('country');
+  const requestCityIfNeeded = useCallback(async (missing: string[]) => {
     const needsCity = missing.includes('city');
-    if (!needsCountry && !needsCity) return false;
-    const prompt = `Ask the user for the missing location fields: ${needsCountry ? 'country' : ''}${needsCountry && needsCity ? ' and ' : ''}${needsCity ? 'city' : ''}. Keep it short and natural.`;
+    if (!needsCity) return false;
+    const prompt = 'Ask the user for the target city. If helpful, mention they can add the country too. Keep it short and natural.';
     const question = await getAssistantMessage(prompt);
     if (question) {
       addSystemMessage(question);
     } else {
-      const fallback = needsCountry && needsCity
-        ? (settings.language === 'ar' ? 'ما هي الدولة والمدينة المستهدفة؟' : 'Which country and city should we focus on?')
-        : needsCity
-        ? (settings.language === 'ar' ? 'ما هي المدينة المستهدفة؟' : 'Which city should we focus on?')
-        : (settings.language === 'ar' ? 'ما هي الدولة المستهدفة؟' : 'Which country should we focus on?');
+      const fallback = settings.language === 'ar'
+        ? 'ما هي المدينة المستهدفة؟ (لو حابب اذكر الدولة كمان)'
+        : 'Which city should we focus on? (You can add the country too)';
       addSystemMessage(fallback);
     }
-    setIsWaitingForCountry(needsCountry);
-    setIsWaitingForCity(needsCity);
+    setIsWaitingForCountry(false);
+    setIsWaitingForCity(true);
+    setIsWaitingForLocationChoice(false);
     return true;
   }, [addSystemMessage, getAssistantMessage, settings.language]);
 
+  const askLocationChoice = useCallback(() => {
+    const question = settings.language === 'ar'
+      ? 'فيه مكان معين ف دماغك حابب تنفذ فيه الفكرة دي؟'
+      : 'Do you have a specific place in mind for this idea?';
+    addSystemMessage(question, {
+      field: 'location_choice',
+      kind: 'single',
+      items: [
+        { value: 'yes', label: settings.language === 'ar' ? 'نعم' : 'Yes' },
+        { value: 'no', label: settings.language === 'ar' ? 'لا' : 'No' },
+      ],
+    });
+    setIsWaitingForCountry(false);
+    setIsWaitingForCity(false);
+    setIsWaitingForLocationChoice(true);
+    return true;
+  }, [addSystemMessage, settings.language]);
+
   const promptForMissing = useCallback(async (missing: string[], question?: string) => {
-    setMissingFields(missing);
+    setMissingFields(missing.filter((field) => field !== 'location_choice'));
     if (missing.length === 0) return false;
 
     if (missing.includes('idea')) {
@@ -498,16 +520,19 @@ const Index = () => {
       return true;
     }
 
-    const needsCountry = missing.includes('country');
+    if (missing.includes('location_choice')) {
+      return askLocationChoice();
+    }
+
     const needsCity = missing.includes('city');
-    if (needsCountry || needsCity) {
+    if (needsCity) {
       if (question) {
         addSystemMessage(question);
-        setIsWaitingForCountry(needsCountry);
-        setIsWaitingForCity(needsCity);
+        setIsWaitingForCountry(false);
+        setIsWaitingForCity(true);
         return true;
       }
-      const asked = await requestLocationIfNeeded(missing);
+      const asked = await requestCityIfNeeded(missing);
       return asked;
     }
 
@@ -524,7 +549,7 @@ const Index = () => {
       return addOptionsMessage('maturity');
     }
     return false;
-  }, [addOptionsMessage, addSystemMessage, getAssistantMessage, requestLocationIfNeeded, settings.language]);
+  }, [addOptionsMessage, addSystemMessage, askLocationChoice, getAssistantMessage, requestCityIfNeeded, settings.language]);
 
   const handleStart = useCallback(async () => {
     const missing = getMissingForStart(userInput);
@@ -552,8 +577,11 @@ const Index = () => {
     const country = userInput.country?.trim();
     const label = [city, country].filter(Boolean).join(', ');
     if (label) return label;
+    if (locationChoice === 'no') {
+      return settings.language === 'ar' ? 'بدون مكان محدد' : 'no specific location';
+    }
     return settings.language === 'ar' ? 'المكان اللي كتبته' : 'the location you entered';
-  }, [settings.language, userInput.city, userInput.country]);
+  }, [locationChoice, settings.language, userInput.city, userInput.country]);
 
   const getSearchTimeoutPrompt = useCallback((locationLabel: string) => (
     settings.language === 'ar'
@@ -845,8 +873,13 @@ Required sections:
 
   const handleConfigSubmit = useCallback(async () => {
     const missing = getMissingForStart(userInput);
-    setMissingFields(missing);
+    const visibleMissing = missing.filter((field) => field !== 'location_choice');
+    setMissingFields(visibleMissing);
     if (missing.length > 0) {
+      if (missing.includes('location_choice')) {
+        setActivePanel('chat');
+        await promptForMissing(['location_choice']);
+      }
       return;
     }
 
@@ -861,7 +894,7 @@ Required sections:
     if (result.status === 'done') {
       await handleStart();
     }
-  }, [getMissingForStart, handleStart, runSearch, userInput, setPendingConfigReview, setActivePanel]);
+  }, [getMissingForStart, handleStart, promptForMissing, runSearch, userInput, setPendingConfigReview, setActivePanel]);
 
   const handleSearchRetry = useCallback(async () => {
     if (searchState.status !== 'timeout') return;
@@ -1064,6 +1097,42 @@ If unsure, say so in summary.`;
             return;
           }
 
+          if (isWaitingForLocationChoice) {
+            const yes = ['yes', 'y', 'ok', 'okay', 'نعم', 'اه', 'أيوه', 'ايوه', 'تمام', 'ماشي'];
+            const no = ['no', 'n', 'nope', 'cancel', 'لا', 'مش', 'مش عايز', 'ارفض'];
+            const lower = trimmed.toLowerCase();
+            if (yes.includes(lower)) {
+              setLocationChoice('yes');
+              setIsWaitingForLocationChoice(false);
+              setIsWaitingForCountry(false);
+              setIsWaitingForCity(true);
+              addSystemMessage(settings.language === 'ar'
+                ? 'تمام، اكتب المدينة اللي في دماغك. (ولو حابب اذكر الدولة كمان)'
+                : 'Great—what city are you targeting? (You can add the country too)');
+              return;
+            }
+            if (no.includes(lower)) {
+              setLocationChoice('no');
+              setIsWaitingForLocationChoice(false);
+              setIsWaitingForCountry(false);
+              setIsWaitingForCity(false);
+              const missing = getMissingForStart(userInput, 'no');
+              const asked = await promptForMissing(missing);
+              if (asked) return;
+              setPendingConfigReview(true);
+              setActivePanel('config');
+              setMissingFields([]);
+              addSystemMessage(settings.language === 'ar'
+                ? 'راجع الإعدادات ثم اضغط تأكيد البيانات للمتابعة.'
+                : 'Review the configuration, then confirm to continue.');
+              return;
+            }
+            addSystemMessage(settings.language === 'ar'
+              ? 'اختار نعم أو لا بس عشان نكمل.'
+              : 'Please reply with yes or no so we can continue.');
+            return;
+          }
+
           // If we're explicitly waiting for location, handle it directly without search.
           if (isWaitingForCountry || isWaitingForCity) {
             const schemaPayload = {
@@ -1092,14 +1161,18 @@ If unsure, say so in summary.`;
 
             const nextInput: UserInput = {
               ...userInput,
-              country: isWaitingForCountry ? (extraction.country || userInput.country) : userInput.country,
-              city: isWaitingForCity ? (extraction.city || userInput.city) : userInput.city,
+              country: extraction.country || userInput.country,
+              city: extraction.city || userInput.city,
             };
             setUserInput(nextInput);
             setIsWaitingForCountry(false);
             setIsWaitingForCity(false);
+            const hasLocation = Boolean(nextInput.city.trim() || nextInput.country.trim());
+            if (hasLocation) {
+              setLocationChoice('yes');
+            }
 
-            const missing = getMissingForStart(nextInput);
+            const missing = getMissingForStart(nextInput, hasLocation ? 'yes' : undefined);
             const asked = await promptForMissing(missing, extraction.question || undefined);
             if (asked) return;
 
@@ -1226,8 +1299,13 @@ If rejection is about competition or location, suggest searching for a better lo
           setUserInput(nextInput);
           setIsWaitingForCountry(false);
           setIsWaitingForCity(false);
+          const hasLocation = Boolean(nextInput.city.trim() || nextInput.country.trim());
+          if (hasLocation) {
+            setLocationChoice('yes');
+            setIsWaitingForLocationChoice(false);
+          }
 
-          const missing = getMissingForStart(nextInput);
+          const missing = getMissingForStart(nextInput, hasLocation ? 'yes' : undefined);
           const asked = await promptForMissing(missing, extraction.question || undefined);
           if (asked) return;
 
@@ -1260,6 +1338,7 @@ If rejection is about competition or location, suggest searching for a better lo
         setResearchContext,
         settings.language,
         simulation,
+        isWaitingForLocationChoice,
         touched,
         userInput,
       ]
@@ -1295,7 +1374,39 @@ If rejection is about competition or location, suggest searching for a better lo
   }, []);
 
   const handleOptionSelect = useCallback(
-    (field: 'category' | 'audience' | 'goals' | 'maturity', value: string) => {
+    async (field: 'category' | 'audience' | 'goals' | 'maturity' | 'location_choice', value: string) => {
+      if (field === 'location_choice') {
+        const nextChoice = value === 'yes' ? 'yes' : 'no';
+        if (locationChoice === nextChoice && !isWaitingForLocationChoice) {
+          return;
+        }
+        setLocationChoice(nextChoice);
+        setIsWaitingForLocationChoice(false);
+        if (nextChoice === 'yes') {
+          setIsWaitingForCountry(false);
+          setIsWaitingForCity(true);
+          addSystemMessage(settings.language === 'ar'
+            ? 'تمام، اكتب المدينة اللي في دماغك. (ولو حابب اذكر الدولة كمان)'
+            : 'Great—what city are you targeting? (You can add the country too)');
+          return;
+        } else {
+          setIsWaitingForCountry(false);
+          setIsWaitingForCity(false);
+          addSystemMessage(settings.language === 'ar'
+            ? 'تمام، مش هنحتاج مكان محدد.'
+            : 'Got it—no specific location needed.');
+          const missing = getMissingForStart(userInput, nextChoice);
+          const asked = await promptForMissing(missing);
+          if (asked) return;
+          setPendingConfigReview(true);
+          setActivePanel('config');
+          setMissingFields([]);
+          addSystemMessage(settings.language === 'ar'
+            ? 'راجع الإعدادات ثم اضغط تأكيد البيانات للمتابعة.'
+            : 'Review the configuration, then confirm to continue.');
+        }
+        return;
+      }
       if (field === 'category') {
         handleCategoryChange(value);
         addSystemMessage(settings.language === 'ar' ? `تم اختيار الفئة: ${value}` : `Category selected: ${value}`);
@@ -1334,7 +1445,15 @@ If rejection is about competition or location, suggest searching for a better lo
       handleCategoryChange,
       handleGoalsChange,
       handleMaturityChange,
+      getMissingForStart,
+      isWaitingForLocationChoice,
+      locationChoice,
+      promptForMissing,
+      setActivePanel,
+      setPendingConfigReview,
+      setMissingFields,
       settings.language,
+      userInput,
       userInput.goals,
       userInput.targetAudience,
     ]
@@ -1465,7 +1584,13 @@ If rejection is about competition or location, suggest searching for a better lo
               onChange={(updates) => {
                 setUserInput((prev) => {
                   const next = { ...prev, ...updates };
-                  setMissingFields(getMissingForStart(next));
+                  const hasLocation = Boolean(next.city.trim() || next.country.trim());
+                  if (hasLocation) {
+                    setLocationChoice('yes');
+                    setIsWaitingForLocationChoice(false);
+                  }
+                  const missing = getMissingForStart(next, hasLocation ? 'yes' : undefined);
+                  setMissingFields(missing.filter((field) => field !== 'location_choice'));
                   return next;
                 });
               }}
@@ -1482,6 +1607,7 @@ If rejection is about competition or location, suggest searching for a better lo
               onSelectOption={handleOptionSelect}
               isWaitingForCity={isWaitingForCity}
               isWaitingForCountry={isWaitingForCountry}
+              isWaitingForLocationChoice={isWaitingForLocationChoice}
               searchState={searchState}
               isThinking={isChatThinking}
               showRetry={llmBusy}

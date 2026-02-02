@@ -28,5 +28,11 @@
     "description": "Individuals engaged in academic pursuits",
     "base_influence_weight": 0.7,
     "typical_contexts": ["education", "career planning", "social trends"]
+  },
+  {
+    "category_id": "elderly",
+    "description": "Older adults and caregivers; focuses on accessibility, safety, and reliability",
+    "base_influence_weight": 0.7,
+    "typical_contexts": ["healthcare", "assistive tech", "community services", "retirement planning"]
   }
 ]

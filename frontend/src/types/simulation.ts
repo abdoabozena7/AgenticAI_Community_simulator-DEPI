@@ -43,7 +43,7 @@ export interface ChatMessage {
   timestamp: number;
   agentId?: string;
   options?: {
-    field: 'category' | 'audience' | 'goals' | 'maturity';
+    field: 'category' | 'audience' | 'goals' | 'maturity' | 'location_choice';
     kind: 'single' | 'multi';
     items: { value: string; label: string; description?: string }[];
   };
@@ -58,6 +58,8 @@ export interface UserInput {
   riskAppetite: number;
   ideaMaturity: 'concept' | 'prototype' | 'mvp' | 'launched';
   goals: string[];
+  /** Number of agents to simulate (5..500). Optional. */
+  agentCount?: number;
 }
 
 export type SimulationStatus = 'idle' | 'configuring' | 'running' | 'paused' | 'completed' | 'error';

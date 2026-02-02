@@ -82,5 +82,5 @@ class Agent:
         self.history.append(step)
         if message:
             self.short_memory.append(message)
-            if len(self.short_memory) > 3:
-                self.short_memory = self.short_memory[-3:]
+            if len(self.short_memory) > 5:
+                self.short_memory = self.short_memory[-5:]

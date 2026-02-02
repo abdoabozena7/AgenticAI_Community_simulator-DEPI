@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 from ..models.schemas import InteractionRuleModel
@@ -17,10 +18,41 @@ def compute_pairwise_influences(agents: List[Agent], dataset: Dataset) -> Dict[s
         agent.agent_id: {"accept": 0.0, "neutral": 0.0, "reject": 0.0} for agent in agents
     }
 
+    if not agents:
+        return accum
+
+    agents_by_category: Dict[str, List[Agent]] = defaultdict(list)
+    for agent in agents:
+        agents_by_category[agent.category_id].append(agent)
+    other_by_category: Dict[str, List[Agent]] = {}
+    for category_id, same_agents in agents_by_category.items():
+        other_by_category[category_id] = [a for a in agents if a.category_id != category_id]
+
+    population = len(agents)
+    sample_size = min(population - 1, max(12, int((population ** 0.5) * 3)))
+    same_ratio = 0.55
+
     for target in agents:
-        for influencer in agents:
-            if influencer.agent_id == target.agent_id:
-                continue  # skip self-influence
+        same_pool = [a for a in agents_by_category.get(target.category_id, []) if a.agent_id != target.agent_id]
+        other_pool = other_by_category.get(target.category_id, [])
+        influencer_pool: List[Agent] = []
+        if sample_size > 0:
+            k_same = min(len(same_pool), int(sample_size * same_ratio))
+            k_other = min(len(other_pool), sample_size - k_same)
+            if k_same > 0:
+                influencer_pool.extend(random.sample(same_pool, k=k_same))
+            if k_other > 0:
+                influencer_pool.extend(random.sample(other_pool, k=k_other))
+            if len(influencer_pool) < min(sample_size, population - 1):
+                selected_ids = {a.agent_id for a in influencer_pool}
+                remaining = [a for a in agents if a.agent_id != target.agent_id and a.agent_id not in selected_ids]
+                need = min(sample_size - len(influencer_pool), len(remaining))
+                if need > 0:
+                    influencer_pool.extend(random.sample(remaining, k=need))
+        else:
+            influencer_pool = [a for a in agents if a.agent_id != target.agent_id]
+
+        for influencer in influencer_pool:
             # Determine base influence from dataset rule
             rule_key = (influencer.category_id, target.category_id)
             rule: Optional[InteractionRuleModel] = dataset.rules_by_pair.get(rule_key)
@@ -30,10 +62,10 @@ def compute_pairwise_influences(agents: List[Agent], dataset: Dataset) -> Dict[s
             else:
                 base_multiplier = rule.influence_multiplier
             base_weight = base_multiplier * influencer.influence_weight
-            # Boost influence for high-base-weight personas and leaders
-            base_boost = 1.0 + max(0.0, influencer.base_influence_weight - 1.0) * 0.35
+            # Leader boost only (avoid double-counting base weight)
+            base_boost = 1.0
             if getattr(influencer, "is_leader", False):
-                base_boost *= 1.6
+                base_boost *= 1.4
             # Homophily bonus: same category or same archetype increases influence
             homophily = 1.0
             if target.category_id == influencer.category_id:
@@ -45,11 +77,10 @@ def compute_pairwise_influences(agents: List[Agent], dataset: Dataset) -> Dict[s
             # Susceptibility from target's template
             target_template = dataset.template_by_id.get(target.template_id)
             susceptibility = target_template.influence_susceptibility if target_template else 1.0
-            # Random noise to preserve stochastic behaviour
-            noise = random.uniform(-0.03, 0.03)
+            # Random noise (multiplicative, unbiased)
+            noise = random.uniform(-0.06, 0.06)
             # Compute final influence weight
-            weight = base_weight * base_boost * homophily * skepticism_factor * susceptibility
-            weight += noise
+            weight = base_weight * base_boost * homophily * skepticism_factor * susceptibility * (1.0 + noise)
             # Clamp weight to non-negative values
             weight = max(weight, 0.0)
             # Accumulate influence towards the influencer's current opinion
@@ -69,20 +100,24 @@ def decide_opinion_change(
         "reject": influence_weights.get("reject", 0.0),
         "neutral": influence_weights.get("neutral", 0.0),
     }
-    base_threshold = 0.08 + (0.25 * skepticism) + (0.25 * stubbornness)
+    total_weight = sum(weights.values())
+    if total_weight <= 0:
+        return current_opinion, False
+    shares = {k: (v / total_weight) for k, v in weights.items()}
+    base_threshold = 0.05 + (0.2 * skepticism) + (0.2 * stubbornness)
 
     # Make neutral less attractive unless it's clearly dominant
-    if weights["accept"] > weights["neutral"] + base_threshold and weights["accept"] >= weights["reject"]:
+    if shares["accept"] > shares["neutral"] + base_threshold and shares["accept"] >= shares["reject"]:
         candidate = "accept"
-    elif weights["reject"] > weights["neutral"] + base_threshold and weights["reject"] >= weights["accept"]:
+    elif shares["reject"] > shares["neutral"] + base_threshold and shares["reject"] >= shares["accept"]:
         candidate = "reject"
     else:
         candidate = "neutral"
 
     # Additional stubbornness to leave current opinion
     if candidate != current_opinion:
-        stay_threshold = 0.05 + (0.2 * stubbornness) + (0.1 * skepticism)
-        if (weights[candidate] - weights.get(current_opinion, 0.0)) < stay_threshold:
+        stay_threshold = 0.04 + (0.18 * stubbornness) + (0.1 * skepticism)
+        if (shares[candidate] - shares.get(current_opinion, 0.0)) < stay_threshold:
             candidate = current_opinion
 
     return candidate, candidate != current_opinion

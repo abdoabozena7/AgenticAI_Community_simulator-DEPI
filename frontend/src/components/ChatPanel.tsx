@@ -32,6 +32,8 @@ interface ChatPanelProps {
   isWaitingForCity?: boolean;
   /** waiting for a country name */
   isWaitingForCountry?: boolean;
+  /** waiting for location choice (yes/no) */
+  isWaitingForLocationChoice?: boolean;
   /** agents are thinking (typing indicator) */
   isThinking?: boolean;
   /** LLM generation error – show retry button */
@@ -192,6 +194,7 @@ export function ChatPanel({
   onSelectOption,
   isWaitingForCity = false,
   isWaitingForCountry = false,
+  isWaitingForLocationChoice = false,
   isThinking = false,
   showRetry = false,
   onRetryLlm,
@@ -219,12 +222,15 @@ export function ChatPanel({
 
   const [thinkingOpen, setThinkingOpen] = useState(false);
   const [isNearBottom, setIsNearBottom] = useState(true);
+  const [thinkingStepIndex, setThinkingStepIndex] = useState(0);
 
   const isSearchTimeout = searchState?.status === 'timeout';
   const isActionMode = showRetry || isSearchTimeout;
 
   const [searchActionsOpen, setSearchActionsOpen] = useState(false);
   const [actionsClosing, setActionsClosing] = useState(false);
+  const [hiddenOptionIds, setHiddenOptionIds] = useState<Set<string>>(new Set());
+  const hideTimersRef = useRef<Record<string, number>>({});
 
   // Auto‑switch to reasoning **once** when it first becomes active
   const autoSwitchedRef = useRef(false);
@@ -252,6 +258,25 @@ export function ChatPanel({
       inputRef.current?.focus();
     }
   }, [messages.length, settings.autoFocusInput, activeTab]);
+
+  useEffect(() => () => {
+    Object.values(hideTimersRef.current).forEach((timerId) => {
+      window.clearTimeout(timerId);
+    });
+    hideTimersRef.current = {};
+  }, []);
+
+  const scheduleHideOptions = (messageId: string) => {
+    if (hideTimersRef.current[messageId]) return;
+    hideTimersRef.current[messageId] = window.setTimeout(() => {
+      setHiddenOptionIds((prev) => {
+        const next = new Set(prev);
+        next.add(messageId);
+        return next;
+      });
+      delete hideTimersRef.current[messageId];
+    }, 3000);
+  };
 
   // Open the “search actions” pop‑over automatically when a timeout occurs
   useEffect(() => {
@@ -337,6 +362,25 @@ export function ChatPanel({
       settings.language === 'ar' ? 'صياغة رد واضح' : 'Drafting a clear reply',
     ];
   }, [searchState?.status, settings.language]);
+
+  const thinkingActive = Boolean(isThinking || searchState?.status === 'searching' || reasoningActive);
+  const stepsKey = useMemo(() => thinkingSteps.join('|'), [thinkingSteps]);
+
+  useEffect(() => {
+    setThinkingStepIndex(0);
+  }, [stepsKey]);
+
+  useEffect(() => {
+    if (!thinkingActive || thinkingSteps.length <= 1) return;
+    const intervalId = window.setInterval(() => {
+      setThinkingStepIndex((prev) => (prev + 1) % thinkingSteps.length);
+    }, 1200);
+    return () => window.clearInterval(intervalId);
+  }, [thinkingActive, thinkingSteps]);
+
+  const visibleThinkingStep = thinkingSteps.length
+    ? [thinkingSteps[thinkingStepIndex] || thinkingSteps[0]]
+    : [];
 
   const handleThinkingClick = () => {
     if (reasoningActive) {
@@ -461,7 +505,7 @@ export function ChatPanel({
                   )}
 
                   {/* Poll / multi‑select messages */}
-                  {msg.options && msg.options.items.length > 0 && (
+                  {msg.options && msg.options.items.length > 0 && !hiddenOptionIds.has(msg.id) && (
                     <div
                       className={
                         msg.options.kind === 'single' ? 'poll-card' : 'multi-select-card'
@@ -480,7 +524,7 @@ export function ChatPanel({
                             className={msg.options.kind === 'single' ? 'poll-option' : 'multi-option'}
                             style={{ animationDelay: `${80 + idx * 45}ms` }}
                             onClick={() =>
-                              onSelectOption?.(msg.options!.field, opt.value)
+                              (onSelectOption?.(msg.options!.field, opt.value), scheduleHideOptions(msg.id))
                             }
                           >
                             <span className="option-label">{opt.label}</span>
@@ -500,7 +544,7 @@ export function ChatPanel({
             {(isThinking || searchState?.status === 'searching' || reasoningActive) && (
               <InlineDisclosure
                 label={thinkingLabel}
-                steps={thinkingSteps}
+                steps={visibleThinkingStep}
                 open={thinkingOpen}
                 onToggle={() => setThinkingOpen((p) => !p)}
                 onClickLabel={handleThinkingClick}
@@ -768,6 +812,36 @@ export function ChatPanel({
       {/* -------------------- INPUT AREA (CHAT TAB) -------------------- */}
       {activeTab === 'chat' ? (
         <div className="chat-input-container">
+          {/* Inline actions under the latest message when search times out */}
+          {isSearchTimeout && (
+            <div className="mb-2 rounded-xl border border-border/40 bg-secondary/40 p-2">
+              <div className="text-xs text-muted-foreground mb-2">
+                {settings.language === 'ar'
+                  ? 'قعدت ادور كتير وملقيتش بيانات كفاية. تحب اعيد البحث بوقت أطول ولا استخدم LLM علشان أكمّل؟'
+                  : 'I searched a lot but couldn\'t find enough data. Retry with a longer timeout or use the LLM fallback?'}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  className="action-item inline"
+                  onClick={() => onSearchRetry?.()}
+                  disabled={!onSearchRetry}
+                >
+                  <span className="action-ico"><Clock className="w-4 h-4" /></span>
+                  <span className="action-title">{settings.language === 'ar' ? 'عيد البحث' : 'Retry Search'}</span>
+                </button>
+                <button
+                  type="button"
+                  className="action-item inline primary"
+                  onClick={() => onSearchUseLlm?.()}
+                  disabled={!onSearchUseLlm}
+                >
+                  <span className="action-ico"><Sparkles className="w-4 h-4" /></span>
+                  <span className="action-title">{settings.language === 'ar' ? 'استخدم LLM' : 'Use LLM'}</span>
+                </button>
+              </div>
+            </div>
+          )}
           {/* Quick‑reply chips */}
           {quickReplies && quickReplies.length > 0 && (
             <div className="quick-replies">
@@ -792,7 +866,11 @@ export function ChatPanel({
               dir={settings.language === 'ar' ? 'rtl' : 'ltr'}
               disabled={isActionMode}
               placeholder={
-                isWaitingForCountry
+                isWaitingForLocationChoice
+                  ? settings.language === 'ar'
+                    ? 'اختر نعم أو لا...'
+                    : 'Choose yes or no...'
+                  : isWaitingForCountry
                   ? settings.language === 'ar'
                     ? 'اكتب الدولة...'
                     : 'Enter country...'
@@ -813,27 +891,7 @@ export function ChatPanel({
               {/* Pop‑over that appears when the search timed‑out */}
               {isSearchTimeout && searchActionsOpen && (
                 <div className={cn('action-pop', actionsClosing && 'closing')}>
-                  <button
-                    type="button"
-                    className="action-item"
-                    onClick={() => {
-                      onSearchUseLlm?.();
-                      closeActions();
-                    }}
-                    disabled={!onSearchUseLlm}
-                  >
-                    <span className="action-ico">
-                      <Sparkles className="w-4 h-4" />
-                    </span>
-                    <span className="min-w-0">
-                      <div className="action-title">
-                        {settings.language === 'ar' ? 'استخدم LLM' : 'Use LLM'}
-                      </div>
-                      <div className="action-sub">
-                        {settings.language === 'ar' ? 'رد فوري بدون بحث' : 'Instant answer without web search'}
-                      </div>
-                    </span>
-                  </button>
+
 
                   <button
                     type="button"
