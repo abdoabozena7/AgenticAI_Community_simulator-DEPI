@@ -169,9 +169,7 @@ class SimulationEngine:
                 if len(explanation) < 280:
                     best_explanation = best_explanation or explanation
                     continue
-                if response_language == "Arabic" and _is_mostly_latin(explanation):
-                    best_explanation = best_explanation or explanation
-                    continue
+                # Allow Latin acronyms even in Arabic responses; do not reject mostly Latin text
                 if not any(eid in explanation for eid in evidence_ids):
                     best_explanation = best_explanation or explanation
                     continue

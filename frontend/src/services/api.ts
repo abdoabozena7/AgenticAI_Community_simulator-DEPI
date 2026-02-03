@@ -1,5 +1,20 @@
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
+// Manage JWT tokens in local storage
+const TOKEN_KEY = 'agentic_sim_jwt';
+
+function getToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+function setToken(token: string | null) {
+  if (token) {
+    localStorage.setItem(TOKEN_KEY, token);
+  } else {
+    localStorage.removeItem(TOKEN_KEY);
+  }
+}
+
 export interface SimulationConfig {
   idea: string;
   category: string;
@@ -107,12 +122,17 @@ export interface SearchStructured {
 
 class ApiService {
   private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
+    const token = getToken();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(options?.headers || {}),
+    };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
       ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...options?.headers,
-      },
+      headers,
     });
 
     if (!response.ok) {
@@ -130,6 +150,67 @@ class ApiService {
     return this.request<SimulationResponse>('/simulation/start', {
       method: 'POST',
       body: JSON.stringify(config),
+    });
+  }
+
+  // Authentication methods
+  async register(username: string, email: string, password: string): Promise<void> {
+    const res = await this.request<{ token: string }>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ username, email, password }),
+    });
+    setToken(res.token);
+  }
+
+  async login(username: string, password: string): Promise<void> {
+    const res = await this.request<{ token: string }>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    });
+    setToken(res.token);
+  }
+
+  async logout(): Promise<void> {
+    setToken(null);
+  }
+
+  async getMe(): Promise<{ id: number; role: string; credits: number }> {
+    return this.request('/auth/me');
+  }
+
+  async redeemPromo(code: string): Promise<{ bonus_attempts: number }> {
+    return this.request('/auth/redeem', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    });
+  }
+
+  async runResearch(query: string, location?: string, category?: string): Promise<any> {
+    return this.request('/research/run', {
+      method: 'POST',
+      body: JSON.stringify({ query, location, category }),
+    });
+  }
+
+  async runCourt(idea: string, category?: string, evidence?: string, language: string = 'en'): Promise<any> {
+    return this.request('/court/idea', {
+      method: 'POST',
+      body: JSON.stringify({ idea, category, evidence, language }),
+    });
+  }
+
+  async listUsers(): Promise<{ id: number; username: string; role: string; credits: number }[]> {
+    return this.request('/admin/users');
+  }
+
+  async getStats(): Promise<{ total_simulations: number; used_today: number }> {
+    return this.request('/admin/stats');
+  }
+
+  async createPromo(code: string, bonus_attempts: number, max_uses: number, expires_at?: string): Promise<any> {
+    return this.request('/admin/promo', {
+      method: 'POST',
+      body: JSON.stringify({ code, bonus_attempts, max_uses, expires_at }),
     });
   }
 

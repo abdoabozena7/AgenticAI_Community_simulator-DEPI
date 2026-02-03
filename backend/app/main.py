@@ -29,6 +29,7 @@ from .api import search as search_routes
 from .api import auth as auth_routes
 from .api import research as research_routes
 from .api import court as court_routes
+from .api import admin as admin_routes
 
 
 def create_app() -> FastAPI:
@@ -61,10 +62,11 @@ def create_app() -> FastAPI:
     app.include_router(websocket_module.router)
     app.include_router(llm_routes.router)
     app.include_router(search_routes.router)
-    # New routers for auth, research and court
+    # New routers for auth, research, court and admin
     app.include_router(auth_routes.router)
     app.include_router(research_routes.router)
     app.include_router(court_routes.router)
+    app.include_router(admin_routes.router)
 
     @app.on_event("startup")
     async def startup_event() -> None:

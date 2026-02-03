@@ -1,216 +1,180 @@
 """
-Authentication and user management helpers.
+Authentication and authorisation utilities.
 
-This module provides simple, stateless authentication using randomly
-generated tokens stored in a MySQL database. Passwords are hashed
-with PBKDF2 using SHA‑256 and a per‑user salt. Tokens are stored
-in the sessions table with an optional expiration time. Daily usage
-tracking and promo code redemption logic are also defined here.
+This module provides helpers for hashing passwords, issuing and verifying JWT
+tokens, enforcing daily usage limits and redeeming promo codes. It uses
+bcrypt for secure password hashing and PyJWT for token generation. Tokens
+include the user ID and role and can optionally expire. Daily usage and
+credits are tracked in the database via the helpers in ``db``.
 
-NOTE: This implementation deliberately avoids external dependencies
-such as PyJWT or passlib to remain compatible with the environment.
+Environment variables:
+
+``JWT_SECRET``: Secret key used to sign and verify JWTs. Must be set.
+``JWT_EXPIRES_HOURS``: Lifetime of tokens in hours (default 24).
+``DAILY_LIMIT``: Number of simulations allowed per day (default 5).
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
+import datetime
 import os
-import uuid
-from datetime import datetime, timedelta, date
 from typing import Any, Dict, Optional
 
-from . import db as db_core
+import bcrypt
+import jwt
+
+from . import db
 
 
-def _pbkdf2_hash(password: str, salt: bytes) -> bytes:
-    """Compute a PBKDF2‑HMAC‑SHA256 hash for the given password and salt."""
-    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100_000)
-
+# ---------------------------------------------------------------------------
+# Password hashing
+# ---------------------------------------------------------------------------
 
 def hash_password(password: str) -> str:
-    """Create a salted password hash.
-
-    The returned string contains the salt and hash separated by a colon.
-    """
-    salt = os.urandom(16)
-    pw_hash = _pbkdf2_hash(password, salt)
-    return f"{salt.hex()}:{pw_hash.hex()}"
+    """Hash a password using bcrypt and return the encoded hash."""
+    salt = bcrypt.gensalt()
+    pw_hash = bcrypt.hashpw(password.encode("utf-8"), salt)
+    return pw_hash.decode("utf-8")
 
 
-def verify_password(password: str, stored: str) -> bool:
-    """Verify a password against a stored salt:hash string."""
+def verify_password(password: str, hashed: str) -> bool:
+    """Verify a password against a bcrypt hash."""
     try:
-        salt_hex, hash_hex = stored.split(":", 1)
-        salt = bytes.fromhex(salt_hex)
-        stored_hash = bytes.fromhex(hash_hex)
-        computed = _pbkdf2_hash(password, salt)
-        return hmac.compare_digest(computed, stored_hash)
+        return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
     except Exception:
         return False
 
 
+# ---------------------------------------------------------------------------
+# JWT utilities
+# ---------------------------------------------------------------------------
+
+_JWT_SECRET = os.getenv("JWT_SECRET", "changeme")
+_JWT_EXPIRES_HOURS = int(os.getenv("JWT_EXPIRES_HOURS", "24"))
+
+
+def create_access_token(user_id: int, role: str) -> str:
+    """Create a signed JWT containing user_id, role and expiry."""
+    now = datetime.datetime.utcnow()
+    payload = {
+        "sub": user_id,
+        "role": role,
+        "iat": now,
+        "exp": now + datetime.timedelta(hours=_JWT_EXPIRES_HOURS),
+    }
+    token = jwt.encode(payload, _JWT_SECRET, algorithm="HS256")
+    # PyJWT >=2 returns a string; older versions return bytes
+    return token if isinstance(token, str) else token.decode("utf-8")
+
+
+def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
+    """Decode and verify a JWT. Returns payload on success, None on failure."""
+    try:
+        return jwt.decode(token, _JWT_SECRET, algorithms=["HS256"])
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# User management
+# ---------------------------------------------------------------------------
+
 async def create_user(username: str, email: str, password: str, role: str = "user") -> int:
-    """Create a new user and return the user ID.
+    """Register a new user and return the new ID.
 
     Raises RuntimeError if the username already exists.
     """
-    # Check if username exists
-    existing = await db_core.execute(
-        "SELECT id FROM users WHERE username=%s",
-        (username,),
-        fetch=True,
-    )
+    existing = await db.find_user_by_username(username)
     if existing:
         raise RuntimeError("Username already taken")
-    pw_hash = hash_password(password)
-    await db_core.execute(
-        "INSERT INTO users (username, email, password_hash, role) VALUES (%s, %s, %s, %s)",
-        (username, email or None, pw_hash, role),
-    )
-    row = await db_core.execute(
-        "SELECT id FROM users WHERE username=%s",
-        (username,),
-        fetch=True,
-    )
-    return int(row[0]["id"]) if row else 0
+    password_hash = hash_password(password)
+    return await db.insert_user(username=username, email=email, password_hash=password_hash, role=role, credits=0)
 
 
-async def authenticate_user(username: str, password: str) -> Optional[int]:
-    """Authenticate a user and return their ID if valid, else None."""
-    row = await db_core.execute(
-        "SELECT id, password_hash FROM users WHERE username=%s",
-        (username,),
-        fetch=True,
-    )
-    if not row:
+async def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
+    """Authenticate a user by username and password.
+
+    Returns a dict with keys id and role on success, or None on failure.
+    """
+    user = await db.find_user_by_username(username)
+    if not user:
         return None
-    stored_hash = row[0].get("password_hash") or ""
-    if verify_password(password, stored_hash):
-        return int(row[0]["id"])
+    stored = user.get("password_hash") or ""
+    if verify_password(password, stored):
+        return {"id": int(user["id"]), "role": user.get("role", "user")}
     return None
 
 
-def _create_token() -> str:
-    """Generate a random token for session authentication."""
-    return uuid.uuid4().hex
+# ---------------------------------------------------------------------------
+# Daily usage and credits
+# ---------------------------------------------------------------------------
+
+_DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "5"))
 
 
-async def create_session(user_id: int, ttl_hours: int = 24) -> str:
-    """Create a session for the given user and return the token."""
-    token = _create_token()
-    expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
-    await db_core.execute(
-        "INSERT INTO sessions (user_id, token, expires_at) VALUES (%s, %s, %s)",
-        (user_id, token, expires_at),
-    )
-    return token
-
-
-async def get_user_by_token(token: str) -> Optional[Dict[str, Any]]:
-    """Return user information for a valid session token, or None."""
-    if not token:
-        return None
-    rows = await db_core.execute(
-        "SELECT u.id, u.username, u.role, u.credits, s.expires_at FROM sessions s JOIN users u ON s.user_id=u.id "
-        "WHERE s.token=%s",
-        (token,),
-        fetch=True,
-    )
-    if not rows:
-        return None
-    user = rows[0]
-    expires_at = user.get("expires_at")
-    if expires_at and isinstance(expires_at, datetime) and expires_at < datetime.utcnow():
-        # Session expired, optionally remove it
-        await db_core.execute("DELETE FROM sessions WHERE token=%s", (token,))
-        return None
-    return user
-
-
-async def get_user_daily_usage(user_id: int) -> int:
-    """Return how many simulations the user has started today."""
-    today = date.today()
-    rows = await db_core.execute(
-        "SELECT used_count FROM daily_usage WHERE user_id=%s AND usage_date=%s",
-        (user_id, today),
-        fetch=True,
-    )
-    if not rows:
-        return 0
-    return int(rows[0]["used_count"])
+async def check_daily_limit(user_id: int) -> bool:
+    """Return True if the user has reached their daily simulation limit."""
+    today = datetime.date.today().isoformat()
+    used = await db.get_daily_usage(user_id, today)
+    return used >= _DAILY_LIMIT
 
 
 async def increment_daily_usage(user_id: int) -> None:
-    """Increment today's usage count for a user."""
-    today = date.today()
-    await db_core.execute(
-        "INSERT INTO daily_usage (user_id, usage_date, used_count) VALUES (%s, %s, 1) "
-        "ON DUPLICATE KEY UPDATE used_count=used_count+1",
-        (user_id, today),
-    )
+    """Increment the daily usage counter for the user."""
+    today = datetime.date.today().isoformat()
+    await db.increment_daily_usage(user_id, today)
 
 
 async def adjust_user_credits(user_id: int, delta: int) -> None:
-    """Adjust a user's credits by delta (positive or negative)."""
-    await db_core.execute(
-        "UPDATE users SET credits=GREATEST(0, credits+%s) WHERE id=%s",
-        (delta, user_id),
-    )
+    """Adjust user credits (can be negative)."""
+    await db.adjust_user_credits(user_id, delta)
 
 
-async def redeem_promo_code(user_id: int, code: str) -> int:
-    """Redeem a promo code for a user. Returns bonus attempts on success, 0 on failure."""
-    # Find promo code
-    rows = await db_core.execute(
-        "SELECT id, bonus_attempts, max_uses, uses, expires_at FROM promo_codes WHERE code=%s",
-        (code,),
-        fetch=True,
-    )
-    if not rows:
-        return 0
-    promo = rows[0]
-    if promo.get("expires_at") and promo["expires_at"] < date.today():
-        return 0
-    if promo.get("uses", 0) >= promo.get("max_uses", 1):
-        return 0
-    promo_id = int(promo["id"])
-    # Check if user already redeemed
-    check = await db_core.execute(
-        "SELECT id FROM promo_redemptions WHERE user_id=%s AND promo_code_id=%s",
-        (user_id, promo_id),
-        fetch=True,
-    )
-    if check:
-        return 0
-    # Redeem
-    await db_core.execute(
-        "INSERT INTO promo_redemptions (user_id, promo_code_id) VALUES (%s, %s)",
-        (user_id, promo_id),
-    )
-    await db_core.execute(
-        "UPDATE promo_codes SET uses=uses+1 WHERE id=%s",
-        (promo_id,),
-    )
-    bonus = int(promo.get("bonus_attempts") or 0)
-    if bonus > 0:
-        await adjust_user_credits(user_id, bonus)
-    return bonus
+async def get_user_credits(user_id: int) -> int:
+    return await db.get_user_credits(user_id)
 
 
 async def consume_simulation_credit(user_id: int) -> bool:
-    """Consume a simulation credit if available. Returns True if credit used."""
-    # Decrement credits if positive
-    rows = await db_core.execute(
-        "SELECT credits FROM users WHERE id=%s",
-        (user_id,),
-        fetch=True,
-    )
-    if not rows:
-        return False
-    credits = int(rows[0]["credits"] or 0)
+    """Consume one credit if available. Returns True if a credit was used."""
+    credits = await get_user_credits(user_id)
     if credits > 0:
         await adjust_user_credits(user_id, -1)
         return True
     return False
+
+
+async def get_user_daily_usage(user_id: int) -> int:
+    """Return how many simulations the user has started today."""
+    today = datetime.date.today().isoformat()
+    return await db.get_daily_usage(user_id, today)
+
+
+# ---------------------------------------------------------------------------
+# Promo code redemption
+# ---------------------------------------------------------------------------
+
+async def redeem_promo_code(user_id: int, code: str) -> int:
+    """Redeem a promo code and return bonus attempts added, or 0 on failure."""
+    promo = await db.find_promo_code(code)
+    if not promo:
+        return 0
+    # Check expiry
+    expires_at = promo.get("expires_at")
+    if expires_at and expires_at < datetime.date.today():
+        return 0
+    max_uses = promo.get("max_uses", 1)
+    uses = promo.get("uses", 0)
+    if uses >= max_uses:
+        return 0
+    promo_id = int(promo["id"])
+    # Check if user already redeemed
+    existing = await db.find_user_promo_redemption(user_id, promo_id)
+    if existing:
+        return 0
+    await db.insert_promo_redemption(user_id, promo_id)
+    await db.increment_promo_uses(promo_id)
+    bonus = int(promo.get("bonus_attempts") or 0)
+    if bonus > 0:
+        await adjust_user_credits(user_id, bonus)
+    return bonus
