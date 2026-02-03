@@ -563,12 +563,28 @@ const Index = () => {
       window.clearTimeout(reasoningTimerRef.current);
     }
     try {
-      await simulation.startSimulation(buildConfig(userInput));
+      await simulation.startSimulation(buildConfig(userInput), { throwOnError: true });
       const startMessage = await getAssistantMessage('Confirm you are starting the simulation now in one short sentence.');
-      addSystemMessage(startMessage || (settings.language === 'ar' ? 'تم بدء المحاكاة.' : 'Starting simulation...'));
+      addSystemMessage(startMessage || (settings.language === 'ar' ? 'Starting simulation...' : 'Starting simulation...'));
     } catch (err) {
       console.warn('Simulation start failed.', err);
-      addSystemMessage(settings.language === 'ar' ? 'تعذر بدء المحاكاة. تحقق من الباك إند.' : 'Failed to start simulation. Check the backend.');
+      const status = err?.status;
+      if (status === 429) {
+        addSystemMessage(settings.language === 'ar'
+          ? 'Daily simulation limit reached. Add credits or increase DAILY_LIMIT.'
+          : 'Daily simulation limit reached. Add credits or increase DAILY_LIMIT.');
+        return;
+      }
+      if (status === 401) {
+        addSystemMessage(settings.language === 'ar'
+          ? 'Session expired. Please log in again.'
+          : 'Session expired. Please log in again.');
+        return;
+      }
+      const msg = err?.message ? ` ${err.message}` : '';
+      addSystemMessage(settings.language === 'ar'
+        ? `Failed to start simulation.${msg}`.trim()
+        : `Failed to start simulation.${msg}`.trim());
     }
   }, [addSystemMessage, buildConfig, getAssistantMessage, getMissingForStart, hasStarted, promptForMissing, settings.language, simulation, userInput]);
 
@@ -578,14 +594,14 @@ const Index = () => {
     const label = [city, country].filter(Boolean).join(', ');
     if (label) return label;
     if (locationChoice === 'no') {
-      return settings.language === 'ar' ? 'بدون مكان محدد' : 'no specific location';
+      return settings.language === 'ar' ? 'no specific location' : 'no specific location';
     }
-    return settings.language === 'ar' ? 'المكان اللي كتبته' : 'the location you entered';
+    return settings.language === 'ar' ? 'the location you entered' : 'the location you entered';
   }, [locationChoice, settings.language, userInput.city, userInput.country]);
 
   const getSearchTimeoutPrompt = useCallback((locationLabel: string) => (
     settings.language === 'ar'
-      ? `قعدت ادور كتير ومش لاقي بيانات كفاية عن ${locationLabel} (زي وجود الفكرة، رينج الاسعار، أو رأي الناس). تحب ادور تاني بس اخد وقت اكتر ولا ممكن استخدم حاجة زي ChatGPT اسأله؟`
+      ? `I searched for a while but couldn't find enough data for ${locationLabel} (like whether the idea exists, price ranges, or public sentiment). Want me to search longer, or should I use the LLM instead?`
       : `I searched for a while but couldn't find enough data for ${locationLabel} (like whether the idea exists, price ranges, or public sentiment). Want me to search longer, or should I use the LLM instead?`
   ), [settings.language]);
 
@@ -1531,6 +1547,7 @@ If rejection is about competition or location, suggest searching for a better lo
       {/* Header */}
       <Header
         simulationStatus={simulation.status}
+              simulationError={simulation.error}
         isConnected={websocketService.isConnected()}
         language={settings.language}
         settings={settings}

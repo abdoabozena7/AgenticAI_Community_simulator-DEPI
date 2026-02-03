@@ -29,24 +29,17 @@ class CourtRequest(BaseModel):
     language: Optional[str] = "en"
 
 
-@router.post("/idea")
+@router.post("/run")
 async def run_court(
     payload: CourtRequest,
     authorization: str = Header(None),
 ) -> Dict[str, Any]:
-    """Run the Idea Court on an idea and return structured arguments and verdict.
-
-    Requires a valid Bearer token. Uses the LLM to simulate defence,
-    prosecution and judge roles. Returns JSON with defence points,
-    prosecution points, verdict, success_conditions, fatal_risks and
-    next_steps.
-    """
-    # Authenticate via JWT
+    # Authenticate user
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid token")
     token = authorization.split(" ", 1)[1]
-    payload_token = auth_core.decode_access_token(token)
-    if not payload_token:
+    user = await auth_core.get_user_by_token(token)
+    if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
     idea = payload.idea.strip()

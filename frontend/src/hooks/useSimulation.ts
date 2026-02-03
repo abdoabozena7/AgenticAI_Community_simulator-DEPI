@@ -304,7 +304,7 @@ export function useSimulation() {
     return () => unsubscribe();
   }, [handleWebSocketEvent]);
 
-  const startSimulation = useCallback(async (config: SimulationConfig, options?: { carryOver?: boolean }) => {
+  const startSimulation = useCallback(async (config: SimulationConfig, options?: { carryOver?: boolean; throwOnError?: boolean }) => {
     try {
       setError(null);
       carryOverRef.current.active = Boolean(options?.carryOver);
@@ -315,8 +315,10 @@ export function useSimulation() {
       dispatch({ type: 'SET_STATUS', payload: 'configuring' });
       dispatch({ type: 'SET_SUMMARY', payload: null });
 
-      const apiBase = (import.meta.env.VITE_API_URL || 'http://localhost:8000') as string;
-      const wsBase = (import.meta.env.VITE_WS_URL as string | undefined) || apiBase;
+      const apiBase = (import.meta.env.VITE_API_URL || '') as string;
+      const wsBase = (import.meta.env.VITE_WS_URL as string | undefined)
+        || apiBase
+        || 'http://localhost:8000';
       const wsUrl = wsBase
         .replace(/^http/, 'ws')
         .replace(/\/$/, '') + '/ws/simulation';
@@ -590,6 +592,9 @@ export function useSimulation() {
       const message = err instanceof Error ? err.message : 'Failed to start simulation';
       setError(message);
       dispatch({ type: 'SET_STATUS', payload: 'error' });
+      if (options?.throwOnError) {
+        throw err;
+      }
     }
   }, [markCarryOverProgress, pollTask, shouldSkipInitial, state.metrics.currentIteration, state.metrics.totalAgents]);
 

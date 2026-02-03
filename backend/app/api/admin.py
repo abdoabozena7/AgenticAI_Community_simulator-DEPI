@@ -26,12 +26,12 @@ async def require_admin(authorization: Optional[str] = Header(None)) -> Dict[str
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid token")
     token = authorization.split(" ", 1)[1]
-    payload = auth_core.decode_access_token(token)
-    if not payload:
+    user = await auth_core.get_user_by_token(token)
+    if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
-    if payload.get("role") != "admin":
+    if user.get("role") != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin privileges required")
-    return {"id": int(payload["sub"]), "role": "admin"}
+    return {"id": int(user["id"]), "role": "admin"}
 
 
 @router.get("/users")
@@ -73,5 +73,109 @@ async def create_promo(request: PromoCreateRequest, _admin_user: Dict[str, Any] 
         bonus_attempts=request.bonus_attempts,
         max_uses=request.max_uses,
         expires_at=request.expires_at,
+        created_by=_admin_user["id"],
     )
     return {"id": promo_id, "code": request.code.strip()}
+
+
+class CreditAdjustRequest(BaseModel):
+    user_id: Optional[int] = None
+    username: Optional[str] = None
+    delta: int = Field(..., description="Positive or negative credit delta")
+
+
+@router.post("/credits")
+async def adjust_credits(
+    request: CreditAdjustRequest,
+    _admin_user: Dict[str, Any] = Depends(require_admin),
+) -> Dict[str, Any]:
+    if not request.user_id and not request.username:
+        raise HTTPException(status_code=400, detail="Provide user_id or username")
+    user_id = request.user_id
+    if user_id is None:
+        rows = await db.execute(
+            "SELECT id FROM users WHERE username=%s",
+            (request.username,),
+            fetch=True,
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="User not found")
+        user_id = int(rows[0]["id"])
+    await auth_core.adjust_user_credits(user_id, request.delta)
+    updated = await db.execute(
+        "SELECT id, username, role, credits FROM users WHERE id=%s",
+        (user_id,),
+        fetch=True,
+    )
+    return updated[0] if updated else {"id": user_id, "credits": None}
+
+
+class RoleUpdateRequest(BaseModel):
+    user_id: Optional[int] = None
+    username: Optional[str] = None
+    role: str = Field(..., description="Role to set, e.g. admin or user")
+
+
+@router.post("/role")
+async def update_role(
+    request: RoleUpdateRequest,
+    _admin_user: Dict[str, Any] = Depends(require_admin),
+) -> Dict[str, Any]:
+    if not request.user_id and not request.username:
+        raise HTTPException(status_code=400, detail="Provide user_id or username")
+    user_id = request.user_id
+    if user_id is None:
+        rows = await db.execute(
+            "SELECT id FROM users WHERE username=%s",
+            (request.username,),
+            fetch=True,
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="User not found")
+        user_id = int(rows[0]["id"])
+    await auth_core.set_user_role(user_id, request.role.strip())
+    updated = await db.execute(
+        "SELECT id, username, role, credits FROM users WHERE id=%s",
+        (user_id,),
+        fetch=True,
+    )
+    return updated[0] if updated else {"id": user_id, "role": request.role.strip()}
+
+
+class UsageResetRequest(BaseModel):
+    user_id: Optional[int] = None
+    username: Optional[str] = None
+    date: Optional[str] = Field(None, description="YYYY-MM-DD; defaults to today")
+    all_users: Optional[bool] = False
+
+
+@router.post("/usage/reset")
+async def reset_usage(
+    request: UsageResetRequest,
+    _admin_user: Dict[str, Any] = Depends(require_admin),
+) -> Dict[str, Any]:
+    usage_date = request.date or date.today().isoformat()
+    if request.all_users:
+        await db.execute(
+            "DELETE FROM daily_usage WHERE usage_date=%s",
+            (usage_date,),
+        )
+        return {"reset": "all", "date": usage_date}
+
+    if not request.user_id and not request.username:
+        raise HTTPException(status_code=400, detail="Provide user_id or username, or set all_users")
+    user_id = request.user_id
+    if user_id is None:
+        rows = await db.execute(
+            "SELECT id FROM users WHERE username=%s",
+            (request.username,),
+            fetch=True,
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="User not found")
+        user_id = int(rows[0]["id"])
+    await db.execute(
+        "DELETE FROM daily_usage WHERE user_id=%s AND usage_date=%s",
+        (user_id, usage_date),
+    )
+    return {"reset": user_id, "date": usage_date}

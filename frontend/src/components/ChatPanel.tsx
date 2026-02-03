@@ -51,6 +51,8 @@ interface ChatPanelProps {
   onQuickReply?: (value: string) => void;
   /** overall simulation state */
   simulationStatus?: 'idle' | 'running' | 'finished';
+  /** backend error message surfaced via polling */
+  simulationError?: string | null;
   /** agents are currently reasoning */
   reasoningActive?: boolean;
   /** summarisation phase */
@@ -205,6 +207,7 @@ export function ChatPanel({
   quickReplies,
   onQuickReply,
   simulationStatus = 'idle',
+  simulationError = null,
   reasoningActive = false,
   isSummarizing = false,
   rejectedCount = 0,
@@ -595,9 +598,21 @@ export function ChatPanel({
               <div className="text-center py-8">
                 <Bot className="w-10 h-10 mx-auto text-muted-foreground/25 mb-3" />
                 <p className="text-sm text-muted-foreground">
-                  {settings.language === 'ar'
-                    ? 'تفكير الوكلاء سيظهر هنا أثناء المحاكاة'
-                    : 'Agent reasoning will appear here during simulation'}
+                  {simulationError ? (
+                    settings.language === 'ar'
+                      ? `خطأ في المحاكاة: ${simulationError}`
+                      : `Simulation error: ${simulationError}`
+                  ) : settings.language === 'ar' ? (
+                    simulationStatus === 'completed' || simulationStatus === 'error' ? (
+                      'لم يتم توليد أي تفكير للوكلاء (قد يكون الـ LLM غير متاح أو تم رفض كل الردود).'
+                    ) : (
+                      'تفكير الوكلاء سيظهر هنا أثناء المحاكاة'
+                    )
+                  ) : simulationStatus === 'completed' || simulationStatus === 'error' ? (
+                    'No agent reasoning was generated (LLM unavailable or all outputs rejected).'
+                  ) : (
+                    'Agent reasoning will appear here during simulation'
+                  )}
                 </p>
               </div>
             ) : (

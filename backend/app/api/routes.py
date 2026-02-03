@@ -211,27 +211,31 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
     if dataset is None:
         raise HTTPException(status_code=500, detail="Dataset not loaded")
     # Authenticate user only when required (opt-in via env).
-    # Authenticate using JWT if required
     user_id: Optional[int] = None
     auth_required = os.getenv("AUTH_REQUIRED", "false").lower() in {"1", "true", "yes"}
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization.split(" ", 1)[1]
-        payload_token = auth_core.decode_access_token(token)
-        if not payload_token:
-            if auth_required:
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
-        else:
-            user_id = int(payload_token.get("sub"))
+        user = await auth_core.get_user_by_token(token)
+        if not user and auth_required:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+        if user:
+            user_id = int(user.get("id"))
     elif auth_required:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing authorization token")
 
     if user_id is not None:
-        # Enforce daily usage limit (configured via DAILY_LIMIT env)
-        if await auth_core.check_daily_limit(user_id):
+        # Enforce daily usage limit (uses DAILY_LIMIT env; <= 0 disables the limit).
+        usage = await auth_core.get_user_daily_usage(user_id)
+        try:
+            daily_limit = int(os.getenv("DAILY_LIMIT", "5") or 5)
+        except ValueError:
+            daily_limit = 5
+        if daily_limit > 0 and usage >= daily_limit:
+            # Try to consume a credit
             credit_used = await auth_core.consume_simulation_credit(user_id)
             if not credit_used:
                 raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Daily simulation limit reached")
-        # Increment daily usage counter for this simulation
+        # Increment daily usage counter
         await auth_core.increment_daily_usage(user_id)
     # Generate a unique ID for this simulation
     simulation_id = str(uuid.uuid4())
@@ -241,8 +245,8 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
     except Exception:
         # Persistence is best-effort; ignore failures.
         pass
-    # Persist simulation with status and user_id if available
-    await db_core.insert_simulation(simulation_id=simulation_id, user_id=user_id, status="running", user_context=user_context)
+    # Persist simulation with status; user_id stored in table via ALTER but function does not save user_id
+    await db_core.insert_simulation(simulation_id, user_context, status="running")
     # Create a simulation engine instance
     engine = SimulationEngine(dataset=dataset)
 

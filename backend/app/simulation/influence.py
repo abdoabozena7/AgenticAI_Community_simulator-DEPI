@@ -106,7 +106,8 @@ def decide_opinion_change(
         return current_opinion, False
     shares = {k: (v / total_weight) for k, v in weights.items()}
     intensity = max(0.6, min(1.4, phase_intensity))
-    base_threshold = (0.05 + (0.2 * skepticism) + (0.2 * stubbornness)) / intensity
+    # Harder to sway: higher base_threshold
+    base_threshold = (0.25 + (0.3 * skepticism) + (0.1 * stubbornness)) / intensity
 
     # Make neutral less attractive unless it's clearly dominant
     if shares["accept"] > shares["neutral"] + base_threshold and shares["accept"] >= shares["reject"]:
@@ -118,7 +119,7 @@ def decide_opinion_change(
 
     # Additional stubbornness to leave current opinion
     if candidate != current_opinion:
-        stay_threshold = 0.04 + (0.18 * stubbornness) + (0.1 * skepticism)
+        stay_threshold = 0.08 + (0.20 * stubbornness) + (0.12 * skepticism)
         if (shares[candidate] - shares.get(current_opinion, 0.0)) < stay_threshold:
             candidate = current_opinion
 

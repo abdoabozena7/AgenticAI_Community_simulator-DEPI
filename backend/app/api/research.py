@@ -33,27 +33,17 @@ async def run_research_endpoint(
     payload: ResearchRequest,
     authorization: str = Header(None),
 ) -> Dict[str, Any]:
-    """Run a research session for the current user.
-
-    Requires a Bearer token. Persists the research session in the database.
-    """
-    # Authenticate via JWT
+    # Authenticate user (research requires login)
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid token")
     token = authorization.split(" ", 1)[1]
-    payload_token = auth_core.decode_access_token(token)
-    if not payload_token:
+    user = await auth_core.get_user_by_token(token)
+    if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
-    user_id = int(payload_token.get("sub"))
-    # Normalise inputs
-    query = payload.query.strip()
-    location = payload.location.strip() if payload.location else None
-    category = payload.category.strip() if payload.category else None
-    # Run orchestrator and persist session
     result = await run_research(
-        user_id=user_id,
-        query=query,
-        location=location,
-        category=category,
+        query=payload.query.strip(),
+        location=payload.location.strip() if payload.location else None,
+        category=payload.category.strip() if payload.category else None,
+        language=payload.language or "en",
     )
     return result

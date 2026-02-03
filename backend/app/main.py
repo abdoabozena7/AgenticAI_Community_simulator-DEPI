@@ -17,11 +17,14 @@ frontend via WebSockets and summarised via REST endpoints.
 from __future__ import annotations
 
 import os
+from pathlib import Path
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .core.dataset_loader import load_dataset
 from .core.db import init_db
+from .core import auth as auth_core
 from .api import routes as simulation_routes
 from .api import websocket as websocket_module
 from .api import llm as llm_routes
@@ -29,7 +32,6 @@ from .api import search as search_routes
 from .api import auth as auth_routes
 from .api import research as research_routes
 from .api import court as court_routes
-from .api import admin as admin_routes
 
 
 def create_app() -> FastAPI:
@@ -46,6 +48,9 @@ def create_app() -> FastAPI:
     Returns:
         FastAPI: Configured application instance.
     """
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    load_dotenv(env_path)
+
     app = FastAPI(title="Social Simulation Backend")
     # Allow all origins in development. For production, set
     # appropriate allowed origins.
@@ -62,11 +67,10 @@ def create_app() -> FastAPI:
     app.include_router(websocket_module.router)
     app.include_router(llm_routes.router)
     app.include_router(search_routes.router)
-    # New routers for auth, research, court and admin
+    # New routers for auth, research and court
     app.include_router(auth_routes.router)
     app.include_router(research_routes.router)
     app.include_router(court_routes.router)
-    app.include_router(admin_routes.router)
 
     @app.on_event("startup")
     async def startup_event() -> None:
@@ -81,6 +85,7 @@ def create_app() -> FastAPI:
         # here avoids circular import issues.
         from .api import routes  # local import to avoid circular dependency
         await init_db()
+        await auth_core.ensure_admin_user()
         routes.dataset = load_dataset(data_dir)
 
     return app

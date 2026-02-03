@@ -1,22 +1,22 @@
 """
-Authentication API routes.
+Authentication and user management API routes.
 
-This router exposes endpoints for registering a new account, logging in
-with username/password to receive a JWT, fetching the current user and
-redeeming promo codes. All protected endpoints require the client to
-include an ``Authorization: Bearer <jwt>`` header. The JWT payload
-includes the user ID and role and is verified via the secret configured
-in ``JWT_SECRET``.
+This module exposes endpoints for user registration, login, fetching
+the current user, and redeeming promo codes. Authentication is
+implemented via opaque session tokens stored in the database.
+Clients must include an ``Authorization: Bearer <token>`` header on
+protected endpoints.
 """
 
 from __future__ import annotations
 
-from typing import Dict, Optional
-
-from fastapi import APIRouter, Depends, Header, HTTPException, status
-from pydantic import BaseModel, EmailStr, Field
+from fastapi import APIRouter, Depends, HTTPException, Header, status
+import os
+from pydantic import BaseModel, Field, EmailStr
+from typing import Optional
 
 from ..core import auth as auth_core
+
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -36,7 +36,11 @@ class RedeemRequest(BaseModel):
     code: str = Field(..., min_length=2, max_length=64)
 
 
-async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+class PromoteRequest(BaseModel):
+    secret: str = Field(..., min_length=1)
+
+
+async def get_current_user(authorization: str = Header(None)) -> dict:
     """Resolve the current user from the Authorization header.
 
     Raises HTTPException if the token is missing or invalid.
@@ -44,48 +48,64 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid token")
     token = authorization.split(" ", 1)[1]
-    payload = auth_core.decode_access_token(token)
-    if not payload:
+    user = await auth_core.get_user_by_token(token)
+    if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
-    # Retrieve user details
-    user_id = int(payload.get("sub"))
-    role = payload.get("role", "user")
-    # Credits are not stored in JWT; fetch from DB
-    return {"id": user_id, "role": role}
+    return user
 
 
 @router.post("/register")
-async def register(payload: RegisterRequest) -> Dict[str, Any]:
+async def register(payload: RegisterRequest) -> dict:
     try:
         user_id = await auth_core.create_user(payload.username, payload.email or "", payload.password)
+        # Auto login: create session token
+        token = await auth_core.create_session(user_id)
+        return {"message": "registered", "token": token}
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    # Issue JWT on registration
-    token = auth_core.create_access_token(user_id, role="user")
-    return {"token": token}
 
 
 @router.post("/login")
-async def login(payload: LoginRequest) -> Dict[str, Any]:
-    user = await auth_core.authenticate_user(payload.username, payload.password)
-    if not user:
+async def login(payload: LoginRequest) -> dict:
+    user_id = await auth_core.authenticate_user(payload.username, payload.password)
+    if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-    token = auth_core.create_access_token(user["id"], role=user.get("role", "user"))
+    token = await auth_core.create_session(user_id)
     return {"token": token}
 
 
 @router.get("/me")
-async def get_me(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
-    user_id = current_user["id"]
-    # Fetch credits from DB
-    credits = await auth_core.get_user_credits(user_id)
-    return {"id": user_id, "role": current_user.get("role"), "credits": credits}
+async def get_me(current_user: dict = Depends(get_current_user)) -> dict:
+    """Return the current authenticated user."""
+    user_id = int(current_user.get("id"))
+    daily_usage = await auth_core.get_user_daily_usage(user_id)
+    try:
+        daily_limit = int(os.getenv("DAILY_LIMIT", "5") or 5)
+    except ValueError:
+        daily_limit = 5
+    return {
+        "id": user_id,
+        "username": current_user.get("username"),
+        "role": current_user.get("role"),
+        "credits": current_user.get("credits", 0),
+        "daily_usage": daily_usage,
+        "daily_limit": daily_limit,
+    }
 
 
 @router.post("/redeem")
-async def redeem_promo(payload: RedeemRequest, current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
-    user_id = current_user["id"]
-    bonus = await auth_core.redeem_promo_code(user_id, payload.code.strip())
+async def redeem_promo(payload: RedeemRequest, current_user: dict = Depends(get_current_user)) -> dict:
+    bonus = await auth_core.redeem_promo_code(current_user["id"], payload.code.strip())
     if bonus <= 0:
         raise HTTPException(status_code=400, detail="Invalid or already redeemed promo code")
-    return {"bonus_attempts": bonus}
+    return {"message": "promo redeemed", "bonus_attempts": bonus}
+
+
+@router.post("/promote")
+async def promote_self(payload: PromoteRequest, current_user: dict = Depends(get_current_user)) -> dict:
+    allow = os.getenv("ALLOW_SELF_PROMOTE", "false").lower() in {"1", "true", "yes"}
+    secret = os.getenv("PROMOTE_SECRET")
+    if not allow or not secret or payload.secret != secret:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Promotion disabled")
+    await auth_core.set_user_role(current_user["id"], "admin")
+    return {"message": "promoted", "role": "admin"}

@@ -90,4 +90,9 @@ def build_default_forbidden_phrases() -> List[str]:
         "الأدلة غير حاسمة",
         "البيانات غير كافية",
         "البيانات المتاحة لا تكفي",
+        # legacy fallback fragments that made agents sound robotic
+        "وضوح التموضع",
+        "إجهاد التنفيذ",
+        "تعقيد الإطلاق",
+        "الضغط التشغيلي",
     ]

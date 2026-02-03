@@ -64,18 +64,11 @@ class WebSocketService {
   private reconnectDelay = 1000;
 
   connect(url: string): Promise<void> {
-    // Append JWT token as a query parameter if present
-    const token = localStorage.getItem('agentic_sim_jwt');
     this.url = url;
-    let wsUrl = url;
-    if (token) {
-      const sep = url.includes('?') ? '&' : '?';
-      wsUrl = `${url}${sep}token=${encodeURIComponent(token)}`;
-    }
-
+    
     return new Promise((resolve, reject) => {
       try {
-        this.ws = new WebSocket(wsUrl);
+        this.ws = new WebSocket(url);
 
         this.ws.onopen = () => {
           console.log('WebSocket connected');

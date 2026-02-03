@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { apiService } from '@/services/api';
+import { apiService, UserMe } from '@/services/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
@@ -16,9 +16,12 @@ import { Input } from '@/components/ui/input';
 const LandingPage = () => {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
-  const [user, setUser] = useState<{ id: number; role: string; credits: number } | null>(null);
+  const [user, setUser] = useState<UserMe | null>(null);
   const [promo, setPromo] = useState('');
   const [redeemMessage, setRedeemMessage] = useState<string | null>(null);
+  const [promoteSecret, setPromoteSecret] = useState('');
+  const [promoteMessage, setPromoteMessage] = useState<string | null>(null);
+  const [promoteBusy, setPromoteBusy] = useState(false);
 
   // Fetch current user on mount. If the token is missing or invalid,
   // redirect to the login page.
@@ -56,6 +59,23 @@ const LandingPage = () => {
     navigate('/login');
   };
 
+  const handlePromote = async () => {
+    if (!promoteSecret.trim()) return;
+    setPromoteMessage(null);
+    setPromoteBusy(true);
+    try {
+      await apiService.promoteSelf(promoteSecret.trim());
+      setPromoteMessage('Role updated to admin.');
+      const me = await apiService.getMe();
+      setUser(me);
+      setPromoteSecret('');
+    } catch (err: any) {
+      setPromoteMessage(err.message || 'Failed to promote account.');
+    } finally {
+      setPromoteBusy(false);
+    }
+  };
+
   if (loading) {
     return <div className="p-4">جاري التحميل...</div>;
   }
@@ -70,6 +90,9 @@ const LandingPage = () => {
       <p>المعرف: {user.id}</p>
       <p>الدور: {user.role}</p>
       <p>الرصيد المتبقي: {user.credits}</p>
+      {typeof user.daily_usage === 'number' && typeof user.daily_limit === 'number' && (
+        <p>Daily usage: {user.daily_usage} / {user.daily_limit}</p>
+      )}
 
       <div className="space-y-2">
         <h2 className="text-xl font-semibold">تفعيل رمز ترويجي</h2>
@@ -82,6 +105,21 @@ const LandingPage = () => {
           <Button onClick={handleRedeem}>تفعيل</Button>
         </div>
         {redeemMessage && <p className="text-sm text-muted-foreground">{redeemMessage}</p>}
+      </div>
+
+      <div className="space-y-2">
+        <h2 className="text-xl font-semibold">Promote to Admin</h2>
+        <div className="flex gap-2">
+          <Input
+            value={promoteSecret}
+            placeholder="Promotion secret"
+            onChange={(e) => setPromoteSecret(e.target.value)}
+          />
+          <Button onClick={handlePromote} disabled={promoteBusy}>
+            {promoteBusy ? 'Please wait...' : 'Promote'}
+          </Button>
+        </div>
+        {promoteMessage && <p className="text-sm text-muted-foreground">{promoteMessage}</p>}
       </div>
 
       <div className="space-y-2">

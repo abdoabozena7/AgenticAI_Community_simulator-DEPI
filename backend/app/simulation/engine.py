@@ -7,6 +7,7 @@ import json
 import hashlib
 import random
 import re
+import os
 from typing import Callable, Dict, List, Any, Tuple
 
 from ..core.dataset_loader import Dataset
@@ -35,6 +36,7 @@ class SimulationEngine:
     def __init__(self, dataset: Dataset) -> None:
         self.dataset = dataset
         self._llm_semaphore = asyncio.Semaphore(1)
+        self._llm_timeout = float(os.getenv("LLM_REASONING_TIMEOUT", "15.0"))
 
     @staticmethod
     def _normalize_msg(msg: str) -> str:
@@ -50,6 +52,55 @@ class SimulationEngine:
             "insufficient data",
         ]
         return any(phrase in lowered for phrase in banned_phrases)
+
+
+    def _validate_llm_response(
+        self,
+        explanation: str,
+        language: str,
+        reply_to_short_id: str,
+        evidence_ids: List[str],
+        requires_evidence: bool,
+        avoid_openers: List[str],
+        recent_phrases: List[str],
+    ) -> Tuple[bool, str]:
+        text = explanation.strip()
+        if not text:
+            return False, "empty"
+        # Keep this permissive enough that we don't end up with "no reasoning",
+        # while still blocking ultra-short generic replies.
+        if len(text) < 120 or len(text) > 520:
+            return False, "length"
+        opener = " ".join(text.split()[:4]).lower()
+        if opener and opener in avoid_openers:
+            return False, "reused opener"
+        words = re.findall(r"[A-Za-z\u0600-\u06FF]+", text.lower())
+        if words:
+            unique_ratio = len(set(words)) / max(1, len(words))
+            if unique_ratio < 0.35:
+                return False, "low diversity"
+        if reply_to_short_id and reply_to_short_id.lower() not in text.lower():
+            return False, "missing reply tag"
+        if requires_evidence:
+            lowered = text.lower()
+            if not any(str(eid).lower() in lowered for eid in evidence_ids):
+                return False, "missing evidence id"
+
+        banned_phrases = build_default_forbidden_phrases() + [
+            "execution risks",
+            "market fit",
+            "evidence is inconclusive",
+            "insufficient data",
+        ]
+        lowered = text.lower()
+        if any(bp and str(bp).lower() in lowered for bp in banned_phrases):
+            return False, "banned phrase"
+        if language == "ar":
+            latin = sum(1 for ch in text if "a" <= ch.lower() <= "z")
+            arabic = sum(1 for ch in text if "\u0600" <= ch <= "\u06ff")
+            if latin > arabic * 2 and latin > 40:
+                return False, "mostly latin"
+        return True, "ok"
 
 
 
@@ -74,24 +125,23 @@ class SimulationEngine:
         constraints_summary: str,
         recent_phrases: List[str],
         avoid_openers: List[str],
-    ) -> str:
+    ) -> str | None:
 
         traits_desc = ", ".join(f"{k}: {v:.2f}" for k, v in agent.traits.items())
         bias_desc = ", ".join(agent.biases) if agent.biases else "none"
-        response_language = "Arabic" if language == "ar" else "English"
+        debug = os.getenv("LLM_REASONING_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
         memory_context = " | ".join(agent.short_memory[-6:]) if agent.short_memory else "None"
 
-        def _is_mostly_latin(text: str) -> bool:
-            if not text:
-                return False
-            latin = sum(1 for ch in text if "a" <= ch.lower() <= "z")
-            arabic = sum(1 for ch in text if "\u0600" <= ch <= "\u06ff")
-            return latin > arabic * 3 and latin > 40
+        def _clip(value: str, limit: int) -> str:
+            value = re.sub(r"\s+", " ", (value or "").strip())
+            if len(value) <= limit:
+                return value
+            return value[: max(0, limit - 3)].rstrip() + "..."
 
         def _trim_to_limit(text: str, limit: int) -> str:
             if len(text) <= limit:
                 return text
-            sentences = re.split(r'(?<=[.!؟])\s+', text)
+            sentences = re.split(r"(?<=[.!?؟])\s+", text)
             trimmed = ""
             for sentence in sentences:
                 if not sentence:
@@ -102,49 +152,136 @@ class SimulationEngine:
                 trimmed = candidate
             return trimmed if trimmed else text[:limit].rstrip()
 
-        evidence_lines = "\n".join(
-            f"[E{i + 1}] {card}" for i, card in enumerate(evidence_cards)
-        )
-        evidence_ids = [f"E{i + 1}" for i in range(len(evidence_cards))]
-        avoid_openers_block = ", ".join(avoid_openers[:6]) if avoid_openers else ""
-        reply_snippet = (reply_to_message or "").strip()
-        if len(reply_snippet) > 220:
-            reply_snippet = reply_snippet[:217].rstrip() + "..."
+        cleaned_cards: List[str] = []
+        for card in (evidence_cards or []):
+            clipped = _clip(str(card), 220)
+            if clipped:
+                cleaned_cards.append(clipped)
+        evidence_cards = cleaned_cards[:6]
 
-        prompt = (
-            f"You are {role_label}. Phase: {phase_label}. "
-            f"Idea: {idea_label}. "
-            f"Your traits: {traits_desc}. Biases: {bias_desc}. "
-            f"Your last thoughts: {memory_context}. "
-            f"Directly reply to agent {reply_to_short_id} and mention {reply_to_short_id} explicitly. "
-            f"Agent {reply_to_short_id} said: \"{reply_snippet}\" "
-            f"Evidence cards:\n{evidence_lines}\n"
-            "Rules: Write 1-3 sentences in Egyptian Arabic. "
-            "Rules: Use at least ONE evidence ID (E1..En) exactly in your reply. "
-            f"Rules: Stay strictly in your domain: {role_guidance}. "
-            "Rules: Arabic is required, but short technical acronyms are allowed (API, ROI, CAC, Backend, GDPR). "
-            "Rules: No bullet points, no lists, no quotes, no generic templates. "
-            "Rules: Length must be 280-450 characters. "
-            f"Rules: Avoid these opener patterns: {avoid_openers_block}. "
-            f"Constraints (do not list): {constraints_summary}. "
-            f"Recent phrases to avoid: {'; '.join(recent_phrases[-6:]) if recent_phrases else 'None'}."
-        )
+        evidence_lines = "\n".join(f"[E{i + 1}] {card}" for i, card in enumerate(evidence_cards))
+        evidence_ids = [f"E{i + 1}" for i in range(len(evidence_cards))]
+        requires_evidence = len(evidence_ids) > 0
+        avoid_openers_block = ", ".join(avoid_openers[:6]) if avoid_openers else ""
+        reply_snippet = _clip(reply_to_message or "", 220)
+        research_summary = _clip(research_summary or "", 520)
+        research_signals = _clip(research_signals or "", 360)
+        constraints_summary = _clip(constraints_summary or "", 260)
+
+        if language == "ar":
+            opinion_map = {"accept": "قبول", "reject": "رفض", "neutral": "محايد"}
+            prev_label = opinion_map.get(prev_opinion, "محايد")
+            new_label = opinion_map.get(new_opinion, "محايد")
+            changed_label = "نعم" if changed else "لا"
+        else:
+            prev_label = prev_opinion
+            new_label = new_opinion
+            changed_label = "yes" if changed else "no"
+
+        recent_avoid = "; ".join(_clip(p, 120) for p in (recent_phrases or [])[-6:]) if recent_phrases else ""
+        evidence_rule = ""
+        if requires_evidence and evidence_ids:
+            evidence_rule = evidence_ids[0]
+
+        if language == "ar":
+            prompt_lines = [
+                f"أنت {role_label}. المرحلة: {phase_label}.",
+                f"الفكرة: {idea_label}.",
+                f"موقفك الحالي: {new_label} (كان: {prev_label}، تغيّر: {changed_label}).",
+                f"سماتك: {traits_desc}. تحيزاتك: {bias_desc}.",
+                f"آخر أفكارك: {memory_context}.",
+                f"شريحتك من البحث فقط: {research_summary or '—'}",
+                f"إشارات: {research_signals or '—'}",
+                f"بطاقات الأدلة:\n{evidence_lines or '—'}",
+                f"رد مباشرة على {reply_to_short_id} واذكر {reply_to_short_id} حرفيًا داخل الرد.",
+                f"رسالة {reply_to_short_id}: \"{reply_snippet}\"",
+                "قواعد صارمة:",
+                "- اكتب 1-3 جمل باللهجة المصرية.",
+                "- ممنوع القوائم/النقاط/الاقتباسات.",
+                "- لا تستخدم كلام عام أو عبارات محفوظة.",
+                f"- التزم بمجالك: {role_guidance}.",
+                "- اجعل موقفك واضحًا واذكر سبب محدد مرتبط بالشريحة/الأدلة.",
+                "- الطول 160-420 حرف.",
+                f"- تجنب بدايات: {avoid_openers_block or '—'}.",
+                f"- لا تذكر القيود حرفيًا: {constraints_summary or '—'}.",
+                f"- تجنب تكرار عبارات حديثة: {recent_avoid or '—'}.",
+            ]
+            if evidence_rule:
+                prompt_lines.insert(prompt_lines.index("قواعد صارمة:") + 1, f"- اذكر معرف دليل واحد على الأقل مثل {evidence_rule}.")
+            prompt = "\n".join(prompt_lines)
+        else:
+            prompt_lines = [
+                f"You are {role_label}. Phase: {phase_label}.",
+                f"Idea: {idea_label}.",
+                f"Your stance: {new_label} (was: {prev_label}, changed: {changed_label}).",
+                f"Traits: {traits_desc}. Biases: {bias_desc}.",
+                f"Recent thoughts: {memory_context}.",
+                f"Your research slice only: {research_summary or '—'}",
+                f"Signals: {research_signals or '—'}",
+                f"Evidence cards:\n{evidence_lines or '—'}",
+                f"Reply directly to {reply_to_short_id} and include {reply_to_short_id} literally in the reply.",
+                f"{reply_to_short_id} said: \"{reply_snippet}\"",
+                "Strict rules:",
+                "- Write 1-3 sentences.",
+                "- No bullets/lists/quotes.",
+                "- No generic templates or boilerplate.",
+                f"- Stay strictly in your domain: {role_guidance}.",
+                "- Make the stance clear with a concrete, specific rationale grounded in the slice/evidence.",
+                "- Length 120-420 chars.",
+                f"- Avoid opener patterns: {avoid_openers_block or '—'}.",
+                f"- Do not restate constraints literally: {constraints_summary or '—'}.",
+                f"- Avoid repeating recent phrases: {recent_avoid or '—'}.",
+            ]
+            if evidence_rule:
+                prompt_lines.insert(prompt_lines.index("Strict rules:") + 1, f"- Include at least one evidence ID like {evidence_rule}.")
+            prompt = "\n".join(prompt_lines)
         try:
-            best_explanation = ""
-            for attempt in range(5):
-                temp = 0.85 + (0.05 * attempt)
-                repeat_penalty = 1.3 + (0.1 * attempt)
+            try:
+                max_attempts = int(os.getenv("LLM_REASONING_ATTEMPTS", "4") or 4)
+            except ValueError:
+                max_attempts = 4
+            max_attempts = max(1, min(8, max_attempts))
+            last_reason: str | None = None
+
+            validator = None
+            if LLMOutputValidator is not None:
+                validator = LLMOutputValidator(
+                    forbidden_phrases=build_default_forbidden_phrases(),
+                    similarity_threshold=0.8,
+                    min_chars=120,
+                    max_chars=520,
+                )
+
+            for attempt in range(max_attempts):
+                temp = 0.9 + (0.05 * attempt)
+                repeat_penalty = 1.25 + (0.1 * attempt)
                 seed_value = int(
                     hashlib.sha256(
                         f"{agent.agent_id}:{phase_label}:{reply_to_short_id}:{attempt}".encode("utf-8")
                     ).hexdigest()[:8],
                     16,
                 )
-                extra_nudge = (
-                    "Rule: Open with a fresh, non-repetitive clause and avoid the wordy filler. "
-                    "Rule: Make the response feel adversarial or defensive, not neutral."
-                )
-                patched_prompt = prompt + " " + extra_nudge
+                if language == "ar":
+                    extra_nudge = "مهم: لا تخترع مخاطر عامة خارج الشريحة. اكتب بصياغة جديدة تمامًا."
+                else:
+                    extra_nudge = "IMPORTANT: Do not invent generic risks outside the slice. Use fresh wording."
+
+                fix = ""
+                if last_reason:
+                    if last_reason == "missing reply tag":
+                        fix = f"FIX: Include {reply_to_short_id} literally in the reply."
+                    elif last_reason == "missing evidence id" and evidence_ids:
+                        fix = f"FIX: Include at least one evidence ID like {evidence_ids[0]}."
+                    elif last_reason == "length":
+                        fix = "FIX: Adjust length to fit the required range."
+                    elif last_reason == "mostly latin":
+                        fix = "FIX: Use Arabic letters; keep English to short acronyms only."
+                    elif last_reason == "banned phrase":
+                        fix = "FIX: Remove the forbidden phrase and rewrite from scratch."
+                    else:
+                        fix = f"FIX: Rewrite from scratch. (Previous rejection: {last_reason})"
+
+                patched_prompt = prompt + "\n\n" + extra_nudge + ("\n" + fix if fix else "")
 
                 async with self._llm_semaphore:
                     response = await asyncio.wait_for(
@@ -154,61 +291,48 @@ class SimulationEngine:
                             seed=seed_value,
                             options={
                                 "repeat_penalty": repeat_penalty,
-                                "frequency_penalty": 0.9,
+                                "frequency_penalty": 1.0,
                             },
                         ),
-                        timeout=7.0,
+                        timeout=self._llm_timeout,
                     )
                 explanation = response.strip()
                 explanation = re.sub(r"\([^\)]*(category=|audience=|goals=|maturity=|location=|risk=)\s*[^\)]*\)", "", explanation)
-                sentences = re.split(r'(?<=[.!؟])\s+', explanation)
+                sentences = re.split(r"(?<=[.!?؟])\s+", explanation)
                 if len(sentences) > 3:
                     explanation = " ".join(sentences[:3]).strip()
-                explanation = _trim_to_limit(explanation, 450)
+                explanation = _trim_to_limit(explanation, 480)
 
-                if len(explanation) < 280:
-                    best_explanation = best_explanation or explanation
-                    continue
-                # Allow Latin acronyms even in Arabic responses; do not reject mostly Latin text
-                if not any(eid in explanation for eid in evidence_ids):
-                    best_explanation = best_explanation or explanation
-                    continue
-                if reply_to_short_id not in explanation:
-                    best_explanation = best_explanation or explanation
-                    continue
-                opener = " ".join(explanation.split()[:4]).lower()
-                if opener and opener in avoid_openers:
-                    best_explanation = best_explanation or explanation
-                    continue
-                banned_phrases = build_default_forbidden_phrases() + [
-                    "execution risks",
-                    "market fit",
-                    "evidence is inconclusive",
-                    "insufficient data",
-                ]
-                if any(bp in explanation for bp in banned_phrases):
-                    best_explanation = best_explanation or explanation
-                    continue
-                if self._is_template_message(explanation):
-                    best_explanation = best_explanation or explanation
+                ok, reason = self._validate_llm_response(
+                    explanation=explanation,
+                    language=language,
+                    reply_to_short_id=reply_to_short_id,
+                    evidence_ids=evidence_ids,
+                    requires_evidence=requires_evidence,
+                    avoid_openers=avoid_openers,
+                    recent_phrases=recent_phrases,
+                )
+                if not ok:
+                    last_reason = reason
+                    if debug:
+                        print(f"[llm_reasoning] {agent.agent_id[:4]} attempt {attempt + 1} rejected: {reason}")
                     continue
 
-                if LLMOutputValidator is not None:
-                    validator = LLMOutputValidator(
-                        forbidden_phrases=build_default_forbidden_phrases(),
-                        similarity_threshold=0.8,
-                        min_chars=60,
-                        max_chars=480,
-                    )
+                if validator is not None:
                     recent = list(recent_phrases or []) + list(agent.short_memory or [])
                     res = validator.validate(explanation, recent)
                     if not res.ok:
-                        best_explanation = best_explanation or explanation
+                        last_reason = "validator:" + ",".join(res.reasons)
+                        if debug:
+                            print(
+                                f"[llm_reasoning] {agent.agent_id[:4]} attempt {attempt + 1} rejected: {last_reason}"
+                            )
                         continue
 
                 return explanation
 
-            return await self._emergency_llm_generation(
+            # Last-chance attempt (still LLM-generated) with a simpler prompt.
+            emergency = await self._emergency_llm_generation(
                 agent=agent,
                 language=language,
                 idea_label=idea_label,
@@ -218,10 +342,28 @@ class SimulationEngine:
                 role_label=role_label,
                 role_guidance=role_guidance,
             )
+            if emergency:
+                candidate = emergency.strip()
+                ok, reason = self._validate_llm_response(
+                    explanation=candidate,
+                    language=language,
+                    reply_to_short_id=reply_to_short_id,
+                    evidence_ids=evidence_ids,
+                    requires_evidence=requires_evidence,
+                    avoid_openers=avoid_openers,
+                    recent_phrases=recent_phrases,
+                )
+                if ok and (validator is None or validator.validate(candidate, list(recent_phrases or []) + list(agent.short_memory or [])).ok):
+                    return candidate
+                if debug:
+                    print(f"[llm_reasoning] {agent.agent_id[:4]} emergency rejected: {reason}")
 
-        except Exception:
-            raise
+            return None
 
+        except Exception as exc:
+            if debug:
+                print(f"[llm_reasoning] {agent.agent_id[:4]} exception: {exc}")
+            return None
 
     async def _emergency_llm_generation(
         self,
@@ -233,22 +375,57 @@ class SimulationEngine:
         evidence_cards: List[str],
         role_label: str,
         role_guidance: str,
-    ) -> str:
-        response_language = "Arabic" if language == "ar" else "English"
-        evidence_lines = "\n".join(
-            f"[E{i + 1}] {card}" for i, card in enumerate(evidence_cards)
-        )
+    ) -> str | None:
+        debug = os.getenv("LLM_REASONING_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+        def _clip(value: str, limit: int) -> str:
+            value = re.sub(r"\s+", " ", (value or "").strip())
+            if len(value) <= limit:
+                return value
+            return value[: max(0, limit - 3)].rstrip() + "..."
+
+        cleaned_cards: List[str] = []
+        for card in (evidence_cards or []):
+            clipped = _clip(str(card), 220)
+            if clipped:
+                cleaned_cards.append(clipped)
+        evidence_cards = cleaned_cards[:6]
+
+        evidence_lines = "\n".join(f"[E{i + 1}] {card}" for i, card in enumerate(evidence_cards))
         evidence_ids = [f"E{i + 1}" for i in range(len(evidence_cards))]
-        prompt = (
-            f"You are {role_label}. Phase: {phase_label}. Idea: {idea_label}. "
-            f"Reply directly to agent {reply_to_short_id} and mention {reply_to_short_id}. "
-            "Write 1-2 sentences in Egyptian Arabic. "
-            "Use at least one evidence ID (E1..En). "
-            f"Stay in your domain: {role_guidance}. "
-            "Length 220-420 characters. "
-            f"Evidence:\n{evidence_lines}\n"
-            f"Respond in {response_language}."
-        )
+        requires_evidence = len(evidence_ids) > 0
+        if language == "ar":
+            prompt_lines = [
+                f"أنت {role_label}. المرحلة: {phase_label}.",
+                f"الفكرة: {idea_label}.",
+                f"رد مباشرة على {reply_to_short_id} واذكر {reply_to_short_id} حرفيًا داخل الرد.",
+                f"أدلة:\n{evidence_lines or '—'}",
+                "قواعد:",
+                "- اكتب 1-2 جملة باللهجة المصرية.",
+                "- ممنوع القوائم/النقاط/الاقتباسات.",
+                "- لا تستخدم كلام عام أو عبارات محفوظة.",
+                f"- التزم بمجالك: {role_guidance}.",
+                "- الطول 140-420 حرف.",
+            ]
+            if requires_evidence and evidence_ids:
+                prompt_lines.insert(prompt_lines.index("قواعد:") + 1, f"- اذكر معرف دليل واحد على الأقل مثل {evidence_ids[0]}.")
+            prompt = "\n".join(prompt_lines)
+        else:
+            prompt_lines = [
+                f"You are {role_label}. Phase: {phase_label}.",
+                f"Idea: {idea_label}.",
+                f"Reply directly to {reply_to_short_id} and include {reply_to_short_id} literally in the reply.",
+                f"Evidence:\n{evidence_lines or '—'}",
+                "Rules:",
+                "- Write 1-2 sentences.",
+                "- No bullets/lists/quotes.",
+                "- No generic templates.",
+                f"- Stay strictly in your domain: {role_guidance}.",
+                "- Length 120-420 chars.",
+            ]
+            if requires_evidence and evidence_ids:
+                prompt_lines.insert(prompt_lines.index("Rules:") + 1, f"- Include at least one evidence ID like {evidence_ids[0]}.")
+            prompt = "\n".join(prompt_lines)
         try:
             async with self._llm_semaphore:
                 response = await asyncio.wait_for(
@@ -260,29 +437,28 @@ class SimulationEngine:
                             "frequency_penalty": 0.9,
                         },
                     ),
-                    timeout=5.0,
+                    timeout=self._llm_timeout,
                 )
             explanation = response.strip()
             explanation = explanation[:450].rstrip()
-            if response_language == "Arabic":
+            if language == "ar":
                 latin = sum(1 for ch in explanation if "a" <= ch.lower() <= "z")
                 arabic = sum(1 for ch in explanation if "\u0600" <= ch <= "\u06ff")
                 if latin > arabic * 3 and latin > 40:
                     raise RuntimeError("Emergency LLM response used mostly Latin characters.")
-            if not any(eid in explanation for eid in evidence_ids):
+            lowered = explanation.lower()
+            if requires_evidence and not any(eid.lower() in lowered for eid in evidence_ids):
                 raise RuntimeError("Emergency LLM response missing evidence id.")
-            if reply_to_short_id not in explanation:
+            if reply_to_short_id and reply_to_short_id.lower() not in lowered:
                 raise RuntimeError("Emergency LLM response missing reply target.")
             for phrase in build_default_forbidden_phrases():
-                if phrase and phrase in explanation:
+                if phrase and phrase.lower() in lowered:
                     raise RuntimeError("Emergency LLM response contained forbidden phrase.")
             return explanation
-        except Exception:
-            fallback_id = evidence_ids[0] if evidence_ids else "E1"
-            return (
-                f"Replying to {reply_to_short_id}, I still see this through my lens; "
-                f"{fallback_id} keeps my stance steady for now."
-            )
+        except Exception as exc:
+            if debug:
+                print(f"[llm_reasoning] {agent.agent_id[:4]} emergency exception: {exc}")
+            return None
 
     async def run_simulation(
         self,
@@ -398,6 +574,14 @@ class SimulationEngine:
             if "e-commerce" in text_local or "commerce" in text_local or "retail" in text_local:
                 return "منتج تجاري إلكتروني"
             return "الفكرة"
+
+        # Used by the LLM prompt. Prefer the user's raw idea text when provided.
+        idea_label_for_llm = idea_text.strip()
+        if len(idea_label_for_llm) > 180:
+            idea_label_for_llm = idea_label_for_llm[:177].rstrip() + "..."
+        if not idea_label_for_llm:
+            idea_label_for_llm = _idea_label_localized() if language == "ar" else _idea_label()
+
         def _research_insight() -> str:
             if not research_summary:
                 return ""
@@ -940,14 +1124,6 @@ class SimulationEngine:
                     if len(sentence) > 12:
                         cards.append(sentence)
 
-            if not cards:
-                cards = [
-                    "Market signals show mixed demand and adoption friction.",
-                    "Privacy concerns remain unresolved across early feedback.",
-                    "Operational rollout appears complex for current infrastructure.",
-                    "Pricing sensitivity could affect early uptake in key segments.",
-                ]
-
             seen = set()
             unique_cards = []
             for card in cards:
@@ -1083,8 +1259,6 @@ class SimulationEngine:
 
             for role in evidence_by_role:
                 combined = evidence_by_role[role] + general
-                if len(combined) < 3:
-                    combined += role_fallback_evidence.get(role, role_fallback_evidence["consumer"])
                 evidence_by_role[role] = _dedupe(combined)[:6]
             return evidence_by_role
 
@@ -1100,7 +1274,9 @@ class SimulationEngine:
                 return target["agent_id"], target["short_id"], target["message"]
             others = [a for a in agents if a.agent_id != speaker.agent_id]
             fallback = random.choice(others) if others else speaker
-            fallback_msg = evidence_cards[0] if evidence_cards else "prior note"
+            fallback_msg = evidence_cards[0] if evidence_cards else (idea_text.strip() or "the idea")
+            if len(fallback_msg) > 220:
+                fallback_msg = fallback_msg[:217].rstrip() + "..."
             return fallback.agent_id, fallback.agent_id[:4], fallback_msg
 
         total_iterations = len(phase_order)
@@ -1161,6 +1337,8 @@ class SimulationEngine:
                     recent_phrases=recent_messages,
                     avoid_openers=list(used_openers),
                 )
+                if not explanation:
+                    continue
 
                 opener = " ".join(explanation.split()[:4]).lower()
                 if opener:

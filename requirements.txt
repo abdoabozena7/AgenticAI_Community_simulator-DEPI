@@ -1,5 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 pydantic
 email-validator
 python-dotenv
@@ -9,5 +9,5 @@ beautifulsoup4
 lxml
 aiohttp
 jinja2
-bcrypt
-PyJWT
+websockets
+wsproto

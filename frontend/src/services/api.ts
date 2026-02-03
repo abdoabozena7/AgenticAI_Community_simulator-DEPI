@@ -1,19 +1,18 @@
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+const AUTH_TOKEN_KEY = 'agentic_auth_token';
 
-// Manage JWT tokens in local storage
-const TOKEN_KEY = 'agentic_sim_jwt';
+const getStoredToken = () => {
+  if (typeof window === 'undefined') return null;
+  return localStorage.getItem(AUTH_TOKEN_KEY);
+};
 
-function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
-}
+const setStoredToken = (token?: string | null) => {
+  if (typeof window === 'undefined') return;
+  if (token) localStorage.setItem(AUTH_TOKEN_KEY, token);
+  else localStorage.removeItem(AUTH_TOKEN_KEY);
+};
 
-function setToken(token: string | null) {
-  if (token) {
-    localStorage.setItem(TOKEN_KEY, token);
-  } else {
-    localStorage.removeItem(TOKEN_KEY);
-  }
-}
+export const getAuthToken = () => getStoredToken();
 
 export interface SimulationConfig {
   idea: string;
@@ -90,6 +89,35 @@ export interface SimulationStateResponse {
   error?: string;
 }
 
+export interface AuthResponse {
+  token: string;
+  message?: string;
+}
+
+export interface UserMe {
+  id: number;
+  username: string;
+  role: string;
+  credits: number;
+  daily_usage?: number;
+  daily_limit?: number;
+}
+
+export interface RedeemResponse {
+  message: string;
+  bonus_attempts: number;
+}
+
+export interface PromoCreateResponse {
+  id: number;
+  code: string;
+}
+
+export interface PromoteResponse {
+  message: string;
+  role: string;
+}
+
 export interface SearchResult {
   title: string;
   url: string;
@@ -122,27 +150,132 @@ export interface SearchStructured {
 
 class ApiService {
   private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
-    const token = getToken();
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      ...(options?.headers || {}),
-    };
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-      ...options,
-      headers,
-    });
+    const token = getStoredToken();
+    const authHeader = token ? { Authorization: `Bearer ${token}` } : {};
+    const controller = new AbortController();
+    const timeoutMs = 10000;
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ message: 'Request failed' }));
-      const err = new Error(error.detail || error.message || 'Request failed');
-      (err as Error & { status?: number }).status = response.status;
+    try {
+      const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeader,
+          ...options?.headers,
+        },
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          setStoredToken(null);
+        }
+        const error = await response.json().catch(() => ({ message: 'Request failed' }));
+        const err = new Error(error.detail || error.message || 'Request failed');
+        (err as Error & { status?: number }).status = response.status;
+        throw err;
+      }
+
+      return response.json();
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        throw new Error('Request timed out. Please check the backend is running on the configured API URL.');
+      }
       throw err;
+    } finally {
+      window.clearTimeout(timer);
     }
+  }
 
-    return response.json();
+  async register(username: string, email: string, password: string): Promise<AuthResponse> {
+    const res = await this.request<AuthResponse>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ username, email, password }),
+    });
+    if (res?.token) setStoredToken(res.token);
+    return res;
+  }
+
+  async login(username: string, password: string): Promise<AuthResponse> {
+    const res = await this.request<AuthResponse>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    });
+    if (res?.token) setStoredToken(res.token);
+    return res;
+  }
+
+  async logout(): Promise<void> {
+    setStoredToken(null);
+  }
+
+  async getMe(options?: RequestInit): Promise<UserMe> {
+    return this.request<UserMe>('/auth/me', options);
+  }
+
+  async redeemPromo(code: string): Promise<RedeemResponse> {
+    return this.request<RedeemResponse>('/auth/redeem', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    });
+  }
+
+  async promoteSelf(secret: string): Promise<PromoteResponse> {
+    return this.request<PromoteResponse>('/auth/promote', {
+      method: 'POST',
+      body: JSON.stringify({ secret }),
+    });
+  }
+
+  async runResearch(query: string, location?: string, category?: string, language = 'en'): Promise<any> {
+    return this.request('/research/run', {
+      method: 'POST',
+      body: JSON.stringify({ query, location, category, language }),
+    });
+  }
+
+  async runCourt(payload: { idea: string; category?: string; evidence?: string; language?: string }): Promise<any> {
+    return this.request('/court/run', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async listUsers(): Promise<any[]> {
+    return this.request('/admin/users');
+  }
+
+  async getStats(): Promise<any> {
+    return this.request('/admin/stats');
+  }
+
+  async adjustCredits(payload: { user_id?: number; username?: string; delta: number }): Promise<any> {
+    return this.request('/admin/credits', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async updateRole(payload: { user_id?: number; username?: string; role: string }): Promise<any> {
+    return this.request('/admin/role', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async resetUsage(payload: { user_id?: number; username?: string; date?: string; all_users?: boolean }): Promise<any> {
+    return this.request('/admin/usage/reset', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async createPromo(payload: { code: string; bonus_attempts: number; max_uses?: number; expires_at?: string }): Promise<PromoCreateResponse> {
+    return this.request('/admin/promo', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
   }
 
   async startSimulation(config: SimulationConfig): Promise<SimulationResponse> {
@@ -150,67 +283,6 @@ class ApiService {
     return this.request<SimulationResponse>('/simulation/start', {
       method: 'POST',
       body: JSON.stringify(config),
-    });
-  }
-
-  // Authentication methods
-  async register(username: string, email: string, password: string): Promise<void> {
-    const res = await this.request<{ token: string }>('/auth/register', {
-      method: 'POST',
-      body: JSON.stringify({ username, email, password }),
-    });
-    setToken(res.token);
-  }
-
-  async login(username: string, password: string): Promise<void> {
-    const res = await this.request<{ token: string }>('/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ username, password }),
-    });
-    setToken(res.token);
-  }
-
-  async logout(): Promise<void> {
-    setToken(null);
-  }
-
-  async getMe(): Promise<{ id: number; role: string; credits: number }> {
-    return this.request('/auth/me');
-  }
-
-  async redeemPromo(code: string): Promise<{ bonus_attempts: number }> {
-    return this.request('/auth/redeem', {
-      method: 'POST',
-      body: JSON.stringify({ code }),
-    });
-  }
-
-  async runResearch(query: string, location?: string, category?: string): Promise<any> {
-    return this.request('/research/run', {
-      method: 'POST',
-      body: JSON.stringify({ query, location, category }),
-    });
-  }
-
-  async runCourt(idea: string, category?: string, evidence?: string, language: string = 'en'): Promise<any> {
-    return this.request('/court/idea', {
-      method: 'POST',
-      body: JSON.stringify({ idea, category, evidence, language }),
-    });
-  }
-
-  async listUsers(): Promise<{ id: number; username: string; role: string; credits: number }[]> {
-    return this.request('/admin/users');
-  }
-
-  async getStats(): Promise<{ total_simulations: number; used_today: number }> {
-    return this.request('/admin/stats');
-  }
-
-  async createPromo(code: string, bonus_attempts: number, max_uses: number, expires_at?: string): Promise<any> {
-    return this.request('/admin/promo', {
-      method: 'POST',
-      body: JSON.stringify({ code, bonus_attempts, max_uses, expires_at }),
     });
   }
 
