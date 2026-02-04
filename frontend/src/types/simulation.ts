@@ -26,6 +26,20 @@ export interface ReasoningMessage {
   replyToAgentId?: string;
   replyToShortId?: string;
   opinion?: 'accept' | 'reject' | 'neutral';
+  opinionSource?: 'llm' | 'default' | 'fallback';
+  stanceConfidence?: number;
+  reasoningLength?: 'short' | 'full';
+}
+
+export interface ReasoningDebug {
+  id: string;
+  agentId: string;
+  agentShortId?: string;
+  phase?: string;
+  attempt?: number;
+  stage?: string;
+  reason: string;
+  timestamp: number;
 }
 
 export interface SimulationMetrics {

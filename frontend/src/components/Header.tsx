@@ -16,6 +16,8 @@ interface HeaderProps {
   showSettings: boolean;
   onToggleSettings: () => void;
   onSettingsChange: (updates: Partial<HeaderProps['settings']>) => void;
+  onExitDashboard?: () => void;
+  onLogout?: () => void;
 }
 
 export function Header({
@@ -26,6 +28,8 @@ export function Header({
   showSettings,
   onToggleSettings,
   onSettingsChange,
+  onExitDashboard,
+  onLogout,
 }: HeaderProps) {
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -118,6 +122,24 @@ export function Header({
 
         {/* Status Indicators */}
         <div className="flex items-center gap-4 relative">
+          {onExitDashboard && (
+            <button
+              type="button"
+              onClick={onExitDashboard}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border border-border/50 bg-secondary/60 text-muted-foreground hover:text-foreground"
+            >
+              {language === 'ar' ? 'العودة للوحة التحكم' : 'Back to dashboard'}
+            </button>
+          )}
+          {onLogout && (
+            <button
+              type="button"
+              onClick={onLogout}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border border-border/50 bg-secondary/60 text-muted-foreground hover:text-foreground"
+            >
+              {language === 'ar' ? 'تسجيل الخروج' : 'Log out'}
+            </button>
+          )}
           {/* Connection Status */}
           <div className={cn(
             "flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-colors",

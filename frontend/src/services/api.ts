@@ -31,6 +31,10 @@ export interface SimulationConfig {
   evidence_cards?: string[];
   language?: 'ar' | 'en';
   speed?: number;
+  reasoning_scope?: 'hybrid' | 'full' | 'speakers_only';
+  reasoning_detail?: 'short' | 'full';
+  llm_batch_size?: number;
+  llm_concurrency?: number;
 }
 
 export interface SimulationResponse {
@@ -84,6 +88,9 @@ export interface SimulationStateResponse {
     reply_to_agent_id?: string;
     message: string;
     opinion?: 'accept' | 'reject' | 'neutral';
+    opinion_source?: 'llm' | 'default' | 'fallback';
+    stance_confidence?: number;
+    reasoning_length?: 'short' | 'full';
   }[];
   summary?: string;
   error?: string;
@@ -92,6 +99,12 @@ export interface SimulationStateResponse {
 export interface AuthResponse {
   token: string;
   message?: string;
+}
+
+export interface OAuthLoginPayload {
+  id_token?: string;
+  email?: string;
+  name?: string;
 }
 
 export interface UserMe {
@@ -206,8 +219,27 @@ class ApiService {
     return res;
   }
 
+  async loginWithGoogle(payload: OAuthLoginPayload): Promise<AuthResponse> {
+    const res = await this.request<AuthResponse>('/auth/google', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (res?.token) setStoredToken(res.token);
+    return res;
+  }
+
   async logout(): Promise<void> {
     setStoredToken(null);
+    if (typeof window === 'undefined') return;
+    try {
+      localStorage.removeItem('dashboardIdea');
+      localStorage.removeItem('pendingIdea');
+      localStorage.removeItem('pendingAutoStart');
+      localStorage.removeItem('pendingCourtIdea');
+      localStorage.removeItem('postLoginRedirect');
+    } catch {
+      // ignore
+    }
   }
 
   async getMe(options?: RequestInit): Promise<UserMe> {

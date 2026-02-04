@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Header } from '@/components/Header';
 import {
   CATEGORY_OPTIONS,
@@ -14,7 +15,7 @@ import { IterationTimeline } from '@/components/IterationTimeline';
 import { useSimulation } from '@/hooks/useSimulation';
 import { ChatMessage, UserInput } from '@/types/simulation';
 import { websocketService } from '@/services/websocket';
-import { apiService, SearchResponse } from '@/services/api';
+import { apiService, SearchResponse, UserMe } from '@/services/api';
 import { cn } from '@/lib/utils';
 
 const CATEGORY_LABEL_BY_VALUE = new Map(
@@ -164,6 +165,7 @@ const normalizeMaturityValue = (value?: string): UserInput['ideaMaturity'] | und
 
 
 const Index = () => {
+  const navigate = useNavigate();
   const simulation = useSimulation();
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [userInput, setUserInput] = useState<UserInput>({
@@ -189,6 +191,7 @@ const Index = () => {
   const [isWaitingForLocationChoice, setIsWaitingForLocationChoice] = useState(false);
   const [locationChoice, setLocationChoice] = useState<'yes' | 'no' | null>(null);
   const [hasStarted, setHasStarted] = useState(false);
+  const [autoStartPending, setAutoStartPending] = useState(false);
   const summaryRef = useRef<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const searchPromptedRef = useRef(false);
@@ -220,6 +223,8 @@ const Index = () => {
   const [pendingResearchReview, setPendingResearchReview] = useState(false);
   const [reportBusy, setReportBusy] = useState(false);
   const [reasoningActive, setReasoningActive] = useState(false);
+  const [creditNotice, setCreditNotice] = useState<string | null>(null);
+  const [meSnapshot, setMeSnapshot] = useState<UserMe | null>(null);
   const reasoningTimerRef = useRef<number | null>(null);
   const [searchState, setSearchState] = useState<{
     status: 'idle' | 'searching' | 'done' | 'timeout';
@@ -242,6 +247,7 @@ const Index = () => {
     sources: [],
     structured: undefined,
   });
+  const [researchIdea, setResearchIdea] = useState('');
 
   const getAssistantMessage = useCallback(async (prompt: string) => {
     const context = chatMessages
@@ -357,6 +363,50 @@ const Index = () => {
   }, []);
 
   useEffect(() => {
+    const pendingIdea = localStorage.getItem('pendingIdea');
+    const pendingAutoStart = localStorage.getItem('pendingAutoStart');
+    if (pendingIdea) {
+      setUserInput((prev) => ({ ...prev, idea: pendingIdea }));
+      localStorage.removeItem('pendingIdea');
+    }
+    if (pendingAutoStart) {
+      setAutoStartPending(true);
+      localStorage.removeItem('pendingAutoStart');
+    }
+  }, []);
+
+  useEffect(() => {
+    const trimmedIdea = userInput.idea.trim();
+    const hasResearch =
+      Boolean(researchContext.summary)
+      || researchContext.sources.length > 0
+      || Boolean(researchContext.structured);
+    if (!trimmedIdea) {
+      if (researchIdea || hasResearch || searchState.status !== 'idle') {
+        setResearchIdea('');
+        setResearchContext({ summary: '', sources: [], structured: undefined });
+        setSearchState({ status: 'idle' });
+        setPendingResearchReview(false);
+      }
+      return;
+    }
+    if (researchIdea && trimmedIdea !== researchIdea) {
+      setResearchContext({ summary: '', sources: [], structured: undefined });
+      if (searchState.status !== 'idle') {
+        setSearchState({ status: 'idle' });
+      }
+      setPendingResearchReview(false);
+    }
+  }, [
+    userInput.idea,
+    researchIdea,
+    researchContext.summary,
+    researchContext.sources.length,
+    researchContext.structured,
+    searchState.status,
+  ]);
+
+  useEffect(() => {
     localStorage.setItem('appSettings', JSON.stringify(settings));
     const root = document.documentElement;
     root.lang = settings.language;
@@ -372,8 +422,13 @@ const Index = () => {
   }, [leftWidth, rightWidth]);
 
   const buildConfig = useCallback((input: UserInput) => {
+    const trimmedIdea = input.idea.trim();
+    const hasMatchingResearch = Boolean(trimmedIdea && researchIdea && researchIdea === trimmedIdea);
+    const researchSummary = hasMatchingResearch ? researchContext.summary : '';
+    const researchSources = hasMatchingResearch ? researchContext.sources : [];
+    const researchStructured = hasMatchingResearch ? researchContext.structured : undefined;
     return {
-      idea: input.idea.trim(),
+      idea: trimmedIdea,
       category: input.category || DEFAULT_CATEGORY,
       targetAudience: input.targetAudience,
       country: input.country.trim(),
@@ -381,14 +436,14 @@ const Index = () => {
       riskAppetite: (input.riskAppetite ?? 50) / 100,
       ideaMaturity: input.ideaMaturity ?? 'concept',
       goals: input.goals,
-      research_summary: researchContext.summary,
-      research_sources: researchContext.sources,
-      research_structured: researchContext.structured,
+      research_summary: researchSummary,
+      research_sources: researchSources,
+      research_structured: researchStructured,
       language: settings.language,
       speed: simulationSpeed,
       agentCount: input.agentCount,
     };
-  }, [researchContext, settings.language, simulationSpeed]);
+  }, [researchContext, researchIdea, settings.language, simulationSpeed]);
 
   const getMissingForStart = useCallback((input: UserInput, overrideChoice?: 'yes' | 'no' | null) => {
     const missing: string[] = [];
@@ -402,6 +457,40 @@ const Index = () => {
     if (!input.goals.length) missing.push('goals');
     return missing;
   }, [locationChoice]);
+
+  const isCreditsBlocked = useCallback((me?: UserMe | null) => {
+    if (!me) return false;
+    if (typeof me.daily_usage === 'number' && typeof me.daily_limit === 'number') {
+      if (me.daily_limit <= 0) {
+        return (me.credits ?? 0) <= 0;
+      }
+      if (me.daily_usage >= me.daily_limit) {
+        return (me.credits ?? 0) <= 0;
+      }
+      return false;
+    }
+    return (me.credits ?? 0) <= 0;
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    apiService.getMe()
+      .then((me) => {
+        if (!active) return;
+        setMeSnapshot(me);
+        if (isCreditsBlocked(me)) {
+          setCreditNotice(settings.language === 'ar'
+            ? 'الرصيد انتهى. اشحن رصيدك للمتابعة.'
+            : 'Credits exhausted. Add credits to continue.');
+        } else {
+          setCreditNotice(null);
+        }
+      })
+      .catch(() => {
+        if (active) setCreditNotice(null);
+      });
+    return () => { active = false; };
+  }, [isCreditsBlocked, settings.language]);
 
 
   const addOptionsMessage = useCallback((
@@ -557,6 +646,28 @@ const Index = () => {
     if (asked) return;
 
     if (hasStarted || simulation.status === 'running') return;
+    try {
+      const me = await apiService.getMe();
+      setMeSnapshot(me);
+      if (isCreditsBlocked(me)) {
+        const msg = settings.language === 'ar'
+          ? 'الرصيد انتهى. اشحن رصيدك للمتابعة.'
+          : 'Credits exhausted. Add credits to continue.';
+        setCreditNotice(msg);
+        addSystemMessage(msg);
+        return;
+      }
+    } catch {
+      // ignore pre-check failures
+    }
+    if (
+      simulation.status === 'completed'
+      || simulation.status === 'error'
+      || simulation.reasoningFeed.length > 0
+      || simulation.metrics.currentIteration > 0
+    ) {
+      simulation.stopSimulation();
+    }
     setHasStarted(true);
     setReasoningActive(false);
     if (reasoningTimerRef.current) {
@@ -570,9 +681,31 @@ const Index = () => {
       console.warn('Simulation start failed.', err);
       const status = err?.status;
       if (status === 429) {
-        addSystemMessage(settings.language === 'ar'
-          ? 'Daily simulation limit reached. Add credits or increase DAILY_LIMIT.'
-          : 'Daily simulation limit reached. Add credits or increase DAILY_LIMIT.');
+        try {
+          const me = await apiService.getMe();
+          setMeSnapshot(me);
+          const exhausted = typeof me?.daily_usage === 'number'
+            && typeof me?.daily_limit === 'number'
+            && me.daily_limit > 0
+            && me.daily_usage >= me.daily_limit
+            && (me.credits ?? 0) <= 0;
+          addSystemMessage(settings.language === 'ar'
+            ? exhausted
+              ? 'الرصيد انتهى بعد الوصول للحد اليومي. اشحن رصيدك للمتابعة.'
+              : 'تم الوصول للحد اليومي. اشحن رصيدك أو انتظر حتى الغد.'
+            : exhausted
+              ? 'Credits exhausted after hitting the daily limit. Add credits to continue.'
+              : 'Daily limit reached. Add credits or wait until tomorrow.');
+          if (exhausted) {
+            setCreditNotice(settings.language === 'ar'
+              ? 'الرصيد انتهى. اشحن رصيدك للمتابعة.'
+              : 'Credits exhausted. Add credits to continue.');
+          }
+        } catch {
+          addSystemMessage(settings.language === 'ar'
+            ? 'تم الوصول للحد اليومي. اشحن رصيدك للمتابعة.'
+            : 'Daily limit reached. Add credits to continue.');
+        }
         return;
       }
       if (status === 401) {
@@ -586,7 +719,25 @@ const Index = () => {
         ? `Failed to start simulation.${msg}`.trim()
         : `Failed to start simulation.${msg}`.trim());
     }
-  }, [addSystemMessage, buildConfig, getAssistantMessage, getMissingForStart, hasStarted, promptForMissing, settings.language, simulation, userInput]);
+  }, [
+    addSystemMessage,
+    buildConfig,
+    getAssistantMessage,
+    getMissingForStart,
+    hasStarted,
+    isCreditsBlocked,
+    promptForMissing,
+    settings.language,
+    simulation,
+    userInput,
+  ]);
+
+  useEffect(() => {
+    if (!autoStartPending) return;
+    if (!userInput.idea.trim()) return;
+    setAutoStartPending(false);
+    handleStart();
+  }, [autoStartPending, handleStart, userInput.idea]);
 
   const getSearchLocationLabel = useCallback(() => {
     const city = userInput.city?.trim();
@@ -805,6 +956,7 @@ Required sections:
   const runSearch = useCallback(async (query: string, timeoutMs: number) => {
     searchAttemptRef.current += 1;
     const attempt = searchAttemptRef.current;
+    setResearchIdea(query.trim());
     setSearchState({ status: 'searching', query, timeoutMs, attempts: attempt });
     setIsConfigSearching(true);
     try {
@@ -884,7 +1036,7 @@ Required sections:
     } finally {
       setIsConfigSearching(false);
     }
-  }, [addSystemMessage, buildSearchSummary, getSearchLocationLabel, getSearchTimeoutPrompt, settings.language, setSearchState, setResearchContext]);
+  }, [addSystemMessage, buildSearchSummary, getSearchLocationLabel, getSearchTimeoutPrompt, settings.language, setSearchState, setResearchContext, setResearchIdea]);
 
 
   const handleConfigSubmit = useCallback(async () => {
@@ -929,6 +1081,7 @@ Required sections:
   const handleSearchUseLlm = useCallback(async () => {
     if (searchState.status !== 'timeout') return;
     const locationLabel = getSearchLocationLabel();
+    setResearchIdea(userInput.idea.trim());
     setSearchState({
       status: 'done',
       query: searchState.query,
@@ -1016,6 +1169,7 @@ If unsure, say so in summary.`;
     searchState,
     setSearchState,
     setResearchContext,
+    setResearchIdea,
     settings.language,
     userInput.idea,
   ]);
@@ -1487,6 +1641,11 @@ If rejection is about competition or location, suggest searching for a better lo
     handleSendMessage(value);
   }, [handleSendMessage]);
 
+  const handleLogout = useCallback(async () => {
+    await apiService.logout();
+    navigate('/');
+  }, [navigate]);
+
   useEffect(() => {
     const handleMove = (event: MouseEvent) => {
       if (!dragRef.current.side || !containerRef.current) return;
@@ -1554,7 +1713,21 @@ If rejection is about competition or location, suggest searching for a better lo
         showSettings={showSettings}
         onToggleSettings={() => setShowSettings((prev) => !prev)}
         onSettingsChange={(updates) => setSettings((prev) => ({ ...prev, ...updates }))}
+        onExitDashboard={() => navigate('/dashboard')}
+        onLogout={handleLogout}
       />
+      {creditNotice && (
+        <div className="mx-4 mt-3 rounded-2xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-100 flex flex-wrap items-center justify-between gap-3">
+          <span>{creditNotice}</span>
+          <button
+            type="button"
+            onClick={() => navigate('/bonus')}
+            className="rounded-full bg-white px-4 py-1.5 text-xs font-semibold text-slate-900"
+          >
+            {settings.language === 'ar' ? 'شراء رصيد' : 'Buy credits'}
+          </button>
+        </div>
+      )}
 
       {/* Main Content */}
       <div
@@ -1620,6 +1793,7 @@ If rejection is about competition or location, suggest searching for a better lo
             <ChatPanel
               messages={chatMessages}
               reasoningFeed={simulation.reasoningFeed}
+              reasoningDebug={simulation.reasoningDebug}
               onSendMessage={handleSendMessage}
               onSelectOption={handleOptionSelect}
               isWaitingForCity={isWaitingForCity}

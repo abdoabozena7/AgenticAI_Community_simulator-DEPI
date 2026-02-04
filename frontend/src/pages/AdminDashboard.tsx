@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { apiService } from "../services/api";
 
 export default function AdminDashboard() {
+  const navigate = useNavigate();
   const [users, setUsers] = useState<any[]>([]);
   const [stats, setStats] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -40,6 +42,9 @@ export default function AdminDashboard() {
   useEffect(() => {
     loadAdminData();
   }, []);
+
+  const userCount = users.length;
+  const totalCredits = useMemo(() => users.reduce((sum, u) => sum + (u?.credits || 0), 0), [users]);
 
   const handleGrantCredits = async () => {
     setCreditMessage(null);
@@ -173,130 +178,242 @@ export default function AdminDashboard() {
   };
 
   return (
-    <div style={{ padding: 16 }}>
-      <h2>Admin Dashboard</h2>
+    <div className="min-h-screen bg-[#0b0b12] text-white">
+      <div className="mx-auto max-w-6xl px-6 py-8">
+        <header className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <div className="text-xs uppercase tracking-[0.3em] text-emerald-300">Control Center</div>
+            <h1 className="text-3xl font-semibold">Admin Operations</h1>
+            <p className="text-sm text-white/60">Manage credits, roles, usage, and promo codes.</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={loadAdminData}
+              className="rounded-full border border-white/20 px-4 py-2 text-sm text-white/80 hover:text-white"
+            >
+              Refresh
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate("/dashboard")}
+              className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-900"
+            >
+              Back to dashboard
+            </button>
+          </div>
+        </header>
 
-      {error && <p style={{ color: "red" }}>{error}</p>}
-      {creditMessage && <p style={{ color: "#0f0" }}>{creditMessage}</p>}
-      {promoMessage && <p style={{ color: "#0f0" }}>{promoMessage}</p>}
-      {resetAllMessage && <p style={{ color: "#0f0" }}>{resetAllMessage}</p>}
+        {(error || creditMessage || roleMessage || usageMessage || promoMessage || resetAllMessage) && (
+          <div className="mt-6 grid gap-2">
+            {error && <div className="rounded-xl border border-rose-400/30 bg-rose-500/10 px-4 py-2 text-sm text-rose-100">{error}</div>}
+            {creditMessage && <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-2 text-sm text-emerald-100">{creditMessage}</div>}
+            {roleMessage && <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-2 text-sm text-emerald-100">{roleMessage}</div>}
+            {usageMessage && <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-2 text-sm text-emerald-100">{usageMessage}</div>}
+            {promoMessage && <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-2 text-sm text-emerald-100">{promoMessage}</div>}
+            {resetAllMessage && <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-2 text-sm text-emerald-100">{resetAllMessage}</div>}
+          </div>
+        )}
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-        <button onClick={loadAdminData}>Refresh</button>
+        <div className="mt-6 grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+          <section className="space-y-6">
+            <div className="grid gap-4 md:grid-cols-3">
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-white/50">Total users</div>
+                <div className="mt-2 text-2xl font-semibold">{userCount}</div>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-white/50">Total credits</div>
+                <div className="mt-2 text-2xl font-semibold">{totalCredits}</div>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-white/50">Simulations today</div>
+                <div className="mt-2 text-2xl font-semibold">{stats?.used_today ?? 0}</div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-black/60 p-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold">Simulation stats</h3>
+                <span className="text-xs text-white/50">Total: {stats?.total_simulations ?? 0}</span>
+              </div>
+              <div className="mt-3 grid gap-3 text-sm text-white/70 md:grid-cols-2">
+                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+                  Total simulations: <span className="text-white">{stats?.total_simulations ?? 0}</span>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+                  Used today: <span className="text-white">{stats?.used_today ?? 0}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-black/60 p-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold">Users</h3>
+                <span className="text-xs text-white/50">{users.length} records</span>
+              </div>
+              <div className="mt-3 max-h-[420px] overflow-y-auto">
+                <table className="w-full text-sm">
+                  <thead className="text-xs uppercase text-white/50">
+                    <tr>
+                      <th className="py-2 text-left">ID</th>
+                      <th className="py-2 text-left">Username</th>
+                      <th className="py-2 text-left">Role</th>
+                      <th className="py-2 text-left">Credits</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-white/80">
+                    {users.map((u) => (
+                      <tr key={u.id} className="border-t border-white/5">
+                        <td className="py-2">{u.id}</td>
+                        <td className="py-2">{u.username}</td>
+                        <td className="py-2">{u.role}</td>
+                        <td className="py-2">{u.credits}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+          <section className="space-y-5">
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <h3 className="text-sm font-semibold">Credits</h3>
+              <div className="mt-3 space-y-2">
+                <input
+                  type="text"
+                  placeholder="username or user id"
+                  value={creditTarget}
+                  onChange={(e) => setCreditTarget(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm"
+                />
+                <input
+                  type="number"
+                  value={creditDelta}
+                  onChange={(e) => setCreditDelta(Number(e.target.value))}
+                  className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={handleGrantCredits}
+                  disabled={creditBusy}
+                  className="w-full rounded-lg bg-white px-3 py-2 text-sm font-semibold text-slate-900 disabled:opacity-60"
+                >
+                  {creditBusy ? "Updating..." : "Apply"}
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <h3 className="text-sm font-semibold">Roles</h3>
+              <div className="mt-3 space-y-2">
+                <input
+                  type="text"
+                  placeholder="username or user id"
+                  value={roleTarget}
+                  onChange={(e) => setRoleTarget(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm"
+                />
+                <select
+                  value={roleValue}
+                  onChange={(e) => setRoleValue(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm"
+                >
+                  <option value="admin">admin</option>
+                  <option value="user">user</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={handleUpdateRole}
+                  disabled={roleBusy}
+                  className="w-full rounded-lg bg-white px-3 py-2 text-sm font-semibold text-slate-900 disabled:opacity-60"
+                >
+                  {roleBusy ? "Updating..." : "Apply"}
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <h3 className="text-sm font-semibold">Usage reset</h3>
+              <div className="mt-3 space-y-2">
+                <input
+                  type="text"
+                  placeholder="username or user id"
+                  value={usageTarget}
+                  onChange={(e) => setUsageTarget(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={handleResetUsage}
+                  disabled={usageBusy}
+                  className="w-full rounded-lg bg-white px-3 py-2 text-sm font-semibold text-slate-900 disabled:opacity-60"
+                >
+                  {usageBusy ? "Resetting..." : "Reset"}
+                </button>
+                <div className="mt-3 flex gap-2">
+                  <input
+                    type="date"
+                    value={resetAllDate}
+                    onChange={(e) => setResetAllDate(e.target.value)}
+                    className="flex-1 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleResetAllUsage}
+                    disabled={resetAllBusy}
+                    className="rounded-lg border border-white/20 px-3 py-2 text-sm text-white/80 disabled:opacity-60"
+                  >
+                    {resetAllBusy ? "Resetting..." : "Reset all"}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <h3 className="text-sm font-semibold">Promo codes</h3>
+              <div className="mt-3 space-y-2">
+                <input
+                  type="text"
+                  placeholder="code"
+                  value={promoCode}
+                  onChange={(e) => setPromoCode(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm"
+                />
+                <div className="grid grid-cols-3 gap-2">
+                  <input
+                    type="number"
+                    value={promoBonus}
+                    onChange={(e) => setPromoBonus(Number(e.target.value))}
+                    className="rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm"
+                  />
+                  <input
+                    type="number"
+                    value={promoMaxUses}
+                    onChange={(e) => setPromoMaxUses(Number(e.target.value))}
+                    className="rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm"
+                  />
+                  <input
+                    type="date"
+                    value={promoExpires}
+                    onChange={(e) => setPromoExpires(e.target.value)}
+                    className="rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCreatePromo}
+                  disabled={promoBusy}
+                  className="w-full rounded-lg bg-white px-3 py-2 text-sm font-semibold text-slate-900 disabled:opacity-60"
+                >
+                  {promoBusy ? "Creating..." : "Create promo"}
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
       </div>
-
-      <h3>Stats</h3>
-      <pre style={{ background: "#111", color: "#0f0", padding: 12 }}>
-        {JSON.stringify(stats, null, 2)}
-      </pre>
-
-      <h3>Grant Credits</h3>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
-        <input
-          type="text"
-          placeholder="username or user id"
-          value={creditTarget}
-          onChange={(e) => setCreditTarget(e.target.value)}
-          style={{ flex: 1, padding: 8, borderRadius: 6, border: "1px solid #333" }}
-        />
-        <input
-          type="number"
-          value={creditDelta}
-          onChange={(e) => setCreditDelta(Number(e.target.value))}
-          style={{ width: 120, padding: 8, borderRadius: 6, border: "1px solid #333" }}
-        />
-        <button onClick={handleGrantCredits} disabled={creditBusy}>
-          {creditBusy ? "Updating..." : "Apply"}
-        </button>
-      </div>
-
-      <h3>Update Role</h3>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
-        <input
-          type="text"
-          placeholder="username or user id"
-          value={roleTarget}
-          onChange={(e) => setRoleTarget(e.target.value)}
-          style={{ flex: 1, padding: 8, borderRadius: 6, border: "1px solid #333" }}
-        />
-        <select
-          value={roleValue}
-          onChange={(e) => setRoleValue(e.target.value)}
-          style={{ padding: 8, borderRadius: 6, border: "1px solid #333" }}
-        >
-          <option value="admin">admin</option>
-          <option value="user">user</option>
-        </select>
-        <button onClick={handleUpdateRole} disabled={roleBusy}>
-          {roleBusy ? "Updating..." : "Apply"}
-        </button>
-      </div>
-      {roleMessage && <p style={{ color: "#0f0" }}>{roleMessage}</p>}
-
-      <h3>Reset Daily Usage</h3>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
-        <input
-          type="text"
-          placeholder="username or user id"
-          value={usageTarget}
-          onChange={(e) => setUsageTarget(e.target.value)}
-          style={{ flex: 1, padding: 8, borderRadius: 6, border: "1px solid #333" }}
-        />
-        <button onClick={handleResetUsage} disabled={usageBusy}>
-          {usageBusy ? "Resetting..." : "Reset"}
-        </button>
-      </div>
-      {usageMessage && <p style={{ color: "#0f0" }}>{usageMessage}</p>}
-
-      <h3>Reset Usage (All Users)</h3>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
-        <input
-          type="date"
-          value={resetAllDate}
-          onChange={(e) => setResetAllDate(e.target.value)}
-          style={{ padding: 8, borderRadius: 6, border: "1px solid #333" }}
-        />
-        <button onClick={handleResetAllUsage} disabled={resetAllBusy}>
-          {resetAllBusy ? "Resetting..." : "Reset All"}
-        </button>
-      </div>
-
-      <h3>Create Promo Code</h3>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
-        <input
-          type="text"
-          placeholder="code"
-          value={promoCode}
-          onChange={(e) => setPromoCode(e.target.value)}
-          style={{ flex: 1, padding: 8, borderRadius: 6, border: "1px solid #333" }}
-        />
-        <input
-          type="number"
-          value={promoBonus}
-          onChange={(e) => setPromoBonus(Number(e.target.value))}
-          style={{ width: 120, padding: 8, borderRadius: 6, border: "1px solid #333" }}
-        />
-        <input
-          type="number"
-          value={promoMaxUses}
-          onChange={(e) => setPromoMaxUses(Number(e.target.value))}
-          style={{ width: 120, padding: 8, borderRadius: 6, border: "1px solid #333" }}
-        />
-        <input
-          type="date"
-          value={promoExpires}
-          onChange={(e) => setPromoExpires(e.target.value)}
-          style={{ padding: 8, borderRadius: 6, border: "1px solid #333" }}
-        />
-        <button onClick={handleCreatePromo} disabled={promoBusy}>
-          {promoBusy ? "Creating..." : "Create"}
-        </button>
-      </div>
-
-      <h3>Users</h3>
-      <pre style={{ background: "#111", color: "#0f0", padding: 12 }}>
-        {JSON.stringify(users, null, 2)}
-      </pre>
     </div>
   );
 }

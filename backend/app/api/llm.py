@@ -173,6 +173,37 @@ def _contains_arabic(text: str) -> bool:
     return bool(re.search(r"[\u0600-\u06FF]", text))
 
 
+def _heuristic_extract(message: str, schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Best-effort extraction when the LLM is unavailable."""
+    text = (message or "").strip()
+    lower = text.lower()
+    result: Dict[str, Any] = {}
+
+    # City / country via aliases
+    for key, city in CITY_ALIASES.items():
+        if key in lower or key in text:
+            result["city"] = city
+            break
+    for key, country in COUNTRY_ALIASES.items():
+        if key in lower or key in text:
+            result["country"] = country
+            break
+
+    # Idea: prefer existing schema; otherwise use the message itself (trimmed)
+    idea = _norm_text(schema.get("idea")) if isinstance(schema, dict) else None
+    if not idea and text:
+        idea = text[:200].strip()
+    if idea:
+        result["idea"] = idea
+
+    # Preserve existing structured values if present
+    for key in ("category", "target_audience", "goals", "risk_appetite", "idea_maturity"):
+        if isinstance(schema, dict) and schema.get(key) is not None:
+            result[key] = schema.get(key)
+
+    return result
+
+
 async def _extract_location_only(message: str, schema: Dict[str, Any]) -> Dict[str, Any]:
     from json import dumps
     lang_hint = "Arabic" if _contains_arabic(message) else "English"
@@ -218,7 +249,8 @@ async def extract_schema(payload: ExtractRequest) -> ExtractResponse:
         logger.info("extract_schema: raw_llm=%s", raw)
         data = _safe_json_loads(raw)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"LLM extraction failed: {exc}")
+        logger.warning("extract_schema: LLM failed (%s). Falling back to heuristics.", exc)
+        data = _heuristic_extract(payload.message, payload.schema)
 
     # Normalise scalars
     idea = _norm_text(data.get("idea"))

@@ -40,6 +40,12 @@ class PromoteRequest(BaseModel):
     secret: str = Field(..., min_length=1)
 
 
+class GoogleLoginRequest(BaseModel):
+    id_token: Optional[str] = None
+    email: Optional[EmailStr] = None
+    name: Optional[str] = None
+
+
 async def get_current_user(authorization: str = Header(None)) -> dict:
     """Resolve the current user from the Authorization header.
 
@@ -72,6 +78,52 @@ async def login(payload: LoginRequest) -> dict:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     token = await auth_core.create_session(user_id)
     return {"token": token}
+
+
+@router.post("/google")
+async def login_google(payload: GoogleLoginRequest) -> dict:
+    client_id = os.getenv("GOOGLE_CLIENT_ID") or ""
+    allow_dev = os.getenv("ALLOW_DEV_GOOGLE", "true").lower() in {"1", "true", "yes"}
+    email: Optional[str] = None
+    name: Optional[str] = None
+
+    if payload.id_token and client_id:
+        try:
+            from google.oauth2 import id_token as google_id_token
+            from google.auth.transport import requests as google_requests
+            info = google_id_token.verify_oauth2_token(
+                payload.id_token,
+                google_requests.Request(),
+                client_id,
+            )
+            email = info.get("email")
+            name = info.get("name")
+            if info.get("email_verified") is False:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unverified Google email")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Google token")
+    elif allow_dev and payload.email:
+        email = payload.email
+        name = payload.name
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google login not configured",
+        )
+
+    if not email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Google email missing")
+
+    user = await auth_core.get_user_by_email(email)
+    if user:
+        user_id = int(user.get("id"))
+    else:
+        user_id = await auth_core.create_oauth_user(email=email, name=name, provider="google")
+
+    token = await auth_core.create_session(user_id)
+    return {"token": token, "message": "google_login"}
 
 
 @router.get("/me")

@@ -1,4 +1,4 @@
-export type MessageType = 'reasoning_step' | 'metrics' | 'agents' | 'summary';
+export type MessageType = 'reasoning_step' | 'reasoning_debug' | 'metrics' | 'agents' | 'summary';
 
 export interface ReasoningStepEvent {
   type: 'reasoning_step';
@@ -11,7 +11,22 @@ export interface ReasoningStepEvent {
   reply_to_agent_id?: string;
   message: string;
   opinion?: 'accept' | 'reject' | 'neutral';
+  opinion_source?: 'llm' | 'default' | 'fallback';
+  stance_confidence?: number;
+  reasoning_length?: 'short' | 'full';
   // Backend does not include timestamp; client adds one for ordering.
+  timestamp?: number;
+}
+
+export interface ReasoningDebugEvent {
+  type: 'reasoning_debug';
+  simulation_id?: string;
+  agent_id: string;
+  agent_short_id?: string;
+  phase?: string;
+  attempt?: number;
+  stage?: string;
+  reason: string;
   timestamp?: number;
 }
 
@@ -51,7 +66,7 @@ export interface SummaryEvent {
   summary: string;
 }
 
-export type WebSocketEvent = ReasoningStepEvent | MetricsEvent | AgentsEvent | SummaryEvent;
+export type WebSocketEvent = ReasoningStepEvent | ReasoningDebugEvent | MetricsEvent | AgentsEvent | SummaryEvent;
 
 type EventCallback = (event: WebSocketEvent) => void;
 

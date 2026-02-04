@@ -202,6 +202,32 @@ async def insert_reasoning_step(simulation_id: str, data: Dict[str, Any]) -> Non
     )
 
 
+async def insert_reasoning_steps_bulk(simulation_id: str, steps: List[Dict[str, Any]]) -> None:
+    if not steps:
+        return
+    rows = []
+    for data in steps:
+        rows.append(
+            (
+                simulation_id,
+                data.get("agent_id"),
+                data.get("agent_short_id"),
+                data.get("archetype"),
+                data.get("iteration"),
+                data.get("phase"),
+                data.get("reply_to_agent_id"),
+                data.get("opinion"),
+                data.get("message"),
+            )
+        )
+    await execute(
+        "INSERT INTO reasoning_steps (simulation_id, agent_id, agent_short_id, archetype_name, iteration, phase, "
+        "reply_to_agent_id, opinion, message) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        rows,
+        many=True,
+    )
+
+
 async def insert_metrics(simulation_id: str, data: Dict[str, Any]) -> None:
     await execute(
         "INSERT INTO metrics (simulation_id, iteration, accepted, rejected, neutral, acceptance_rate, polarization, per_category) "

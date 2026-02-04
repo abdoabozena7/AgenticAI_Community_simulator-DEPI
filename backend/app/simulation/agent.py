@@ -12,8 +12,9 @@ clear separation of responsibilities.
 
 from __future__ import annotations
 
+import os
 import uuid
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, ClassVar
 
 from ..models.schemas import PersonaTemplateModel, ReasoningStep, AgentInstanceModel, CategoryModel
 
@@ -21,12 +22,22 @@ from ..models.schemas import PersonaTemplateModel, ReasoningStep, AgentInstanceM
 class Agent:
     """Internal representation of an agent during a simulation run."""
 
+    VALID_OPINIONS: ClassVar[set[str]] = {"accept", "reject", "neutral"}
+    SHORT_MEMORY_SIZE: ClassVar[int] = 6
+    MAX_HISTORY: ClassVar[int] = 200
+
     def __init__(
         self,
         template: PersonaTemplateModel,
         category: CategoryModel,
         initial_opinion: str = "neutral",
     ) -> None:
+        if template is None:
+            raise ValueError("template is required")
+        if category is None:
+            raise ValueError("category is required")
+        if initial_opinion not in self.VALID_OPINIONS:
+            initial_opinion = "neutral"
         # Assign a unique identifier for the runtime instance
         self.agent_id: str = str(uuid.uuid4())
         self.category_id: str = template.category_id
@@ -39,19 +50,32 @@ class Agent:
         self.base_influence_weight: float = category.base_influence_weight
         self.influence_weight: float = category.base_influence_weight * template.influence_susceptibility
         # Stubbornness makes opinion changes harder (0-1 range)
-        self.stubbornness: float = min(1.0, max(0.0, float(template.traits.get("stubbornness", 0.4))))
+        self.stubbornness: float = min(1.0, max(0.0, self._safe_float(template.traits.get("stubbornness", 0.4), 0.4)))
         # Leader/propagandist flags (set by engine)
         self.is_leader: bool = False
         self.fixed_opinion: Optional[str] = None
         # Set initial opinion and moderate starting confidence
         self.current_opinion: str = initial_opinion
         self.initial_opinion: str = initial_opinion
-        self.confidence: float = 0.5
+        self.confidence: float = self._compute_initial_confidence()
         self.neutral_streak: int = 0
         # History of reasoning steps captured during the simulation
         self.history: List[ReasoningStep] = []
         # Short memory for last few reasoning messages
         self.short_memory: List[str] = []
+
+    @staticmethod
+    def _safe_float(value: object, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _compute_initial_confidence(self) -> float:
+        optimism = self._safe_float(self.traits.get("optimism", 0.5), 0.5)
+        skepticism = self._safe_float(self.traits.get("skepticism", 0.5), 0.5)
+        base = 0.3 + (0.4 * optimism) - (0.2 * skepticism)
+        return min(1.0, max(0.1, base))
 
     def to_model(self) -> AgentInstanceModel:
         """Convert this agent into a Pydantic model for API responses or logging."""
@@ -85,7 +109,27 @@ class Agent:
             opinion_change=opinion_change,
         )
         self.history.append(step)
+        try:
+            max_history = int(os.getenv("SIM_MAX_AGENT_HISTORY", str(self.MAX_HISTORY)) or self.MAX_HISTORY)
+        except ValueError:
+            max_history = self.MAX_HISTORY
+        if max_history > 0 and len(self.history) > max_history:
+            self.history = self.history[-max_history:]
         if message:
             self.short_memory.append(message)
-            if len(self.short_memory) > 6:
-                self.short_memory = self.short_memory[-6:]
+            if len(self.short_memory) > self.SHORT_MEMORY_SIZE:
+                self.short_memory = self.short_memory[-self.SHORT_MEMORY_SIZE :]
+
+    @property
+    def has_changed_opinion(self) -> bool:
+        return self.current_opinion != self.initial_opinion
+
+    @property
+    def is_neutral(self) -> bool:
+        return self.current_opinion == "neutral"
+
+    def trim_history(self, max_steps: int = 200) -> None:
+        if max_steps < 1:
+            self.history = []
+        elif len(self.history) > max_steps:
+            self.history = self.history[-max_steps:]

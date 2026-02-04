@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -146,9 +146,13 @@
     text-align: right;
   }
 
-  .font-mono {
-    font-family: 'JetBrains Mono', monospace;
-  }
+.font-mono {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.lang-ar .font-display {
+  font-family: 'Cairo', sans-serif;
+}
 }
 
 @layer components {
@@ -1108,3 +1112,76 @@
 
    .ltr { direction: ltr; }
    --------------------------------------------------------------- */
+
+@layer utilities {
+  .font-display {
+    font-family: 'Space Grotesk', 'Cairo', sans-serif;
+  }
+
+  .landing-hero-bg {
+    background:
+      radial-gradient(1200px circle at 20% 0%, rgba(16, 185, 129, 0.22), transparent 55%),
+      radial-gradient(900px circle at 85% 20%, rgba(251, 191, 36, 0.22), transparent 55%),
+      radial-gradient(800px circle at 50% 100%, rgba(244, 63, 94, 0.24), transparent 60%),
+      linear-gradient(180deg, rgba(11, 11, 18, 0.92) 0%, rgba(11, 11, 18, 1) 65%);
+  }
+
+  .landing-grid {
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.08) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.08) 1px, transparent 1px);
+    background-size: 140px 140px;
+    opacity: 0.15;
+    mask-image: radial-gradient(circle at top, rgba(0, 0, 0, 0.9), transparent 70%);
+  }
+
+  .landing-reveal {
+    opacity: 0;
+    transform: translateY(18px);
+    animation: landingReveal 0.85s ease forwards;
+  }
+
+  .landing-delay-200 {
+    animation-delay: 0.2s;
+  }
+
+  .landing-delay-300 {
+    animation-delay: 0.3s;
+  }
+
+  .landing-delay-500 {
+    animation-delay: 0.5s;
+  }
+
+  .landing-delay-600 {
+    animation-delay: 0.6s;
+  }
+
+  .landing-delay-700 {
+    animation-delay: 0.7s;
+  }
+
+  .landing-float {
+    animation: landingFloat 14s ease-in-out infinite;
+  }
+}
+
+@keyframes landingReveal {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes landingFloat {
+  0%, 100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-18px) scale(1.03);
+  }
+}

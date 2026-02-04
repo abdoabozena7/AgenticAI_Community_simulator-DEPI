@@ -8,6 +8,7 @@ import hashlib
 import random
 import re
 import os
+from collections import Counter, deque
 from typing import Callable, Dict, List, Any, Tuple
 
 from ..core.dataset_loader import Dataset
@@ -35,7 +36,11 @@ class SimulationEngine:
 
     def __init__(self, dataset: Dataset) -> None:
         self.dataset = dataset
-        self._llm_semaphore = asyncio.Semaphore(1)
+        try:
+            concurrency = int(os.getenv("LLM_CONCURRENCY", "1"))
+        except ValueError:
+            concurrency = 1
+        self._llm_semaphore = asyncio.Semaphore(max(1, concurrency))
         self._llm_timeout = float(os.getenv("LLM_REASONING_TIMEOUT", "15.0"))
 
     @staticmethod
@@ -69,22 +74,17 @@ class SimulationEngine:
             return False, "empty"
         # Keep this permissive enough that we don't end up with "no reasoning",
         # while still blocking ultra-short generic replies.
-        if len(text) < 120 or len(text) > 520:
+        if len(text) < 40 or len(text) > 800:
             return False, "length"
         opener = " ".join(text.split()[:4]).lower()
         if opener and opener in avoid_openers:
             return False, "reused opener"
         words = re.findall(r"[A-Za-z\u0600-\u06FF]+", text.lower())
-        if words:
+        if words and len(words) >= 10:
             unique_ratio = len(set(words)) / max(1, len(words))
-            if unique_ratio < 0.35:
+            if unique_ratio < 0.25:
                 return False, "low diversity"
-        if reply_to_short_id and reply_to_short_id.lower() not in text.lower():
-            return False, "missing reply tag"
-        if requires_evidence:
-            lowered = text.lower()
-            if not any(str(eid).lower() in lowered for eid in evidence_ids):
-                return False, "missing evidence id"
+        # Do not hard-fail for missing reply tag or evidence id; prefer generating reasoning.
 
         banned_phrases = build_default_forbidden_phrases() + [
             "execution risks",
@@ -125,18 +125,64 @@ class SimulationEngine:
         constraints_summary: str,
         recent_phrases: List[str],
         avoid_openers: List[str],
+        debug_emitter: Callable[[str, Dict[str, Any]], Any] | None = None,
     ) -> str | None:
 
         traits_desc = ", ".join(f"{k}: {v:.2f}" for k, v in agent.traits.items())
         bias_desc = ", ".join(agent.biases) if agent.biases else "none"
         debug = os.getenv("LLM_REASONING_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
+        debug_stream = os.getenv("LLM_REASONING_DEBUG_STREAM", "false").strip().lower() in {"1", "true", "yes", "on"}
         memory_context = " | ".join(agent.short_memory[-6:]) if agent.short_memory else "None"
+
+        async def _emit_debug(reason: str, stage: str, attempt: int | None = None) -> None:
+            if not debug_stream or debug_emitter is None:
+                return
+            payload = {
+                "agent_id": agent.agent_id,
+                "agent_short_id": agent.agent_id[:4],
+                "phase": phase_label,
+                "attempt": attempt,
+                "stage": stage,
+                "reason": reason,
+            }
+            try:
+                await debug_emitter("reasoning_debug", payload)
+            except Exception:
+                return
 
         def _clip(value: str, limit: int) -> str:
             value = re.sub(r"\s+", " ", (value or "").strip())
             if len(value) <= limit:
                 return value
             return value[: max(0, limit - 3)].rstrip() + "..."
+
+        def _fallback_reasoning(reason_hint: str | None = None) -> str:
+            snippet_source = research_summary or research_signals or ""
+            snippet = _clip(snippet_source, 160) if snippet_source else ""
+            if language == "ar":
+                if new_opinion == "reject":
+                    base = f"من وجهة نظري كـ{role_label} الفكرة دي مش مناسبة ومخاطرها واضحة."
+                elif new_opinion == "accept":
+                    base = f"من وجهة نظري كـ{role_label} الفكرة دي ممكن تنجح لو اتنفذت صح."
+                else:
+                    base = f"من وجهة نظري كـ{role_label} أنا متردد ولسه محتاج توضيح."
+                if snippet:
+                    base += f" المؤشرات: {snippet}"
+                if reason_hint and debug:
+                    base += f" [{reason_hint}]"
+                return _clip(base, 420)
+            else:
+                if new_opinion == "reject":
+                    base = f"As {role_label}, I don’t think this idea is viable and the risks are clear."
+                elif new_opinion == "accept":
+                    base = f"As {role_label}, this idea could work if executed carefully."
+                else:
+                    base = f"As {role_label}, I’m on the fence and need more clarity."
+                if snippet:
+                    base += f" Signals: {snippet}"
+                if reason_hint and debug:
+                    base += f" [{reason_hint}]"
+                return _clip(base, 420)
 
         def _trim_to_limit(text: str, limit: int) -> str:
             if len(text) <= limit:
@@ -178,6 +224,17 @@ class SimulationEngine:
             new_label = new_opinion
             changed_label = "yes" if changed else "no"
 
+        human_guardrail = (
+            "SYSTEM: You are {role_label}, a real person living in a society, not a data-processing bot. "
+            "CRITICAL: Respond like a human, not a template. Use your instincts and be blunt if the idea feels harmful or unethical.\n"
+            "TASK: Evaluate '{idea_label}' based on your traits ({traits_desc}) and your human judgment.\n"
+            "STANCE: Your internal stance is {new_label}. Justify it clearly.\n"
+            "RULES:\n"
+            "- Use raw, blunt Egyptian Arabic (Egyptian Slang).\n"
+            "- No lists, no polite boilerplate.\n"
+            "- Talk like a person who just heard this news in a cafe and is reacting to it."
+        ).format(role_label=role_label, idea_label=idea_label, traits_desc=traits_desc, new_label=new_label)
+
         recent_avoid = "; ".join(_clip(p, 120) for p in (recent_phrases or [])[-6:]) if recent_phrases else ""
         evidence_rule = ""
         if requires_evidence and evidence_ids:
@@ -185,6 +242,7 @@ class SimulationEngine:
 
         if language == "ar":
             prompt_lines = [
+                human_guardrail,
                 f"أنت {role_label}. المرحلة: {phase_label}.",
                 f"الفكرة: {idea_label}.",
                 f"موقفك الحالي: {new_label} (كان: {prev_label}، تغيّر: {changed_label}).",
@@ -193,8 +251,14 @@ class SimulationEngine:
                 f"شريحتك من البحث فقط: {research_summary or '—'}",
                 f"إشارات: {research_signals or '—'}",
                 f"بطاقات الأدلة:\n{evidence_lines or '—'}",
-                f"رد مباشرة على {reply_to_short_id} واذكر {reply_to_short_id} حرفيًا داخل الرد.",
-                f"رسالة {reply_to_short_id}: \"{reply_snippet}\"",
+                *(
+                    [
+                        f"رد مباشرة على {reply_to_short_id} واذكر {reply_to_short_id} حرفيًا داخل الرد.",
+                        f"رسالة {reply_to_short_id}: \"{reply_snippet}\"",
+                    ]
+                    if reply_to_short_id
+                    else []
+                ),
                 "قواعد صارمة:",
                 "- اكتب 1-3 جمل باللهجة المصرية.",
                 "- ممنوع القوائم/النقاط/الاقتباسات.",
@@ -211,6 +275,7 @@ class SimulationEngine:
             prompt = "\n".join(prompt_lines)
         else:
             prompt_lines = [
+                human_guardrail,
                 f"You are {role_label}. Phase: {phase_label}.",
                 f"Idea: {idea_label}.",
                 f"Your stance: {new_label} (was: {prev_label}, changed: {changed_label}).",
@@ -219,8 +284,14 @@ class SimulationEngine:
                 f"Your research slice only: {research_summary or '—'}",
                 f"Signals: {research_signals or '—'}",
                 f"Evidence cards:\n{evidence_lines or '—'}",
-                f"Reply directly to {reply_to_short_id} and include {reply_to_short_id} literally in the reply.",
-                f"{reply_to_short_id} said: \"{reply_snippet}\"",
+                *(
+                    [
+                        f"Reply directly to {reply_to_short_id} and include {reply_to_short_id} literally in the reply.",
+                        f"{reply_to_short_id} said: \"{reply_snippet}\"",
+                    ]
+                    if reply_to_short_id
+                    else []
+                ),
                 "Strict rules:",
                 "- Write 1-3 sentences.",
                 "- No bullets/lists/quotes.",
@@ -242,15 +313,15 @@ class SimulationEngine:
                 max_attempts = 4
             max_attempts = max(1, min(8, max_attempts))
             last_reason: str | None = None
+            last_candidate: str | None = None
 
             validator = None
             if LLMOutputValidator is not None:
-                validator = LLMOutputValidator(
-                    forbidden_phrases=build_default_forbidden_phrases(),
-                    similarity_threshold=0.8,
-                    min_chars=120,
-                    max_chars=520,
-                )
+                try:
+                    judge_temp = float(os.getenv("LLM_JUDGE_TEMPERATURE", "0.1") or 0.1)
+                except ValueError:
+                    judge_temp = 0.1
+                validator = LLMOutputValidator(temperature=judge_temp)
 
             for attempt in range(max_attempts):
                 temp = 0.9 + (0.05 * attempt)
@@ -302,6 +373,8 @@ class SimulationEngine:
                 if len(sentences) > 3:
                     explanation = " ".join(sentences[:3]).strip()
                 explanation = _trim_to_limit(explanation, 480)
+                if explanation:
+                    last_candidate = explanation
 
                 ok, reason = self._validate_llm_response(
                     explanation=explanation,
@@ -316,17 +389,20 @@ class SimulationEngine:
                     last_reason = reason
                     if debug:
                         print(f"[llm_reasoning] {agent.agent_id[:4]} attempt {attempt + 1} rejected: {reason}")
+                    await _emit_debug(reason, "validate", attempt + 1)
                     continue
 
                 if validator is not None:
+                    persona_summary = f"{role_label}; traits: {traits_desc}; biases: {bias_desc}; guidance: {role_guidance}"
                     recent = list(recent_phrases or []) + list(agent.short_memory or [])
-                    res = validator.validate(explanation, recent)
+                    res = await validator.validate(explanation, persona_summary, recent)
                     if not res.ok:
                         last_reason = "validator:" + ",".join(res.reasons)
                         if debug:
                             print(
                                 f"[llm_reasoning] {agent.agent_id[:4]} attempt {attempt + 1} rejected: {last_reason}"
                             )
+                        await _emit_debug(last_reason, "llm_judge", attempt + 1)
                         continue
 
                 return explanation
@@ -353,17 +429,25 @@ class SimulationEngine:
                     avoid_openers=avoid_openers,
                     recent_phrases=recent_phrases,
                 )
-                if ok and (validator is None or validator.validate(candidate, list(recent_phrases or []) + list(agent.short_memory or [])).ok):
-                    return candidate
+                if ok:
+                    if validator is None:
+                        return candidate
+                    persona_summary = f"{role_label}; traits: {traits_desc}; biases: {bias_desc}; guidance: {role_guidance}"
+                    res = await validator.validate(candidate, persona_summary, list(recent_phrases or []) + list(agent.short_memory or []))
+                    if res.ok:
+                        return candidate
                 if debug:
                     print(f"[llm_reasoning] {agent.agent_id[:4]} emergency rejected: {reason}")
+                await _emit_debug(reason, "emergency", None)
 
-            return None
+            if last_candidate:
+                return last_candidate
+            return _fallback_reasoning("no_candidate")
 
         except Exception as exc:
             if debug:
                 print(f"[llm_reasoning] {agent.agent_id[:4]} exception: {exc}")
-            return None
+            return _fallback_reasoning("exception")
 
     async def _emergency_llm_generation(
         self,
@@ -412,6 +496,7 @@ class SimulationEngine:
             prompt = "\n".join(prompt_lines)
         else:
             prompt_lines = [
+                human_guardrail,
                 f"You are {role_label}. Phase: {phase_label}.",
                 f"Idea: {idea_label}.",
                 f"Reply directly to {reply_to_short_id} and include {reply_to_short_id} literally in the reply.",
@@ -496,13 +581,55 @@ class SimulationEngine:
                 score += 0.15
             if any(token in text for token in ["documents", "upload", "records"]):
                 score += 0.08
-            return min(0.4, score)
+            if any(token in text for token in [
+                "privacy",
+                "surveillance",
+                "tracking",
+                "gps",
+                "location",
+                "bank",
+                "banking",
+                "account",
+                "credit",
+                "wallet",
+                "messages",
+                "email",
+                "chat",
+                "dm",
+                "personal data",
+                "pii",
+                "biometric",
+                "password",
+                "ssn",
+                "social security",
+                "خصوص",
+                "تجسس",
+                "موقع",
+                "رسائل",
+                "بنك",
+                "حساب",
+                "بطاقة",
+                "بيانات",
+                "هوية",
+                "رقم قومي",
+            ]):
+                score += 0.2
+            return min(0.6, score)
 
         idea_text = str(user_context.get("idea") or "")
         research_summary = str(user_context.get("research_summary") or "")
         research_structured = user_context.get("research_structured") or {}
         language = str(user_context.get("language") or "ar").lower()
         idea_risk = _idea_risk_score(idea_text)
+        regulatory_seed = ""
+        if isinstance(research_structured, dict):
+            regulatory_seed = str(research_structured.get("regulatory_risk") or "").lower()
+        if regulatory_seed in {"high", "strict"}:
+            initial_risk_bias = min(0.6, idea_risk + 0.2)
+        elif regulatory_seed in {"medium", "moderate"}:
+            initial_risk_bias = min(0.6, idea_risk + 0.1)
+        else:
+            initial_risk_bias = idea_risk
 
         def _idea_concerns() -> str:
             text = idea_text.lower()
@@ -629,16 +756,34 @@ class SimulationEngine:
                 return opinion
             return {"accept": "قبول", "reject": "رفض", "neutral": "محايد"}.get(opinion, "محايد")
 
+        async def _infer_opinion_from_llm(text: str) -> str | None:
+            if not text:
+                return None
+            if LLMOutputValidator is None:
+                return None
+            if stance_classifier is None:
+                return None
+            return await stance_classifier.classify_opinion(
+                text=text,
+                idea_label=idea_label_for_llm,
+                language=language,
+            )
+
         def _initial_opinion(traits: Dict[str, float]) -> str:
             optimism = float(traits.get("optimism", 0.5))
             skepticism = float(traits.get("skepticism", 0.5))
+            risk_tolerance = float(traits.get("risk_tolerance", 0.5))
             # Requested formula for initial diversity
             accept_prob = 0.3 + (0.4 * optimism) - (0.3 * skepticism)
             accept_prob += random.uniform(-0.08, 0.08)
-            accept_prob = min(0.8, max(0.1, accept_prob))
             reject_prob = 0.2 + (0.35 * skepticism) - (0.2 * optimism)
             reject_prob += random.uniform(-0.08, 0.08)
-            reject_prob = min(0.7, max(0.05, reject_prob))
+            if initial_risk_bias > 0:
+                risk_penalty = initial_risk_bias * (0.55 + (0.65 * (1.0 - risk_tolerance)))
+                accept_prob -= risk_penalty
+                reject_prob += initial_risk_bias * (0.55 + (0.4 * (1.0 - optimism)))
+            accept_prob = min(0.8, max(0.05, accept_prob))
+            reject_prob = min(0.8, max(0.05, reject_prob))
             neutral_prob = max(0.1, 1.0 - accept_prob - reject_prob)
             roll = random.random()
             if roll < accept_prob:
@@ -724,6 +869,52 @@ class SimulationEngine:
         except Exception:
             speed = 1.0
         speed = max(0.5, min(20.0, speed))
+        step_delay = float(os.getenv("SIMULATION_STEP_DELAY", "0") or 0)
+        reasoning_scope = str(user_context.get("reasoning_scope") or "hybrid").strip().lower()
+        if reasoning_scope not in {"hybrid", "full", "speakers_only"}:
+            reasoning_scope = "hybrid"
+        reasoning_detail = str(user_context.get("reasoning_detail") or "short").strip().lower()
+        if reasoning_detail not in {"short", "full"}:
+            reasoning_detail = "short"
+        try:
+            llm_batch_size = int(user_context.get("llm_batch_size") or os.getenv("LLM_BATCH_SIZE", "8"))
+        except ValueError:
+            llm_batch_size = 8
+        llm_batch_size = max(1, min(50, llm_batch_size))
+        try:
+            llm_concurrency = int(user_context.get("llm_concurrency") or os.getenv("LLM_CONCURRENCY", "6"))
+        except ValueError:
+            llm_concurrency = 6
+        llm_concurrency = max(1, min(24, llm_concurrency))
+        try:
+            reasoning_temp = float(os.getenv("LLM_REASONING_TEMPERATURE", "0.7") or 0.7)
+        except ValueError:
+            reasoning_temp = 0.7
+        try:
+            short_limit = int(os.getenv("LLM_SHORT_MAX_CHARS", "220") or 220)
+        except ValueError:
+            short_limit = 220
+        try:
+            full_limit = int(os.getenv("LLM_FULL_MAX_CHARS", "450") or 450)
+        except ValueError:
+            full_limit = 450
+        try:
+            validator_sample_rate = float(os.getenv("LLM_VALIDATOR_SAMPLE_RATE", "0.1") or 0.1)
+        except ValueError:
+            validator_sample_rate = 0.1
+        validator_sample_rate = max(0.0, min(1.0, validator_sample_rate))
+        try:
+            max_dialogue_context = int(os.getenv("SIM_MAX_DIALOGUE_CONTEXT", "60") or 60)
+        except ValueError:
+            max_dialogue_context = 60
+        llm_semaphore = asyncio.Semaphore(llm_concurrency)
+        stance_classifier = None
+        if LLMOutputValidator is not None:
+            try:
+                judge_temp = float(os.getenv("LLM_JUDGE_TEMPERATURE", "0.1") or 0.1)
+            except ValueError:
+                judge_temp = 0.1
+            stance_classifier = LLMOutputValidator(temperature=judge_temp)
 
         # Emit initial agent snapshot (iteration 0)
         await emitter(
@@ -735,8 +926,16 @@ class SimulationEngine:
             },
         )
 
-        # Emit initial metrics so UI updates immediately
-        initial_metrics = compute_metrics(agents)
+        # Emit zeroed initial metrics so UI starts from a clean state
+        initial_metrics = {
+            "accepted": 0,
+            "rejected": 0,
+            "neutral": 0,
+            "acceptance_rate": 0.0,
+            "polarization": 0.0,
+            "total_agents": len(agents),
+            "per_category": {},
+        }
         await emitter(
             "metrics",
             {
@@ -761,18 +960,17 @@ class SimulationEngine:
 
         arabic_peer_tags = ["أ", "ب", "ج", "د", "هـ", "و", "ز", "ح", "ط", "ي"]
 
-        recent_messages: List[str] = []
+        recent_messages: deque[str] = deque(maxlen=200)
 
         def _push_recent(message: str) -> None:
             recent_messages.append(message)
-            if len(recent_messages) > 240:
-                del recent_messages[:-240]
 
         def _dedupe_message(message: str, agent: Agent, iteration: int) -> str:
             normalized = self._normalize_msg(message)
             if not normalized:
                 return message
-            repeated = any(normalized == self._normalize_msg(prev) for prev in recent_messages[-30:])
+            recent_list = list(recent_messages)
+            repeated = any(normalized == self._normalize_msg(prev) for prev in recent_list[-30:])
             if agent.short_memory and normalized == self._normalize_msg(agent.short_memory[-1]):
                 repeated = True
             if not repeated:
@@ -1065,22 +1263,32 @@ class SimulationEngine:
             regulatory = str(structured.get("regulatory_risk") or "").lower()
             price = str(structured.get("price_sensitivity") or "").lower()
             penalty = 0.0
+            if idea_risk > 0:
+                base_risk_boost = idea_risk * (0.18 + (0.22 * (1.0 - risk_tolerance)))
+                weights["reject"] += base_risk_boost
+                penalty += base_risk_boost * 0.35
             if competition in {"high", "crowded", "saturated"}:
-                weights["reject"] += 0.08 * negative_scale
-                penalty += 0.05 * negative_scale
+                weights["reject"] += 0.24 * negative_scale
+                penalty += 0.12 * negative_scale
+            if competition in {"medium", "moderate"}:
+                weights["reject"] += 0.14 * negative_scale
             if demand in {"low", "weak"}:
-                weights["reject"] += 0.06 * negative_scale
-                penalty += 0.04 * negative_scale
+                weights["reject"] += 0.22 * negative_scale
+                penalty += 0.12 * negative_scale
+            if demand in {"medium", "moderate"}:
+                weights["reject"] += 0.12 * negative_scale
             if regulatory in {"high", "strict"}:
-                weights["reject"] += 0.06 * negative_scale
-                penalty += 0.04 * negative_scale
+                weights["reject"] += 0.32 * negative_scale
+                penalty += 0.18 * negative_scale
+            if regulatory in {"medium", "moderate"}:
+                weights["reject"] += 0.18 * negative_scale
             if price in {"high"}:
-                weights["reject"] += 0.04 * negative_scale
-                penalty += 0.03 * negative_scale
+                weights["reject"] += 0.14 * negative_scale
+                penalty += 0.08 * negative_scale
             if demand in {"high", "strong"}:
-                weights["accept"] += 0.05 * positive_scale
+                weights["accept"] += 0.18 * positive_scale
             if competition in {"low"}:
-                weights["accept"] += 0.04 * positive_scale
+                weights["accept"] += 0.14 * positive_scale
             if penalty > 0 and agent.current_opinion == "accept":
                 agent.confidence = max(0.2, agent.confidence - penalty)
             if demand in {"high", "strong"} and agent.current_opinion == "reject":
@@ -1233,6 +1441,23 @@ class SimulationEngine:
                 candidate = _pick_role_agent(role) if role else random.choice(agents)
                 if candidate not in selected:
                     selected.append(candidate)
+            # Ensure we don't sample only one opinion when others exist.
+            opinions_present = {a.current_opinion for a in agents}
+            selected_opinions = {a.current_opinion for a in selected}
+            missing = [op for op in opinions_present if op not in selected_opinions]
+            if missing and selected:
+                selected_counts = Counter(a.current_opinion for a in selected)
+                for op in missing:
+                    candidates = [a for a in agents if a.current_opinion == op and a not in selected]
+                    if not candidates:
+                        continue
+                    max_op = max(selected_counts, key=selected_counts.get)
+                    replace_idx = next((i for i, a in enumerate(selected) if a.current_opinion == max_op), None)
+                    if replace_idx is None:
+                        continue
+                    selected[replace_idx] = random.choice(candidates)
+                    selected_counts[max_op] = max(0, selected_counts[max_op] - 1)
+                    selected_counts[op] = selected_counts.get(op, 0) + 1
             return selected
 
         def _build_role_evidence(cards: List[str]) -> Dict[str, List[str]]:
@@ -1264,7 +1489,7 @@ class SimulationEngine:
 
         evidence_by_role = _build_role_evidence(evidence_cards)
         used_openers: set[str] = set()
-        dialogue_history: List[Dict[str, Any]] = []
+        dialogue_history: deque[Dict[str, Any]] = deque(maxlen=max_dialogue_context)
 
         def _pick_reply_target(speaker: Agent) -> Tuple[str, str, str]:
             candidates = [h for h in dialogue_history if h.get("agent_id") != speaker.agent_id]
@@ -1272,12 +1497,251 @@ class SimulationEngine:
                 diff = [c for c in candidates if c.get("opinion") != speaker.current_opinion]
                 target = diff[-1] if diff else candidates[-1]
                 return target["agent_id"], target["short_id"], target["message"]
-            others = [a for a in agents if a.agent_id != speaker.agent_id]
-            fallback = random.choice(others) if others else speaker
+            # No prior dialogue: do not force a reply-to reference on the very first message.
             fallback_msg = evidence_cards[0] if evidence_cards else (idea_text.strip() or "the idea")
             if len(fallback_msg) > 220:
                 fallback_msg = fallback_msg[:217].rstrip() + "..."
-            return fallback.agent_id, fallback.agent_id[:4], fallback_msg
+            return "", "", fallback_msg
+
+        def _init_metrics_state() -> Tuple[Dict[str, int], Dict[str, Dict[str, int]]]:
+            counts: Dict[str, int] = {"accept": 0, "reject": 0, "neutral": 0}
+            breakdown: Dict[str, Dict[str, int]] = {}
+            for agent in agents:
+                op = agent.current_opinion
+                if op not in counts:
+                    op = "neutral"
+                counts[op] += 1
+                cat = agent.category_id
+                if cat not in breakdown:
+                    breakdown[cat] = {"accept": 0, "reject": 0, "neutral": 0}
+                breakdown[cat][op] += 1
+            return counts, breakdown
+
+        metrics_counts, metrics_breakdown = _init_metrics_state()
+
+        def _apply_metrics_change(category_id: str, prev: str, new: str) -> None:
+            if prev == new:
+                return
+            if prev not in metrics_counts:
+                prev = "neutral"
+            if new not in metrics_counts:
+                new = "neutral"
+            metrics_counts[prev] = max(0, metrics_counts.get(prev, 0) - 1)
+            metrics_counts[new] = metrics_counts.get(new, 0) + 1
+            if category_id not in metrics_breakdown:
+                metrics_breakdown[category_id] = {"accept": 0, "reject": 0, "neutral": 0}
+            metrics_breakdown[category_id][prev] = max(0, metrics_breakdown[category_id].get(prev, 0) - 1)
+            metrics_breakdown[category_id][new] = metrics_breakdown[category_id].get(new, 0) + 1
+
+        def _build_metrics_payload(iteration_value: int) -> Dict[str, Any]:
+            total = len(agents)
+            accepted = metrics_counts.get("accept", 0)
+            rejected = metrics_counts.get("reject", 0)
+            neutral = metrics_counts.get("neutral", 0)
+            acceptance_rate = accepted / total if total > 0 else 0.0
+            decided = accepted + rejected
+            if decided > 0:
+                balance = 1.0 - (abs(accepted - rejected) / decided)
+                polarization = max(0.0, min(1.0, balance * (decided / total)))
+            else:
+                polarization = 0.0
+            per_category = {k: v.get("accept", 0) for k, v in metrics_breakdown.items()}
+            return {
+                "accepted": accepted,
+                "rejected": rejected,
+                "neutral": neutral,
+                "acceptance_rate": acceptance_rate,
+                "polarization": polarization,
+                "total_agents": total,
+                "per_category": per_category,
+                "iteration": iteration_value,
+                "total_iterations": total_iterations,
+            }
+
+        def _clip_text(value: str, limit: int) -> str:
+            value = re.sub(r"\s+", " ", (value or "").strip())
+            if len(value) <= limit:
+                return value
+            return value[: max(0, limit - 3)].rstrip() + "..."
+
+        def _compact_traits(traits: Dict[str, float]) -> str:
+            optimism = float(traits.get("optimism", 0.5))
+            skepticism = float(traits.get("skepticism", 0.5))
+            risk_tolerance = float(traits.get("risk_tolerance", 0.5))
+            stubbornness = float(traits.get("stubbornness", 0.4))
+            return f"optimism={optimism:.2f}, skepticism={skepticism:.2f}, risk={risk_tolerance:.2f}, stubborn={stubbornness:.2f}"
+
+        def _build_batch_prompt(batch_tasks: List[Dict[str, Any]]) -> str:
+            idea = idea_label_for_llm
+            insight = _clip_text(research_summary or research_signals or "", 220)
+            language_note = "Arabic (Egyptian slang)" if language == "ar" else "English"
+            payload = []
+            for task in batch_tasks:
+                payload.append(
+                    {
+                        "agent_id": task["agent"].agent_id,
+                        "role": task["role_label"],
+                        "traits": task["traits_summary"],
+                        "biases": task["bias_summary"],
+                        "prior_stance": task["math_opinion"],
+                        "reply_to": task.get("reply_to_short") or "",
+                        "reply_hint": task.get("reply_to_message") or "",
+                        "length": task["length_mode"],
+                        "evidence": task.get("evidence_hint") or "",
+                    }
+                )
+            return (
+                "You are generating human reasoning for a social simulation.\n"
+                "Return JSON ONLY: an array of objects with keys: agent_id, stance, confidence, message.\n"
+                "stance must be one of accept|reject|neutral. confidence is 0.0-1.0.\n"
+                "Use the MESSAGE language: "
+                + language_note
+                + ".\n"
+                "Length rules: short=1-2 sentences, max "
+                + str(short_limit)
+                + " chars. full=2-4 sentences, max "
+                + str(full_limit)
+                + " chars.\n"
+                "If reply_to is empty, do NOT mention any other agent.\n"
+                "Use prior_stance as a hint, but decide stance based on your understanding.\n\n"
+                "IDEA: "
+                + idea
+                + "\n"
+                + ("RESEARCH: " + insight + "\n" if insight else "")
+                + "TASKS JSON:\n"
+                + json.dumps(payload, ensure_ascii=False)
+            )
+
+        def _build_single_prompt(task: Dict[str, Any]) -> str:
+            idea = idea_label_for_llm
+            insight = _clip_text(research_summary or research_signals or "", 220)
+            language_note = "Arabic (Egyptian slang)" if language == "ar" else "English"
+            payload = {
+                "agent_id": task["agent"].agent_id,
+                "role": task["role_label"],
+                "traits": task["traits_summary"],
+                "biases": task["bias_summary"],
+                "prior_stance": task["math_opinion"],
+                "reply_to": task.get("reply_to_short") or "",
+                "reply_hint": task.get("reply_to_message") or "",
+                "length": task["length_mode"],
+                "evidence": task.get("evidence_hint") or "",
+            }
+            return (
+                "You are generating human reasoning for a social simulation.\n"
+                "Return JSON ONLY: {\"agent_id\": string, \"stance\": \"accept|reject|neutral\", \"confidence\": 0-1, \"message\": string}.\n"
+                "Use language: "
+                + language_note
+                + ".\n"
+                "Length rules: short=1-2 sentences, max "
+                + str(short_limit)
+                + " chars. full=2-4 sentences, max "
+                + str(full_limit)
+                + " chars.\n"
+                "If reply_to is empty, do NOT mention any other agent.\n"
+                "Use prior_stance as a hint, but decide stance based on meaning.\n\n"
+                "IDEA: "
+                + idea
+                + "\n"
+                + ("RESEARCH: " + insight + "\n" if insight else "")
+                + "TASK JSON:\n"
+                + json.dumps(payload, ensure_ascii=False)
+            )
+
+        def _normalize_stance(value: Any) -> str | None:
+            stance = str(value or "").strip().lower()
+            if stance in {"accept", "reject", "neutral"}:
+                return stance
+            return None
+
+        async def _run_batch(batch_tasks: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+            prompt = _build_batch_prompt(batch_tasks)
+            async with llm_semaphore:
+                raw = await generate_ollama(
+                    prompt=prompt,
+                    temperature=reasoning_temp,
+                    response_format="json",
+                )
+            data = json.loads((raw or "").strip())
+            if isinstance(data, dict):
+                data = data.get("items") or data.get("responses") or data.get("data") or []
+            if not isinstance(data, list):
+                raise RuntimeError("LLM batch output was not a list")
+            expected = {t["agent"].agent_id for t in batch_tasks}
+            results: Dict[str, Dict[str, Any]] = {}
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                agent_id = str(item.get("agent_id") or "").strip()
+                if not agent_id or agent_id not in expected:
+                    continue
+                stance = _normalize_stance(item.get("stance"))
+                message = str(item.get("message") or "").strip()
+                conf_val = item.get("confidence")
+                try:
+                    confidence = float(conf_val)
+                except Exception:
+                    confidence = 0.5
+                results[agent_id] = {
+                    "stance": stance,
+                    "message": message,
+                    "confidence": max(0.0, min(1.0, confidence)),
+                    "source": "llm",
+                }
+            return results
+
+        async def _run_single(task: Dict[str, Any]) -> Dict[str, Any]:
+            prompt = _build_single_prompt(task)
+            async with llm_semaphore:
+                raw = await generate_ollama(
+                    prompt=prompt,
+                    temperature=reasoning_temp,
+                    response_format="json",
+                )
+            data = json.loads((raw or "").strip())
+            stance = _normalize_stance(data.get("stance"))
+            message = str(data.get("message") or "").strip()
+            conf_val = data.get("confidence")
+            try:
+                confidence = float(conf_val)
+            except Exception:
+                confidence = 0.5
+            return {
+                "stance": stance,
+                "message": message,
+                "confidence": max(0.0, min(1.0, confidence)),
+                "source": "llm",
+            }
+
+        def _fallback_message(role_label: str, stance: str, evidence_hint: str) -> str:
+            if language == "ar":
+                if stance == "reject":
+                    base = f"كمختص {role_label}، أنا شايف الفكرة دي خطرة ومش هتنفع بالشكل ده."
+                elif stance == "accept":
+                    base = f"كمختص {role_label}، الفكرة دي ممكن تمشي لو التنفيذ مضبوط."
+                else:
+                    base = f"كمختص {role_label}، أنا محتاج توضيح أكتر قبل ما أحكم."
+                if evidence_hint:
+                    base += f" مؤشر واضح: {evidence_hint}"
+                return _clip_text(base, full_limit)
+            if stance == "reject":
+                base = f"As {role_label}, I think this is too risky to accept as-is."
+            elif stance == "accept":
+                base = f"As {role_label}, this could work if executed carefully."
+            else:
+                base = f"As {role_label}, I need more clarity before deciding."
+            if evidence_hint:
+                base += f" Signal: {evidence_hint}"
+            return _clip_text(base, full_limit)
+
+        async def _infer_stance_from_llm(text: str) -> str | None:
+            if stance_classifier is None:
+                return None
+            return await stance_classifier.classify_opinion(
+                text=text,
+                idea_label=idea_label_for_llm,
+                language=language,
+            )
 
         total_iterations = len(phase_order)
         for iteration, phase_label in enumerate(phase_order, start=1):
@@ -1298,101 +1762,173 @@ class SimulationEngine:
                         skepticism=agent.traits.get("skepticism", 0.0),
                         stubbornness=agent.stubbornness,
                         phase_intensity=phase_intensity,
+                        inertia=agent.confidence * 0.35,
                     )
                 agent.current_opinion = new_opinion
-                if changed:
-                    agent.confidence = max(0.25, agent.confidence - 0.08)
-                else:
-                    if new_opinion == "neutral":
-                        agent.confidence = max(0.2, agent.confidence - 0.03)
-                    else:
-                        agent.confidence = min(1.0, agent.confidence + 0.03)
                 opinion_changes[agent.agent_id] = (prev_opinion, new_opinion, changed)
 
-            speakers = _select_speakers(7)
-            for speaker in speakers:
-                prev_opinion, new_opinion, changed = opinion_changes[speaker.agent_id]
-                role_key, role_label, role_guidance = agent_roles[speaker.agent_id]
-                reply_to_id, reply_to_short, reply_to_msg = _pick_reply_target(speaker)
-                sliced_summary, sliced_signals = _slice_research_for_agent(speaker)
+            if reasoning_scope == "full":
+                speakers = list(agents)
+                random.shuffle(speakers)
+            else:
+                speakers = _select_speakers(7)
+            speaker_ids = {agent.agent_id for agent in speakers}
+
+            tasks: List[Dict[str, Any]] = []
+            for agent in agents:
+                prev_opinion, math_opinion, changed = opinion_changes[agent.agent_id]
+                role_key, role_label, role_guidance = agent_roles[agent.agent_id]
+                is_speaker = agent.agent_id in speaker_ids
+                if reasoning_scope == "full":
+                    length_mode = "full"
+                elif reasoning_scope == "hybrid" and is_speaker:
+                    length_mode = "full"
+                else:
+                    length_mode = reasoning_detail
+                emit_message = reasoning_scope != "speakers_only" or is_speaker
+                reply_to_id = ""
+                reply_to_short = ""
+                reply_to_msg = ""
+                if length_mode == "full":
+                    reply_to_id, reply_to_short, reply_to_msg = _pick_reply_target(agent)
                 evidence_pool = evidence_by_role.get(role_key) or evidence_cards
-                explanation = await self._llm_reasoning(
-                    agent=speaker,
-                    prev_opinion=prev_opinion,
-                    new_opinion=new_opinion,
-                    influence_weights=influences[speaker.agent_id],
-                    changed=changed,
-                    research_summary=sliced_summary,
-                    research_signals=sliced_signals,
-                    language=language,
-                    idea_label=idea_label_for_llm,
-                    reply_to_agent_id=reply_to_id,
-                    reply_to_short_id=reply_to_short,
-                    reply_to_message=reply_to_msg,
-                    phase_label=phase_label,
-                    evidence_cards=evidence_pool,
-                    role_label=role_label,
-                    role_guidance=role_guidance,
-                    constraints_summary=_constraints_summary(),
-                    recent_phrases=recent_messages,
-                    avoid_openers=list(used_openers),
-                )
-                if not explanation:
-                    continue
-
-                opener = " ".join(explanation.split()[:4]).lower()
-                if opener:
-                    used_openers.add(opener)
-                recent_messages.append(explanation)
-                if len(recent_messages) > 200:
-                    del recent_messages[:-200]
-
-                speaker.record_reasoning_step(
-                    iteration=iteration,
-                    message=explanation,
-                    triggered_by="phase_dialogue",
-                    phase=phase_label,
-                    reply_to_agent_id=reply_to_id,
-                    opinion_change={"from": prev_opinion, "to": new_opinion} if changed else None,
-                )
-                await emitter(
-                    "reasoning_step",
+                evidence_hint = _clip_text(str(evidence_pool[0]), 120) if evidence_pool else ""
+                tasks.append(
                     {
-                        "agent_id": speaker.agent_id,
-                        "agent_short_id": speaker.agent_id[:4],
-                        "archetype": role_label,
-                        "iteration": iteration,
-                        "phase": phase_label,
-                        "reply_to_agent_id": reply_to_id,
-                        "message": explanation,
-                        "opinion": speaker.current_opinion,
-                    },
-                )
-                dialogue_history.append(
-                    {
-                        "agent_id": speaker.agent_id,
-                        "short_id": speaker.agent_id[:4],
-                        "message": explanation,
-                        "opinion": speaker.current_opinion,
+                        "agent": agent,
+                        "prev_opinion": prev_opinion,
+                        "math_opinion": math_opinion,
+                        "changed": changed,
+                        "role_label": role_label,
+                        "role_guidance": role_guidance,
+                        "traits_summary": _compact_traits(agent.traits),
+                        "bias_summary": ", ".join(agent.biases[:2]) if agent.biases else "none",
+                        "reply_to_id": reply_to_id,
+                        "reply_to_short": reply_to_short,
+                        "reply_to_message": reply_to_msg,
+                        "length_mode": length_mode,
+                        "emit_message": emit_message,
+                        "evidence_hint": evidence_hint,
                     }
                 )
-                await asyncio.sleep(0.2 / speed)
 
-            metrics = compute_metrics(agents)
-            await emitter(
-                "metrics",
-                {
-                    "accepted": metrics["accepted"],
-                    "rejected": metrics["rejected"],
-                    "neutral": metrics["neutral"],
-                    "acceptance_rate": metrics["acceptance_rate"],
-                    "polarization": metrics.get("polarization", 0.0),
-                    "total_agents": metrics["total_agents"],
-                    "per_category": metrics["per_category"],
-                    "iteration": iteration,
-                    "total_iterations": total_iterations,
-                },
-            )
+            batches = [tasks[i : i + llm_batch_size] for i in range(0, len(tasks), llm_batch_size)]
+
+            for batch in batches:
+                results: Dict[str, Dict[str, Any]] = {}
+                try:
+                    results = await _run_batch(batch)
+                except Exception:
+                    results = {}
+
+                # Fill missing with single calls
+                for task in batch:
+                    agent_id = task["agent"].agent_id
+                    if agent_id in results:
+                        continue
+                    try:
+                        results[agent_id] = await _run_single(task)
+                    except Exception:
+                        results[agent_id] = {"stance": None, "message": "", "confidence": 0.0, "source": "fallback"}
+
+                # Process results for the batch
+                for task in batch:
+                    agent = task["agent"]
+                    prev_opinion = task["prev_opinion"]
+                    role_label = task["role_label"]
+                    length_mode = task["length_mode"]
+                    emit_message = task["emit_message"]
+                    reply_to_id = task["reply_to_id"]
+                    result = results.get(agent.agent_id, {})
+                    stance = _normalize_stance(result.get("stance"))
+                    message = str(result.get("message") or "").strip()
+                    try:
+                        confidence = float(result.get("confidence") or 0.0)
+                    except Exception:
+                        confidence = 0.0
+                    confidence = max(0.0, min(1.0, confidence))
+                    opinion_source = result.get("source", "llm")
+
+                    if not stance and message:
+                        inferred = await _infer_stance_from_llm(message)
+                        stance = inferred or task["math_opinion"]
+                        if inferred:
+                            opinion_source = "llm"
+                    if not stance:
+                        stance = task["math_opinion"]
+                    if not message:
+                        message = _fallback_message(role_label, stance, task.get("evidence_hint") or "")
+                        opinion_source = "fallback"
+
+                    limit = full_limit if length_mode == "full" else short_limit
+                    message = _clip_text(message, limit)
+
+                    # Optional sampling validator (no rejection by default)
+                    if validator_sample_rate > 0 and stance_classifier is not None:
+                        if random.random() < validator_sample_rate:
+                            try:
+                                res = await stance_classifier.validate(message, role_label, list(recent_messages))
+                                if not res.ok:
+                                    opinion_source = "fallback"
+                            except Exception:
+                                pass
+
+                    agent.current_opinion = stance
+                    changed = prev_opinion != stance
+                    if changed:
+                        agent.confidence = max(0.25, agent.confidence - 0.08)
+                    else:
+                        if stance == "neutral":
+                            agent.confidence = max(0.2, agent.confidence - 0.03)
+                        else:
+                            agent.confidence = min(1.0, agent.confidence + 0.03)
+
+                    opinion_changes[agent.agent_id] = (prev_opinion, stance, changed)
+                    _apply_metrics_change(agent.category_id, prev_opinion, stance)
+
+                    if message:
+                        _push_recent(message)
+
+                    if emit_message:
+                        agent.record_reasoning_step(
+                            iteration=iteration,
+                            message=message,
+                            triggered_by="phase_dialogue",
+                            phase=phase_label,
+                            reply_to_agent_id=reply_to_id or None,
+                            opinion_change={"from": prev_opinion, "to": stance} if changed else None,
+                        )
+                        await emitter(
+                            "reasoning_step",
+                            {
+                                "agent_id": agent.agent_id,
+                                "agent_short_id": agent.agent_id[:4],
+                                "archetype": role_label,
+                                "iteration": iteration,
+                                "phase": phase_label,
+                                "reply_to_agent_id": reply_to_id or None,
+                                "message": message,
+                                "opinion": stance,
+                                "opinion_source": opinion_source,
+                                "stance_confidence": confidence,
+                                "reasoning_length": length_mode,
+                            },
+                        )
+                        if length_mode == "full":
+                            dialogue_history.append(
+                                {
+                                    "agent_id": agent.agent_id,
+                                    "short_id": agent.agent_id[:4],
+                                    "message": message,
+                                    "opinion": stance,
+                                }
+                            )
+
+                await emitter("metrics", _build_metrics_payload(iteration))
+                if step_delay > 0:
+                    await asyncio.sleep(step_delay / speed)
+
+            await emitter("metrics", _build_metrics_payload(iteration))
             await emitter(
                 "agents",
                 {
@@ -1401,7 +1937,8 @@ class SimulationEngine:
                     "agents": [_agent_snapshot(agent) for agent in agents],
                 },
             )
-            await asyncio.sleep(0.2 / speed)
+            if step_delay > 0:
+                await asyncio.sleep(step_delay / speed)
 
         # After all iterations, compute final metrics
         final_metrics = compute_metrics(agents)

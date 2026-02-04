@@ -24,6 +24,8 @@ interface ChatPanelProps {
   messages: ChatMessage[];
   /** stream of reasoning messages from the agents */
   reasoningFeed: ReasoningMessage[];
+  /** real-time debug rejections from LLM reasoning */
+  reasoningDebug?: { id: string; agentShortId?: string; reason: string; stage?: string; attempt?: number; phase?: string; timestamp: number }[];
   /** send a new chat message */
   onSendMessage: (msg: string) => void;
   /** user selected an option in a poll / multi‑select */
@@ -192,6 +194,7 @@ function InlineDisclosure({
 export function ChatPanel({
   messages,
   reasoningFeed,
+  reasoningDebug = [],
   onSendMessage,
   onSelectOption,
   isWaitingForCity = false,
@@ -226,9 +229,26 @@ export function ChatPanel({
   const [thinkingOpen, setThinkingOpen] = useState(false);
   const [isNearBottom, setIsNearBottom] = useState(true);
   const [thinkingStepIndex, setThinkingStepIndex] = useState(0);
+  const [showDebug, setShowDebug] = useState(false);
 
   const isSearchTimeout = searchState?.status === 'timeout';
   const isActionMode = showRetry || isSearchTimeout;
+  const isSimulationDone =
+    simulationStatus === 'completed' ||
+    simulationStatus === 'error' ||
+    simulationStatus === 'finished';
+  const hasInsights =
+    Boolean(insights?.summary) ||
+    Boolean(insights?.idea) ||
+    Boolean(insights?.category) ||
+    Boolean(insights?.audience?.length) ||
+    Boolean(insights?.goals?.length) ||
+    Boolean(insights?.maturity) ||
+    typeof insights?.risk === 'number' ||
+    Boolean(research?.summary) ||
+    Boolean(research?.signals?.length);
+  const reasoningUnavailable = reasoningFeed.length === 0 && !reasoningActive && isSimulationDone;
+  const canOpenReasoning = reasoningFeed.length > 0 || reasoningActive;
 
   const [searchActionsOpen, setSearchActionsOpen] = useState(false);
   const [actionsClosing, setActionsClosing] = useState(false);
@@ -243,6 +263,12 @@ export function ChatPanel({
       setActiveTab('reasoning');
     }
   }, [reasoningActive]);
+
+  useEffect(() => {
+    if (activeTab === 'reasoning' && reasoningUnavailable) {
+      setActiveTab(hasInsights ? 'insights' : 'chat');
+    }
+  }, [activeTab, reasoningUnavailable, hasInsights]);
 
   // Keep scroll locked to bottom when we are near the bottom
   useEffect(() => {
@@ -444,19 +470,24 @@ export function ChatPanel({
 
         {/* Reasoning */}
         <button
-          onClick={() => setActiveTab('reasoning')}
+          onClick={() => {
+            if (!canOpenReasoning) return;
+            setActiveTab('reasoning');
+          }}
           className={cn(
             'flex-1 px-3 py-3 text-sm font-medium transition-all relative',
             activeTab === 'reasoning'
               ? 'text-primary'
-              : 'text-muted-foreground hover:text-foreground'
+              : 'text-muted-foreground hover:text-foreground',
+            !canOpenReasoning && 'opacity-50 cursor-not-allowed'
           )}
+          disabled={!canOpenReasoning}
           data-testid="tab-reasoning"
         >
           <span className="flex items-center justify-center gap-2">
             <Bot className="w-4 h-4" />
             {settings.language === 'ar' ? 'تفكير الوكلاء' : 'Agent Reasoning'}
-            {reasoningFeed.length > 0 && (
+            {(reasoningFeed.length > 0 || reasoningActive) && (
               <span className="w-2 h-2 rounded-full bg-primary animate-pulse" />
             )}
           </span>
@@ -490,7 +521,7 @@ export function ChatPanel({
       <div
         // **IMPORTANT change** – added bottom padding (pb‑24) so the last message
         // never gets hidden behind the pop‑over that appears on timeout.
-        className="messages-container scrollbar-thin pb-24"
+        className="messages-container scrollbar-thin pb-6"
         ref={scrollRef}
         data-testid={activeTab === 'chat' ? 'chat-messages' : 'reasoning-messages'}
         onScroll={() => {
@@ -594,27 +625,60 @@ export function ChatPanel({
         ) : activeTab === 'reasoning' ? (
           /* -------------------- REASONING TAB -------------------- */
           <div className="space-y-3">
-            {reasoningFeed.length === 0 ? (
-              <div className="text-center py-8">
-                <Bot className="w-10 h-10 mx-auto text-muted-foreground/25 mb-3" />
-                <p className="text-sm text-muted-foreground">
-                  {simulationError ? (
-                    settings.language === 'ar'
-                      ? `خطأ في المحاكاة: ${simulationError}`
-                      : `Simulation error: ${simulationError}`
-                  ) : settings.language === 'ar' ? (
-                    simulationStatus === 'completed' || simulationStatus === 'error' ? (
-                      'لم يتم توليد أي تفكير للوكلاء (قد يكون الـ LLM غير متاح أو تم رفض كل الردود).'
-                    ) : (
-                      'تفكير الوكلاء سيظهر هنا أثناء المحاكاة'
-                    )
-                  ) : simulationStatus === 'completed' || simulationStatus === 'error' ? (
-                    'No agent reasoning was generated (LLM unavailable or all outputs rejected).'
-                  ) : (
-                    'Agent reasoning will appear here during simulation'
-                  )}
-                </p>
+            {reasoningDebug.length > 0 && (
+              <div className="rounded-lg border border-amber-400/20 bg-amber-400/5 px-3 py-2">
+                <div className="flex items-center justify-between text-xs text-amber-200">
+                  <span>
+                    {settings.language === 'ar' ? 'سجل الرفض (Debug)' : 'Rejection Debug Log'}
+                  </span>
+                  <button
+                    type="button"
+                    className="text-amber-200/80 hover:text-amber-100"
+                    onClick={() => setShowDebug((p) => !p)}
+                  >
+                    {showDebug
+                      ? settings.language === 'ar'
+                        ? 'إخفاء'
+                        : 'Hide'
+                      : settings.language === 'ar'
+                      ? 'عرض'
+                      : 'Show'}
+                  </button>
+                </div>
+                {showDebug && (
+                  <div className="mt-2 max-h-40 overflow-y-auto text-xs text-amber-100/90 space-y-1">
+                    {reasoningDebug.slice(-50).map((item) => (
+                      <div key={item.id} className="flex flex-wrap gap-2">
+                        <span className="font-mono text-amber-200/80">{item.agentShortId}</span>
+                        {item.phase && <span className="text-amber-200/60">{item.phase}</span>}
+                        {typeof item.attempt === 'number' && (
+                          <span className="text-amber-200/60">#{item.attempt}</span>
+                        )}
+                        {item.stage && <span className="text-amber-200/60">{item.stage}</span>}
+                        <span className="text-amber-100">{item.reason}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
+            )}
+            {reasoningFeed.length === 0 ? (
+              reasoningUnavailable ? null : (
+                <div className="text-center py-4">
+                  <Bot className="w-8 h-8 mx-auto text-muted-foreground/25 mb-2" />
+                  <p className="text-sm text-muted-foreground">
+                    {simulationError ? (
+                      settings.language === 'ar'
+                        ? `خطأ في المحاكاة: ${simulationError}`
+                        : `Simulation error: ${simulationError}`
+                    ) : settings.language === 'ar' ? (
+                      'تفكير الوكلاء سيظهر هنا أثناء المحاكاة'
+                    ) : (
+                      'Agent reasoning will appear here during simulation'
+                    )}
+                  </p>
+                </div>
+              )
             ) : (
               phaseGroups.map((group) => (
                 <div key={group.phase} className="space-y-3">
@@ -624,16 +688,44 @@ export function ChatPanel({
                   {group.items.map((msg) => {
                     const idx = reasoningIndex.get(msg.id) ?? 0;
                     const side = idx % 2 === 0 ? 'user' : 'bot';
+                    const opinion = msg.opinion ?? 'neutral';
                     const tone =
-                      msg.opinion === 'accept'
+                      opinion === 'accept'
                         ? 'text-success'
-                        : msg.opinion === 'reject'
+                        : opinion === 'reject'
                         ? 'text-destructive'
                         : 'text-primary';
+                    const statusLabel =
+                      opinion === 'accept'
+                        ? settings.language === 'ar'
+                          ? 'موافق'
+                          : 'Agreed'
+                        : opinion === 'reject'
+                        ? settings.language === 'ar'
+                          ? 'مرفوض'
+                          : 'Rejected'
+                        : settings.language === 'ar'
+                        ? 'محايد'
+                        : 'Neutral';
+                    const statusBadge =
+                      opinion === 'accept'
+                        ? 'bg-success/15 text-success border-success/30'
+                        : opinion === 'reject'
+                        ? 'bg-destructive/15 text-destructive border-destructive/30'
+                        : 'bg-primary/10 text-primary border-primary/20';
                     const bubbleBg = side === 'user' ? 'bg-secondary' : 'bg-card';
                     const shortId = msg.agentShortId ?? msg.agentId.slice(0, 4);
                     const replyShort =
                       msg.replyToShortId ?? (msg.replyToAgentId ? msg.replyToAgentId.slice(0, 4) : undefined);
+                    const opinionSource = msg.opinionSource ?? 'default';
+                    const sourceLabel =
+                      opinionSource === 'llm'
+                        ? settings.language === 'ar'
+                          ? 'تصنيف LLM'
+                          : 'LLM'
+                        : settings.language === 'ar'
+                        ? 'افتراضي'
+                        : 'Default';
 
                     return (
                       <div
@@ -662,6 +754,12 @@ export function ChatPanel({
                             <span className="text-xs text-muted-foreground">
                               Iter {msg.iteration}
                             </span>
+                            <span className={cn('text-[11px] px-2 py-0.5 rounded-full border', statusBadge)}>
+                              {statusLabel}
+                            </span>
+                            <span className="text-[11px] text-muted-foreground">
+                              {sourceLabel}
+                            </span>
                             {replyShort && (
                               <span className="text-[11px] text-muted-foreground">
                                 ? {replyShort}
@@ -672,7 +770,14 @@ export function ChatPanel({
                           <ReadMoreText
                             text={msg.message}
                             collapsedLines={7}
-                            className="text-sm text-foreground/90"
+                            className={cn(
+                              'text-sm',
+                              opinion === 'accept'
+                                ? 'text-success'
+                                : opinion === 'reject'
+                                ? 'text-destructive'
+                                : 'text-foreground/90'
+                            )}
                           />
                         </div>
                       </div>

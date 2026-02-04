@@ -14,7 +14,7 @@ import asyncio
 import os
 from datetime import datetime
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 from fastapi import APIRouter, HTTPException, status, Header
 
@@ -230,11 +230,19 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
             daily_limit = int(os.getenv("DAILY_LIMIT", "5") or 5)
         except ValueError:
             daily_limit = 5
-        if daily_limit > 0 and usage >= daily_limit:
-            # Try to consume a credit
+        credits = int((user or {}).get("credits") or 0)
+        if daily_limit <= 0:
+            # Credits required for every run when daily limit is disabled
+            if credits <= 0:
+                raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Credits exhausted")
+            await auth_core.consume_simulation_credit(user_id)
+        elif usage >= daily_limit:
+            # Try to consume a credit once daily limit is reached
+            if credits <= 0:
+                raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Credits exhausted")
             credit_used = await auth_core.consume_simulation_credit(user_id)
             if not credit_used:
-                raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Daily simulation limit reached")
+                raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Credits exhausted")
         # Increment daily usage counter
         await auth_core.increment_daily_usage(user_id)
     # Generate a unique ID for this simulation
@@ -249,9 +257,16 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
     await db_core.insert_simulation(simulation_id, user_context, status="running")
     # Create a simulation engine instance
     engine = SimulationEngine(dataset=dataset)
+    reasoning_buffer: List[Dict[str, Any]] = []
+    buffer_iteration: int | None = None
+    try:
+        reasoning_batch_size = int(os.getenv("REASONING_DB_BATCH_SIZE", "50") or 50)
+    except ValueError:
+        reasoning_batch_size = 50
 
     async def emitter(event_type: str, data: Dict[str, Any]) -> None:
         """Broadcast events and store a snapshot for polling."""
+        nonlocal reasoning_buffer, buffer_iteration
         payload = {"type": event_type, "simulation_id": simulation_id, **data}
         # Broadcast to all connected WebSocket clients
         await manager.broadcast_json(payload)
@@ -261,7 +276,19 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
             if event_type == "agents" and data.get("iteration") == 0:
                 await db_core.insert_agents(simulation_id, data.get("agents") or [])
             elif event_type == "reasoning_step":
-                await db_core.insert_reasoning_step(simulation_id, data)
+                reasoning_buffer.append(data)
+                current_iteration = data.get("iteration")
+                if buffer_iteration is None:
+                    buffer_iteration = current_iteration
+                flush_due = False
+                if current_iteration != buffer_iteration:
+                    flush_due = True
+                if reasoning_batch_size > 0 and len(reasoning_buffer) >= reasoning_batch_size:
+                    flush_due = True
+                if flush_due and reasoning_buffer:
+                    await db_core.insert_reasoning_steps_bulk(simulation_id, reasoning_buffer)
+                    reasoning_buffer = []
+                    buffer_iteration = current_iteration
             elif event_type == "metrics":
                 await db_core.insert_metrics(simulation_id, data)
         except Exception:
@@ -270,6 +297,7 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
 
     # Define a coroutine that runs the simulation and stores results
     async def run_and_store() -> None:
+        nonlocal reasoning_buffer
         try:
             result = await engine.run_simulation(user_context=user_context, emitter=emitter)
             _simulation_results[simulation_id] = result
@@ -290,12 +318,24 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
             )
             # Broadcast summary explicitly for clients that listen on WS.
             await manager.broadcast_json({"type": "summary", "simulation_id": simulation_id, "summary": summary})
+            if reasoning_buffer:
+                try:
+                    await db_core.insert_reasoning_steps_bulk(simulation_id, reasoning_buffer)
+                except Exception:
+                    pass
+                reasoning_buffer = []
         except Exception as exc:  # noqa: BLE001
             _simulation_state.setdefault(simulation_id, {})["error"] = str(exc)
             try:
                 await db_core.update_simulation(simulation_id=simulation_id, status="error")
             except Exception:
                 pass
+            if reasoning_buffer:
+                try:
+                    await db_core.insert_reasoning_steps_bulk(simulation_id, reasoning_buffer)
+                except Exception:
+                    pass
+                reasoning_buffer = []
     # Launch simulation in background
     task = asyncio.create_task(run_and_store())
     _simulation_tasks[simulation_id] = task

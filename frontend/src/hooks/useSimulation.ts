@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useReducer, useRef } from 'react';
-import { websocketService, WebSocketEvent, MetricsEvent, ReasoningStepEvent, AgentsEvent } from '@/services/websocket';
+import { websocketService, WebSocketEvent, MetricsEvent, ReasoningStepEvent, ReasoningDebugEvent, AgentsEvent } from '@/services/websocket';
 import { apiService, SimulationConfig, SimulationStateResponse } from '@/services/api';
-import { Agent, ReasoningMessage, SimulationMetrics, SimulationStatus } from '@/types/simulation';
+import { Agent, ReasoningMessage, ReasoningDebug, SimulationMetrics, SimulationStatus } from '@/types/simulation';
 
 interface SimulationState {
   status: SimulationStatus;
@@ -9,6 +9,7 @@ interface SimulationState {
   agents: Map<string, Agent>;
   metrics: SimulationMetrics;
   reasoningFeed: ReasoningMessage[];
+  reasoningDebug: ReasoningDebug[];
   summary: string | null;
   activePulses: { from: string; to: string; active: boolean; pulseProgress: number }[];
 }
@@ -20,6 +21,7 @@ type SimulationAction =
   | { type: 'UPDATE_AGENTS'; payload: AgentsEvent }
   | { type: 'SET_REASONING'; payload: ReasoningMessage[] }
   | { type: 'ADD_REASONING'; payload: ReasoningStepEvent }
+  | { type: 'ADD_REASONING_DEBUG'; payload: ReasoningDebugEvent }
   | { type: 'SET_SUMMARY'; payload: string | null }
   | { type: 'SET_PULSES'; payload: { from: string; to: string; active: boolean; pulseProgress: number }[] }
   | { type: 'ADD_PULSES'; payload: { from: string; to: string; active: boolean; pulseProgress: number }[] }
@@ -43,6 +45,7 @@ const initialState: SimulationState = {
   agents: new Map(),
   metrics: initialMetrics,
   reasoningFeed: [],
+  reasoningDebug: [],
   summary: null,
   activePulses: [],
 };
@@ -165,13 +168,19 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
         replyToAgentId: event.reply_to_agent_id,
         replyToShortId: event.reply_to_agent_id ? event.reply_to_agent_id.slice(0, 4) : undefined,
         opinion: event.opinion,
+        opinionSource: event.opinion_source,
+        stanceConfidence: event.stance_confidence,
+        reasoningLength: event.reasoning_length,
       };
       const nextAgents = new Map(state.agents);
       const existing = nextAgents.get(event.agent_id);
       if (existing) {
+        const nextStatus = event.opinion
+          ? mapOpinionToStatus(event.opinion)
+          : 'reasoning';
         nextAgents.set(event.agent_id, {
           ...existing,
-          status: 'reasoning',
+          status: nextStatus,
           lastUpdate: ts,
         });
       }
@@ -187,6 +196,25 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
         agents: nextAgents,
         reasoningFeed: [...state.reasoningFeed.slice(-99), newMessage],
         activePulses: [...state.activePulses, ...newPulses],
+      };
+    }
+
+    case 'ADD_REASONING_DEBUG': {
+      const event = action.payload;
+      const ts = event.timestamp ?? Date.now();
+      const debugItem: ReasoningDebug = {
+        id: `${event.agent_id}-${ts}-${event.attempt ?? 'x'}`,
+        agentId: event.agent_id,
+        agentShortId: event.agent_short_id ?? event.agent_id.slice(0, 4),
+        phase: event.phase,
+        attempt: event.attempt,
+        stage: event.stage,
+        reason: event.reason,
+        timestamp: ts,
+      };
+      return {
+        ...state,
+        reasoningDebug: [...state.reasoningDebug.slice(-199), debugItem],
       };
     }
 
@@ -289,6 +317,9 @@ export function useSimulation() {
           },
         });
         break;
+      case 'reasoning_debug':
+        dispatch({ type: 'ADD_REASONING_DEBUG', payload: event });
+        break;
       case 'agents':
         if (shouldSkipInitial(event.iteration)) return;
         dispatch({ type: 'UPDATE_AGENTS', payload: event });
@@ -382,6 +413,9 @@ export function useSimulation() {
             replyToAgentId: step.reply_to_agent_id,
             replyToShortId: step.reply_to_agent_id ? step.reply_to_agent_id.slice(0, 4) : undefined,
             opinion: step.opinion,
+            opinionSource: step.opinion_source as ReasoningMessage['opinionSource'],
+            stanceConfidence: step.stance_confidence,
+            reasoningLength: step.reasoning_length,
           }));
           if (carryOverRef.current.active) {
             dispatch({ type: 'SET_REASONING', payload: [...stateRef.current.reasoningFeed, ...reasoningMessages] });
@@ -462,6 +496,9 @@ export function useSimulation() {
             replyToAgentId: step.reply_to_agent_id,
             replyToShortId: step.reply_to_agent_id ? step.reply_to_agent_id.slice(0, 4) : undefined,
             opinion: step.opinion,
+            opinionSource: step.opinion_source as ReasoningMessage['opinionSource'],
+            stanceConfidence: step.stance_confidence,
+            reasoningLength: step.reasoning_length,
           }));
             if (carryOverRef.current.active) {
               dispatch({ type: 'SET_REASONING', payload: [...stateRef.current.reasoningFeed, ...reasoningMessages] });
@@ -565,6 +602,10 @@ export function useSimulation() {
               phase: step.phase,
               replyToAgentId: step.reply_to_agent_id,
               replyToShortId: step.reply_to_agent_id ? step.reply_to_agent_id.slice(0, 4) : undefined,
+              opinion: step.opinion,
+              opinionSource: step.opinion_source as ReasoningMessage['opinionSource'],
+              stanceConfidence: step.stance_confidence,
+              reasoningLength: step.reasoning_length,
             }));
             if (carryOverRef.current.active) {
               dispatch({ type: 'SET_REASONING', payload: [...stateRef.current.reasoningFeed, ...reasoningMessages] });

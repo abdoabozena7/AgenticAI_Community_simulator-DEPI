@@ -26,7 +26,12 @@ const LoginPage = () => {
       } else {
         await apiService.login(username.trim(), password);
       }
-      navigate('/landing', { replace: true });
+      const me = await apiService.getMe();
+      if (me?.role === 'admin') {
+        navigate('/control-center', { replace: true });
+      } else {
+        navigate('/dashboard', { replace: true });
+      }
     } catch (err: any) {
       setError(err.message || 'Authentication failed');
     } finally {

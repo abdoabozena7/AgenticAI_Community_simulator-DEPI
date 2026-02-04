@@ -66,11 +66,18 @@ const templates = [
   },
 ];
 
-const LandingPage = () => {
+const DashboardPage = () => {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState<UserMe | null>(null);
-  const [quickIdea, setQuickIdea] = useState("");
+  const [quickIdea, setQuickIdea] = useState(() => {
+    if (typeof window === "undefined") return "";
+    try {
+      return window.localStorage.getItem("dashboardIdea") || "";
+    } catch {
+      return "";
+    }
+  });
   const [showIdeaActions, setShowIdeaActions] = useState(false);
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [promo, setPromo] = useState("");
@@ -174,6 +181,18 @@ const LandingPage = () => {
     }
   }, [quickIdea]);
 
+  useEffect(() => {
+    try {
+      if (quickIdea.trim()) {
+        window.localStorage.setItem("dashboardIdea", quickIdea);
+      } else {
+        window.localStorage.removeItem("dashboardIdea");
+      }
+    } catch {
+      // ignore
+    }
+  }, [quickIdea]);
+
   const userInitial = useMemo(() => {
     if (!user?.username) return "U";
     return user.username.slice(0, 1).toUpperCase();
@@ -223,6 +242,12 @@ const LandingPage = () => {
     const text = (idea || quickIdea).trim();
     if (text) {
       localStorage.setItem("pendingIdea", text);
+      localStorage.setItem("pendingAutoStart", "true");
+      try {
+        localStorage.setItem("dashboardIdea", text);
+      } catch {
+        // ignore
+      }
     }
     navigate("/simulate");
   };
@@ -445,7 +470,7 @@ const LandingPage = () => {
             </div>
 
             <h1 className="mt-6 text-center text-4xl font-semibold text-white md:text-5xl">
-              {t(`Lets build something, ${displayName}`, `بتفكر ف ايه؟ `)}
+              {t(`Lets build something, ${displayName}`, `بتفكر ف ايه ؟ `)}
             </h1>
 
             <div className="mt-8 flex justify-center">
@@ -632,4 +657,4 @@ const LandingPage = () => {
   );
 };
 
-export default LandingPage;
+export default DashboardPage;

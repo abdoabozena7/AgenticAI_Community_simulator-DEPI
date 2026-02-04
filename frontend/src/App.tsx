@@ -12,18 +12,32 @@ import NotFound from "./pages/NotFound";
 // and landing flows, research interface, idea court feature and admin
 // dashboard.  If the application is extended you can enrich these
 // components further.
-import LoginPage from "./pages/LoginPage";
-import LandingPage from "./pages/LandingPage";
+import DashboardPage from "./pages/DashboardPage";
+import MarketingLandingPage from "./pages/MarketingLandingPage";
 import AgentResearchScreen from "./pages/AgentResearchScreen";
 import IdeaCourtPage from "./pages/IdeaCourtPage";
 import AdminDashboard from "./pages/AdminDashboard";
+import BonusPage from "./pages/BonusPage";
+import SettingsPage from "./pages/SettingsPage";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { apiService, getAuthToken } from "@/services/api";
 
 const queryClient = new QueryClient();
 
+const applyLanguageSettings = (language?: string | null) => {
+  if (typeof document === 'undefined') return;
+  const lang = language === 'ar' ? 'ar' : language === 'en' ? 'en' : null;
+  if (!lang) return;
+  const root = document.documentElement;
+  root.lang = lang;
+  root.dir = lang === 'ar' ? 'rtl' : 'ltr';
+  root.classList.toggle('rtl', lang === 'ar');
+  root.classList.toggle('lang-ar', lang === 'ar');
+};
+
 const useAuthStatus = () => {
   const [status, setStatus] = useState<'checking' | 'authed' | 'guest'>('checking');
+  const [role, setRole] = useState<string | null>(null);
   const token = getAuthToken();
 
   useEffect(() => {
@@ -38,11 +52,16 @@ const useAuthStatus = () => {
 
     apiService
       .getMe({ signal: controller.signal })
-      .then(() => {
-        if (active) setStatus('authed');
+      .then((me) => {
+        if (!active) return;
+        setRole(me?.role || null);
+        setStatus('authed');
       })
       .catch(() => {
-        if (active) setStatus('guest');
+        if (active) {
+          setRole(null);
+          setStatus('guest');
+        }
       })
       .finally(() => {
         window.clearTimeout(timer);
@@ -55,7 +74,7 @@ const useAuthStatus = () => {
     };
   }, [token]);
 
-  return status;
+  return { status, role };
 };
 
 const AuthLoading = () => (
@@ -63,16 +82,26 @@ const AuthLoading = () => (
 );
 
 const RequireAuth = ({ children }: { children: JSX.Element }) => {
-  const status = useAuthStatus();
+  const { status } = useAuthStatus();
   if (status === 'checking') return <AuthLoading />;
-  if (status === 'guest') return <Navigate to="/login" replace />;
+  if (status === 'guest') return <Navigate to="/?auth=login" replace />;
   return children;
 };
 
 const PublicOnly = ({ children }: { children: JSX.Element }) => {
-  const status = useAuthStatus();
+  const { status, role } = useAuthStatus();
   if (status === 'checking') return <AuthLoading />;
-  if (status === 'authed') return <Navigate to="/landing" replace />;
+  if (status === 'authed') {
+    return <Navigate to={role === 'admin' ? "/control-center" : "/dashboard"} replace />;
+  }
+  return children;
+};
+
+const RequireAdmin = ({ children }: { children: JSX.Element }) => {
+  const { status, role } = useAuthStatus();
+  if (status === 'checking') return <AuthLoading />;
+  if (status === 'guest') return <Navigate to="/?auth=login" replace />;
+  if (role !== 'admin') return <Navigate to="/dashboard" replace />;
   return children;
 };
 
@@ -84,31 +113,64 @@ const App = () => (
         <Sonner />
         <ErrorBoundary>
           <BrowserRouter>
-            <Routes>
-              {/* Root route retains the original Index page for running simulations */}
+            <AppShell />
+          </BrowserRouter>
+        </ErrorBoundary>
+      </TooltipProvider>
+    </ThemeProvider>
+  </QueryClientProvider>
+);
+
+const AppShell = () => {
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const saved = window.localStorage.getItem('appSettings');
+      if (!saved) return;
+      const parsed = JSON.parse(saved);
+      applyLanguageSettings(parsed?.language);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  return (
+    <Routes>
+              {/* Public marketing landing page */}
               <Route
                 path="/"
+                element={
+                  <PublicOnly>
+                    <MarketingLandingPage />
+                  </PublicOnly>
+                }
+              />
+              {/* Simulation workspace */}
+              <Route
+                path="/simulate"
                 element={
                   <RequireAuth>
                     <Index />
                   </RequireAuth>
                 }
               />
-              {/* Landing page shown after login and on refresh when a token is present */}
+              {/* Dashboard shown after login and on refresh when a token is present */}
               <Route
-                path="/landing"
+                path="/dashboard"
                 element={
                   <RequireAuth>
-                    <LandingPage />
+                    <DashboardPage />
                   </RequireAuth>
                 }
               />
+              {/* Backwards-compatible redirect */}
+              <Route path="/landing" element={<Navigate to="/" replace />} />
               {/* Login and registration */}
               <Route
                 path="/login"
                 element={
                   <PublicOnly>
-                    <LoginPage />
+                    <Navigate to="/?auth=login" replace />
                   </PublicOnly>
                 }
               />
@@ -130,15 +192,33 @@ const App = () => (
                   </RequireAuth>
                 }
               />
-              {/* Administrative interface */}
-              <Route
-                path="/admin"
-                element={
-                  <RequireAuth>
-                    <AdminDashboard />
-                  </RequireAuth>
-                }
-              />
+      {/* Administrative interface */}
+      <Route
+        path="/control-center"
+        element={
+          <RequireAdmin>
+            <AdminDashboard />
+          </RequireAdmin>
+        }
+      />
+      <Route path="/admin" element={<Navigate to="/control-center" replace />} />
+      {/* Bonus credits (coming soon) */}
+      <Route
+        path="/bonus"
+        element={
+          <RequireAuth>
+            <BonusPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/settings"
+        element={
+          <RequireAuth>
+            <SettingsPage />
+          </RequireAuth>
+        }
+      />
               {/* Catch-all route for unknown paths */}
               <Route
                 path="*"
@@ -148,12 +228,8 @@ const App = () => (
                   </RequireAuth>
                 }
               />
-            </Routes>
-          </BrowserRouter>
-        </ErrorBoundary>
-      </TooltipProvider>
-    </ThemeProvider>
-  </QueryClientProvider>
-);
+    </Routes>
+  );
+};
 
 export default App;

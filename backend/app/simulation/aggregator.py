@@ -1,18 +1,43 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, TypedDict, Literal
 
 from .agent import Agent
 
 
-def compute_metrics(agents: List[Agent]) -> Dict[str, float | int | Dict[str, int] | Dict[str, Dict[str, int]]]:
+Opinion = Literal["accept", "reject", "neutral"]
 
-    counts = {"accept": 0, "reject": 0, "neutral": 0}
+
+class CategoryBreakdown(TypedDict):
+    accept: int
+    reject: int
+    neutral: int
+
+
+class SimulationMetrics(TypedDict):
+    total_agents: int
+    accepted: int
+    rejected: int
+    neutral: int
+    acceptance_rate: float
+    polarization: float
+    per_category: Dict[str, int]
+    per_category_breakdown: Dict[str, CategoryBreakdown]
+    per_category_acceptance: Dict[str, int]
+
+
+def compute_metrics(agents: List[Agent]) -> SimulationMetrics:
+
+    counts: Dict[Opinion, int] = {"accept": 0, "reject": 0, "neutral": 0}
     per_category: Dict[str, int] = defaultdict(int)
-    per_category_breakdown: Dict[str, Dict[str, int]] = defaultdict(lambda: {"accept": 0, "reject": 0, "neutral": 0})
+    per_category_breakdown: Dict[str, CategoryBreakdown] = defaultdict(
+        lambda: {"accept": 0, "reject": 0, "neutral": 0}
+    )
     for agent in agents:
         op = agent.current_opinion
+        if op not in counts:
+            op = "neutral"
         counts[op] += 1
         per_category_breakdown[agent.category_id][op] += 1
         if op == "accept":
@@ -25,6 +50,7 @@ def compute_metrics(agents: List[Agent]) -> Dict[str, float | int | Dict[str, in
         polarization = max(0.0, min(1.0, balance * (decided / total)))
     else:
         polarization = 0.0
+    per_category_acceptance = {k: v["accept"] for k, v in per_category_breakdown.items()}
     return {
         "total_agents": total,
         "accepted": counts["accept"],
@@ -34,4 +60,5 @@ def compute_metrics(agents: List[Agent]) -> Dict[str, float | int | Dict[str, in
         "polarization": polarization,
         "per_category": dict(per_category),
         "per_category_breakdown": {k: dict(v) for k, v in per_category_breakdown.items()},
+        "per_category_acceptance": per_category_acceptance,
     }

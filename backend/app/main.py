@@ -32,6 +32,7 @@ from .api import search as search_routes
 from .api import auth as auth_routes
 from .api import research as research_routes
 from .api import court as court_routes
+from .api import admin as admin_routes
 
 
 def create_app() -> FastAPI:
@@ -71,6 +72,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_routes.router)
     app.include_router(research_routes.router)
     app.include_router(court_routes.router)
+    app.include_router(admin_routes.router)
 
     @app.on_event("startup")
     async def startup_event() -> None:

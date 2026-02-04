@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { apiService } from "../services/api";
 
 export default function IdeaCourtPage() {
@@ -6,6 +6,14 @@ export default function IdeaCourtPage() {
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const pending = localStorage.getItem("pendingCourtIdea");
+    if (pending) {
+      setIdea(pending);
+      localStorage.removeItem("pendingCourtIdea");
+    }
+  }, []);
 
   const runCourt = async () => {
     setLoading(true);

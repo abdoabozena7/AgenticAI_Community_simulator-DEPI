@@ -29,16 +29,28 @@ def compute_pairwise_influences(agents: List[Agent], dataset: Dataset) -> Dict[s
         other_by_category[category_id] = [a for a in agents if a.category_id != category_id]
 
     population = len(agents)
-    sample_size = min(population - 1, max(12, int((population ** 0.5) * 3)))
-    same_ratio = 0.55
+    if population <= 1:
+        return accum
+    sample_size = min(population - 1, max(4, int((population ** 0.5) * 3)))
 
     for target in agents:
         same_pool = [a for a in agents_by_category.get(target.category_id, []) if a.agent_id != target.agent_id]
         other_pool = other_by_category.get(target.category_id, [])
         influencer_pool: List[Agent] = []
         if sample_size > 0:
-            k_same = min(len(same_pool), int(sample_size * same_ratio))
-            k_other = min(len(other_pool), sample_size - k_same)
+            pool_total = len(same_pool) + len(other_pool)
+            if pool_total == 0:
+                continue
+            if len(same_pool) == 0:
+                k_same = 0
+                k_other = min(len(other_pool), sample_size)
+            elif len(other_pool) == 0:
+                k_other = 0
+                k_same = min(len(same_pool), sample_size)
+            else:
+                same_ratio = len(same_pool) / pool_total
+                k_same = min(len(same_pool), max(0, int(round(sample_size * same_ratio))))
+                k_other = min(len(other_pool), max(0, sample_size - k_same))
             if k_same > 0:
                 influencer_pool.extend(random.sample(same_pool, k=k_same))
             if k_other > 0:
@@ -65,22 +77,25 @@ def compute_pairwise_influences(agents: List[Agent], dataset: Dataset) -> Dict[s
             # Leader boost only (avoid double-counting base weight)
             base_boost = 1.0
             if getattr(influencer, "is_leader", False):
-                base_boost *= 1.4
+                base_boost *= 1.15
             # Homophily bonus: same category or same archetype increases influence
             homophily = 1.0
             if target.category_id == influencer.category_id:
                 homophily += 0.2
             if target.template_id == influencer.template_id:
                 homophily += 0.1
+            homophily = min(1.3, homophily)
             # Skepticism resistance: high skepticism reduces influence
             skepticism_factor = 1.0 - target.traits.get("skepticism", 0.0)
+            skepticism_factor = max(0.15, min(1.0, skepticism_factor))
             # Susceptibility from target's template
             target_template = dataset.template_by_id.get(target.template_id)
             susceptibility = target_template.influence_susceptibility if target_template else 1.0
             # Random noise (multiplicative, unbiased)
-            noise = random.uniform(-0.06, 0.06)
+            noise = random.uniform(-0.04, 0.04)
+            noise_factor = max(0.85, 1.0 + noise)
             # Compute final influence weight
-            weight = base_weight * base_boost * homophily * skepticism_factor * susceptibility * (1.0 + noise)
+            weight = base_weight * base_boost * homophily * skepticism_factor * susceptibility * noise_factor
             # Clamp weight to non-negative values
             weight = max(weight, 0.0)
             # Accumulate influence towards the influencer's current opinion
@@ -94,13 +109,17 @@ def decide_opinion_change(
     skepticism: float,
     stubbornness: float = 0.0,
     phase_intensity: float = 1.0,
+    inertia: float = 0.0,
 ) -> Tuple[str, bool]:
 
     weights = {
         "accept": influence_weights.get("accept", 0.0),
-        "reject": influence_weights.get("reject", 0.0),
         "neutral": influence_weights.get("neutral", 0.0),
+        "reject": influence_weights.get("reject", 0.0),
     }
+    if inertia > 0:
+        inertia = max(0.0, min(0.4, inertia))
+        weights[current_opinion] += inertia
     total_weight = sum(weights.values())
     if total_weight <= 0:
         return current_opinion, False
@@ -108,19 +127,11 @@ def decide_opinion_change(
     intensity = max(0.6, min(1.4, phase_intensity))
     # Harder to sway: higher base_threshold
     base_threshold = (0.25 + (0.3 * skepticism) + (0.1 * stubbornness)) / intensity
+    base_threshold = min(0.8, max(0.05, base_threshold))
 
-    # Make neutral less attractive unless it's clearly dominant
-    if shares["accept"] > shares["neutral"] + base_threshold and shares["accept"] >= shares["reject"]:
-        candidate = "accept"
-    elif shares["reject"] > shares["neutral"] + base_threshold and shares["reject"] >= shares["accept"]:
-        candidate = "reject"
-    else:
-        candidate = "neutral"
-
-    # Additional stubbornness to leave current opinion
+    candidate = max(shares, key=shares.get)
     if candidate != current_opinion:
-        stay_threshold = 0.08 + (0.20 * stubbornness) + (0.12 * skepticism)
-        if (shares[candidate] - shares.get(current_opinion, 0.0)) < stay_threshold:
+        if (shares[candidate] - shares.get(current_opinion, 0.0)) < base_threshold:
             candidate = current_opinion
 
     return candidate, candidate != current_opinion
