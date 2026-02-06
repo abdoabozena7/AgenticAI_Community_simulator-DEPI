@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash VARCHAR(256) NOT NULL,
   role VARCHAR(16) NOT NULL DEFAULT 'user',
   credits INT NOT NULL DEFAULT 0,
+  email_verified TINYINT(1) NOT NULL DEFAULT 0,
+  email_verified_at TIMESTAMP NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -28,6 +30,63 @@ CREATE TABLE IF NOT EXISTS sessions (
   INDEX idx_sessions_user (user_id),
   CONSTRAINT fk_sessions_user FOREIGN KEY (user_id)
     REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Refresh tokens for JWT auth
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  token_hash VARCHAR(128) NOT NULL UNIQUE,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME NOT NULL,
+  revoked_at TIMESTAMP NULL,
+  replaced_by VARCHAR(128) NULL,
+  ip_address VARCHAR(64) NULL,
+  user_agent TEXT NULL,
+  INDEX idx_refresh_user (user_id),
+  CONSTRAINT fk_refresh_user FOREIGN KEY (user_id)
+    REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Email verification tokens
+CREATE TABLE IF NOT EXISTS email_verifications (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  token_hash VARCHAR(128) NOT NULL UNIQUE,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME NOT NULL,
+  used_at TIMESTAMP NULL,
+  INDEX idx_email_verify_user (user_id),
+  CONSTRAINT fk_email_verify_user FOREIGN KEY (user_id)
+    REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Password reset tokens
+CREATE TABLE IF NOT EXISTS password_resets (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  token_hash VARCHAR(128) NOT NULL UNIQUE,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME NOT NULL,
+  used_at TIMESTAMP NULL,
+  INDEX idx_password_reset_user (user_id),
+  CONSTRAINT fk_password_reset_user FOREIGN KEY (user_id)
+    REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Audit logs
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NULL,
+  action VARCHAR(64) NOT NULL,
+  meta JSON NULL,
+  ip_address VARCHAR(64) NULL,
+  user_agent TEXT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_audit_user (user_id),
+  INDEX idx_audit_action (action),
+  CONSTRAINT fk_audit_user FOREIGN KEY (user_id)
+    REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Daily usage limit (e.g., 5/day)

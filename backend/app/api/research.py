@@ -40,6 +40,8 @@ async def run_research_endpoint(
     user = await auth_core.get_user_by_token(token)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+    if not auth_core.has_permission(user, "research:run"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
     result = await run_research(
         query=payload.query.strip(),
         location=payload.location.strip() if payload.location else None,

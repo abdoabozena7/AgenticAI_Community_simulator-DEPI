@@ -33,6 +33,7 @@ from .api import auth as auth_routes
 from .api import research as research_routes
 from .api import court as court_routes
 from .api import admin as admin_routes
+from .api import health as health_routes
 
 
 def create_app() -> FastAPI:
@@ -73,6 +74,7 @@ def create_app() -> FastAPI:
     app.include_router(research_routes.router)
     app.include_router(court_routes.router)
     app.include_router(admin_routes.router)
+    app.include_router(health_routes.router)
 
     @app.on_event("startup")
     async def startup_event() -> None:
@@ -88,6 +90,7 @@ def create_app() -> FastAPI:
         from .api import routes  # local import to avoid circular dependency
         await init_db()
         await auth_core.ensure_admin_user()
+        await auth_core.ensure_default_user()
         routes.dataset = load_dataset(data_dir)
 
     return app

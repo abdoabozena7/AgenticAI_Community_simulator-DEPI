@@ -40,9 +40,39 @@ _simulation_state: Dict[str, Dict[str, Any]] = {}
 dataset: Optional[Dataset] = None
 
 
-def _init_state(simulation_id: str) -> None:
+def _auth_required() -> bool:
+    return os.getenv("AUTH_REQUIRED", "false").lower() in {"1", "true", "yes"}
+
+
+async def _resolve_user(authorization: Optional[str], require: bool = False) -> Optional[Dict[str, Any]]:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        if require:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid token")
+        return None
+    token = authorization.split(" ", 1)[1]
+    user = await auth_core.get_user_by_token(token)
+    if not user:
+        if require:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+        return None
+    return user
+
+
+async def _ensure_simulation_access(simulation_id: str, user: Dict[str, Any]) -> None:
+    role = (user.get("role") or "").lower()
+    if role == "admin":
+        return
+    owner_id = await db_core.get_simulation_owner(simulation_id)
+    if owner_id is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Simulation not found")
+    if int(owner_id) != int(user.get("id") or 0):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+
+
+def _init_state(simulation_id: str, user_id: Optional[int] = None) -> None:
     """Initialise the in-memory state container for a new simulation."""
     _simulation_state[simulation_id] = {
+        "user_id": user_id,
         "agents": [],
         "reasoning": [],
         "metrics": None,
@@ -61,7 +91,15 @@ def _store_event(simulation_id: str, event_type: str, data: Dict[str, Any]) -> N
     """
     state = _simulation_state.setdefault(
         simulation_id,
-        {"agents": [], "reasoning": [], "metrics": None, "summary": None, "summary_ready": False, "summary_at": None},
+        {
+            "user_id": None,
+            "agents": [],
+            "reasoning": [],
+            "metrics": None,
+            "summary": None,
+            "summary_ready": False,
+            "summary_at": None,
+        },
     )
     if event_type == "agents":
         state["agents"] = data.get("agents", [])
@@ -212,16 +250,12 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
         raise HTTPException(status_code=500, detail="Dataset not loaded")
     # Authenticate user only when required (opt-in via env).
     user_id: Optional[int] = None
-    auth_required = os.getenv("AUTH_REQUIRED", "false").lower() in {"1", "true", "yes"}
-    if authorization and authorization.lower().startswith("bearer "):
-        token = authorization.split(" ", 1)[1]
-        user = await auth_core.get_user_by_token(token)
-        if not user and auth_required:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
-        if user:
-            user_id = int(user.get("id"))
-    elif auth_required:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing authorization token")
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if user:
+        if not auth_core.has_permission(user, "simulation:run"):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+        user_id = int(user.get("id"))
 
     if user_id is not None:
         # Enforce daily usage limit (uses DAILY_LIMIT env; <= 0 disables the limit).
@@ -247,14 +281,20 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
         await auth_core.increment_daily_usage(user_id)
     # Generate a unique ID for this simulation
     simulation_id = str(uuid.uuid4())
-    _init_state(simulation_id)
+    _init_state(simulation_id, user_id=user_id)
     try:
         save_context(simulation_id, user_context)
     except Exception:
         # Persistence is best-effort; ignore failures.
         pass
     # Persist simulation with status; user_id stored in table via ALTER but function does not save user_id
-    await db_core.insert_simulation(simulation_id, user_context, status="running")
+    await db_core.insert_simulation(simulation_id, user_context, status="running", user_id=user_id)
+    if user_id is not None:
+        await auth_core.log_audit(
+            user_id,
+            "simulation.started",
+            {"simulation_id": simulation_id, "idea": user_context.get("idea")},
+        )
     # Create a simulation engine instance
     engine = SimulationEngine(dataset=dataset)
     reasoning_buffer: List[Dict[str, Any]] = []
@@ -315,7 +355,18 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
                 status="completed",
                 summary=summary,
                 ended_at=state["summary_at"],
+                final_metrics=result,
             )
+            if user_id is not None:
+                await auth_core.log_audit(
+                    user_id,
+                    "simulation.completed",
+                    {
+                        "simulation_id": simulation_id,
+                        "idea": user_context.get("idea"),
+                        "acceptance_rate": result.get("acceptance_rate"),
+                    },
+                )
             # Broadcast summary explicitly for clients that listen on WS.
             await manager.broadcast_json({"type": "summary", "simulation_id": simulation_id, "summary": summary})
             if reasoning_buffer:
@@ -343,13 +394,18 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
 
 
 @router.get("/result")
-async def get_result(simulation_id: str) -> Dict[str, Any]:
+async def get_result(simulation_id: str, authorization: str = Header(None)) -> Dict[str, Any]:
     """Retrieve final aggregated metrics for a completed simulation.
 
     If the simulation is still running or unknown, returns an
     appropriate status message. The final metrics are taken from the
     result stored after the simulation coroutine completes.
     """
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if user:
+        await _ensure_simulation_access(simulation_id, user)
+
     # Check if we have a stored result
     if simulation_id in _simulation_results:
         return {
@@ -366,8 +422,12 @@ async def get_result(simulation_id: str) -> Dict[str, Any]:
 
 
 @router.get("/state")
-async def get_state(simulation_id: str) -> Dict[str, Any]:
+async def get_state(simulation_id: str, authorization: str = Header(None)) -> Dict[str, Any]:
     """Retrieve latest simulation state for polling clients."""
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if user:
+        await _ensure_simulation_access(simulation_id, user)
     state = _simulation_state.get(simulation_id)
     if state is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Simulation not found")
@@ -378,12 +438,17 @@ async def get_state(simulation_id: str) -> Dict[str, Any]:
         task = _simulation_tasks.get(simulation_id)
         if task is None or task.done():
             status_value = "completed"
-    return {"simulation_id": simulation_id, "status": status_value, **state}
+    public_state = {k: v for k, v in state.items() if k != "user_id"}
+    return {"simulation_id": simulation_id, "status": status_value, **public_state}
 
 
 @router.get("/transcript")
-async def get_transcript(simulation_id: str) -> Dict[str, Any]:
+async def get_transcript(simulation_id: str, authorization: str = Header(None)) -> Dict[str, Any]:
     """Return the ordered transcript grouped by phase."""
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if user:
+        await _ensure_simulation_access(simulation_id, user)
     transcript = await db_core.fetch_transcript(simulation_id)
     if not transcript:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcript not found")
@@ -398,6 +463,149 @@ async def get_transcript(simulation_id: str) -> Dict[str, Any]:
         if label:
             group["phase"] = label
     return {"simulation_id": simulation_id, "phases": transcript}
+
+
+@router.get("/list")
+async def list_simulations(
+    limit: int = 25,
+    offset: int = 0,
+    authorization: str = Header(None),
+) -> Dict[str, Any]:
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid token")
+    if not auth_core.has_permission(user, "simulation:view"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+    is_admin = str(user.get("role") or "").lower() == "admin"
+    rows = await db_core.fetch_simulations(
+        user_id=int(user.get("id")) if user.get("id") is not None else None,
+        limit=min(max(limit, 1), 100),
+        offset=max(offset, 0),
+        include_all=is_admin,
+    )
+    total = await db_core.count_simulations(
+        user_id=int(user.get("id")) if user.get("id") is not None else None,
+        include_all=is_admin,
+    )
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        context = row.get("user_context") or {}
+        if isinstance(context, str):
+            try:
+                import json
+                context = json.loads(context)
+            except Exception:
+                context = {}
+        metrics = row.get("final_metrics") or {}
+        if isinstance(metrics, str):
+            try:
+                import json
+                metrics = json.loads(metrics)
+            except Exception:
+                metrics = {}
+        items.append(
+            {
+                "simulation_id": row.get("simulation_id"),
+                "status": row.get("status"),
+                "idea": context.get("idea") or "",
+                "category": context.get("category") or "",
+                "created_at": row.get("created_at"),
+                "ended_at": row.get("ended_at"),
+                "summary": row.get("summary") or "",
+                "acceptance_rate": metrics.get("acceptance_rate"),
+                "total_agents": metrics.get("total_agents"),
+            }
+        )
+    return {"items": items, "total": total}
+
+
+@router.get("/analytics")
+async def simulation_analytics(
+    days: int = 7,
+    authorization: str = Header(None),
+) -> Dict[str, Any]:
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid token")
+    if not auth_core.has_permission(user, "simulation:view"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+    is_admin = str(user.get("role") or "").lower() == "admin"
+    days = min(max(days, 1), 90)
+    rows = await db_core.fetch_simulations(
+        user_id=int(user.get("id")) if user.get("id") is not None else None,
+        limit=500,
+        offset=0,
+        include_all=is_admin,
+    )
+    from datetime import timedelta
+    import json
+
+    today = datetime.utcnow().date()
+    start_date = today - timedelta(days=days - 1)
+    daily = {}
+    category_counts: Dict[str, int] = {}
+    total_agents = 0
+    completed = 0
+    acceptance_sum = 0.0
+
+    for row in rows:
+        created_at = row.get("created_at")
+        if isinstance(created_at, datetime):
+            created_date = created_at.date()
+        else:
+            created_date = None
+        context = row.get("user_context") or {}
+        if isinstance(context, str):
+            try:
+                context = json.loads(context)
+            except Exception:
+                context = {}
+        category = (context.get("category") or "other").title()
+        category_counts[category] = category_counts.get(category, 0) + 1
+
+        metrics = row.get("final_metrics") or {}
+        if isinstance(metrics, str):
+            try:
+                metrics = json.loads(metrics)
+            except Exception:
+                metrics = {}
+        if row.get("status") == "completed" and metrics:
+            completed += 1
+            acceptance_sum += float(metrics.get("acceptance_rate") or 0.0)
+            total_agents += int(metrics.get("total_agents") or 0)
+
+        if created_date and created_date >= start_date:
+            key = created_date.isoformat()
+            daily.setdefault(key, {"simulations": 0, "success": 0, "agents": 0})
+            daily[key]["simulations"] += 1
+            if metrics:
+                daily[key]["agents"] += int(metrics.get("total_agents") or 0)
+                if float(metrics.get("acceptance_rate") or 0.0) >= 0.6:
+                    daily[key]["success"] += 1
+
+    weekly = []
+    for i in range(days):
+        d = start_date + timedelta(days=i)
+        key = d.isoformat()
+        entry = daily.get(key, {"simulations": 0, "success": 0, "agents": 0})
+        weekly.append({"date": key, **entry})
+
+    categories = [{"name": name, "value": value} for name, value in category_counts.items()]
+
+    avg_acceptance = (acceptance_sum / completed) if completed > 0 else 0.0
+
+    return {
+        "totals": {
+            "total_simulations": len(rows),
+            "completed": completed,
+            "avg_acceptance_rate": avg_acceptance,
+            "total_agents": total_agents,
+        },
+        "weekly": weekly,
+        "categories": categories,
+    }
 
 
 @router.get("/debug/version")

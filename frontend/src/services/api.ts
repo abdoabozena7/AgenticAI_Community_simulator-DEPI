@@ -1,18 +1,26 @@
 const API_BASE_URL = import.meta.env.VITE_API_URL || '';
-const AUTH_TOKEN_KEY = 'agentic_auth_token';
+const ACCESS_TOKEN_KEY = 'agentic_access_token';
+const REFRESH_TOKEN_KEY = 'agentic_refresh_token';
 
-const getStoredToken = () => {
+const getStoredAccessToken = () => {
   if (typeof window === 'undefined') return null;
-  return localStorage.getItem(AUTH_TOKEN_KEY);
+  return localStorage.getItem(ACCESS_TOKEN_KEY);
 };
 
-const setStoredToken = (token?: string | null) => {
+const getStoredRefreshToken = () => {
+  if (typeof window === 'undefined') return null;
+  return localStorage.getItem(REFRESH_TOKEN_KEY);
+};
+
+const setStoredTokens = (accessToken?: string | null, refreshToken?: string | null) => {
   if (typeof window === 'undefined') return;
-  if (token) localStorage.setItem(AUTH_TOKEN_KEY, token);
-  else localStorage.removeItem(AUTH_TOKEN_KEY);
+  if (accessToken) localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
+  else localStorage.removeItem(ACCESS_TOKEN_KEY);
+  if (refreshToken) localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+  else localStorage.removeItem(REFRESH_TOKEN_KEY);
 };
 
-export const getAuthToken = () => getStoredToken();
+export const getAuthToken = () => getStoredAccessToken();
 
 export interface SimulationConfig {
   idea: string;
@@ -97,7 +105,9 @@ export interface SimulationStateResponse {
 }
 
 export interface AuthResponse {
-  token: string;
+  access_token?: string;
+  refresh_token?: string;
+  token_type?: string;
   message?: string;
 }
 
@@ -114,6 +124,8 @@ export interface UserMe {
   credits: number;
   daily_usage?: number;
   daily_limit?: number;
+  email?: string;
+  email_verified?: boolean | number;
 }
 
 export interface RedeemResponse {
@@ -161,28 +173,106 @@ export interface SearchStructured {
   evidence_cards?: string[];
 }
 
+export interface SimulationListItem {
+  simulation_id: string;
+  status: 'running' | 'completed' | 'error';
+  idea: string;
+  category?: string;
+  created_at?: string;
+  ended_at?: string;
+  summary?: string;
+  acceptance_rate?: number;
+  total_agents?: number;
+}
+
+export interface SimulationListResponse {
+  items: SimulationListItem[];
+  total: number;
+}
+
+export interface SimulationAnalyticsResponse {
+  totals: {
+    total_simulations: number;
+    completed: number;
+    avg_acceptance_rate: number;
+    total_agents: number;
+  };
+  weekly: { date: string; simulations: number; success: number; agents: number }[];
+  categories: { name: string; value: number }[];
+}
+
+export interface NotificationLogItem {
+  id: number;
+  action: string;
+  meta?: Record<string, any>;
+  created_at?: string;
+}
+
+export interface NotificationsResponse {
+  items: NotificationLogItem[];
+}
+
 class ApiService {
-  private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
-    const token = getStoredToken();
+  private refreshingPromise: Promise<boolean> | null = null;
+  private static readonly DEFAULT_TIMEOUT_MS = 30000;
+  private static readonly LONG_TIMEOUT_MS = 120000;
+
+  private async refreshTokens(): Promise<boolean> {
+    const refreshToken = getStoredRefreshToken();
+    if (!refreshToken) return false;
+    if (this.refreshingPromise) return this.refreshingPromise;
+    this.refreshingPromise = (async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+        if (!response.ok) {
+          setStoredTokens(null, null);
+          return false;
+        }
+        const data = await response.json();
+        setStoredTokens(data.access_token, data.refresh_token);
+        return true;
+      } catch {
+        return false;
+      } finally {
+        this.refreshingPromise = null;
+      }
+    })();
+    return this.refreshingPromise;
+  }
+
+  private async request<T>(
+    endpoint: string,
+    options?: (RequestInit & { timeoutMs?: number }),
+    retry = true
+  ): Promise<T> {
+    const { timeoutMs = ApiService.DEFAULT_TIMEOUT_MS, ...requestInit } = options || {};
+    const token = getStoredAccessToken();
     const authHeader = token ? { Authorization: `Bearer ${token}` } : {};
     const controller = new AbortController();
-    const timeoutMs = 10000;
     const timer = window.setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-        ...options,
+        ...requestInit,
         headers: {
           'Content-Type': 'application/json',
           ...authHeader,
-          ...options?.headers,
+          ...requestInit?.headers,
         },
         signal: controller.signal,
       });
 
       if (!response.ok) {
-        if (response.status === 401) {
-          setStoredToken(null);
+        if (response.status === 401 && retry) {
+          const refreshed = await this.refreshTokens();
+          if (refreshed) {
+            return this.request<T>(endpoint, options, false);
+          }
+          setStoredTokens(null, null);
         }
         const error = await response.json().catch(() => ({ message: 'Request failed' }));
         const err = new Error(error.detail || error.message || 'Request failed');
@@ -193,7 +283,8 @@ class ApiService {
       return response.json();
     } catch (err: any) {
       if (err?.name === 'AbortError') {
-        throw new Error('Request timed out. Please check the backend is running on the configured API URL.');
+        const timeoutSeconds = Math.floor(timeoutMs / 1000);
+        throw new Error(`Request timed out after ${timeoutSeconds}s. Please check the backend or increase timeout.`);
       }
       throw err;
     } finally {
@@ -206,7 +297,7 @@ class ApiService {
       method: 'POST',
       body: JSON.stringify({ username, email, password }),
     });
-    if (res?.token) setStoredToken(res.token);
+    if (res?.access_token) setStoredTokens(res.access_token, res.refresh_token);
     return res;
   }
 
@@ -215,7 +306,7 @@ class ApiService {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     });
-    if (res?.token) setStoredToken(res.token);
+    if (res?.access_token) setStoredTokens(res.access_token, res.refresh_token);
     return res;
   }
 
@@ -224,12 +315,23 @@ class ApiService {
       method: 'POST',
       body: JSON.stringify(payload),
     });
-    if (res?.token) setStoredToken(res.token);
+    if (res?.access_token) setStoredTokens(res.access_token, res.refresh_token);
     return res;
   }
 
   async logout(): Promise<void> {
-    setStoredToken(null);
+    const refreshToken = getStoredRefreshToken();
+    if (refreshToken) {
+      try {
+        await this.request('/auth/logout', {
+          method: 'POST',
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        }, false);
+      } catch {
+        // ignore
+      }
+    }
+    setStoredTokens(null, null);
     if (typeof window === 'undefined') return;
     try {
       localStorage.removeItem('dashboardIdea');
@@ -244,6 +346,34 @@ class ApiService {
 
   async getMe(options?: RequestInit): Promise<UserMe> {
     return this.request<UserMe>('/auth/me', options);
+  }
+
+  async resendVerification(email: string): Promise<{ message: string }> {
+    return this.request('/auth/resend-verification', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    });
+  }
+
+  async verifyEmail(token: string): Promise<{ message: string }> {
+    return this.request('/auth/verify-email', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    });
+  }
+
+  async requestPasswordReset(email: string): Promise<{ message: string }> {
+    return this.request('/auth/request-password-reset', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    });
+  }
+
+  async resetPassword(token: string, password: string): Promise<{ message: string }> {
+    return this.request('/auth/reset-password', {
+      method: 'POST',
+      body: JSON.stringify({ token, password }),
+    });
   }
 
   async redeemPromo(code: string): Promise<RedeemResponse> {
@@ -264,6 +394,7 @@ class ApiService {
     return this.request('/research/run', {
       method: 'POST',
       body: JSON.stringify({ query, location, category, language }),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
     });
   }
 
@@ -271,6 +402,7 @@ class ApiService {
     return this.request('/court/run', {
       method: 'POST',
       body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
     });
   }
 
@@ -315,7 +447,20 @@ class ApiService {
     return this.request<SimulationResponse>('/simulation/start', {
       method: 'POST',
       body: JSON.stringify(config),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
     });
+  }
+
+  async listSimulations(limit = 25, offset = 0): Promise<SimulationListResponse> {
+    return this.request<SimulationListResponse>(`/simulation/list?limit=${limit}&offset=${offset}`);
+  }
+
+  async getSimulationAnalytics(days = 7): Promise<SimulationAnalyticsResponse> {
+    return this.request<SimulationAnalyticsResponse>(`/simulation/analytics?days=${days}`);
+  }
+
+  async listNotifications(limit = 20): Promise<NotificationsResponse> {
+    return this.request<NotificationsResponse>(`/auth/notifications?limit=${limit}`);
   }
 
   async getSimulationResult(simulationId: string): Promise<SimulationResultResponse> {
@@ -344,6 +489,7 @@ class ApiService {
     const response = await this.request<{ text: string }>('/llm/generate', {
       method: 'POST',
       body: JSON.stringify({ prompt, system }),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
     });
     return response.text;
   }
@@ -363,6 +509,7 @@ class ApiService {
     return this.request('/llm/extract', {
       method: 'POST',
       body: JSON.stringify({ message, schema }),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
     });
   }
 
@@ -370,6 +517,7 @@ class ApiService {
     return this.request('/llm/intent', {
       method: 'POST',
       body: JSON.stringify({ message, context }),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
     });
   }
 
@@ -377,6 +525,7 @@ class ApiService {
     return this.request('/llm/message_mode', {
       method: 'POST',
       body: JSON.stringify({ message, context, language }),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
     });
   }
 
@@ -384,6 +533,7 @@ class ApiService {
     return this.request('/search/web', {
       method: 'POST',
       body: JSON.stringify({ query, language, max_results: maxResults }),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
     });
   }
 }

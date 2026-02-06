@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiService } from '@/services/api';
+import { addIdeaLogEntry } from '@/lib/ideaLog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -49,7 +50,7 @@ const AgentResearchScreen = () => {
     }
   };
 
-  const handleStartSimulation = () => {
+  const handleStartSimulation = async () => {
     if (!result) return;
     // Build a minimal simulation config using research results. For this
     // prototype we embed summary and evidence cards into the config. The
@@ -72,14 +73,17 @@ const AgentResearchScreen = () => {
       research_structured: result.structured,
     } as any;
     // Start simulation and navigate to the main simulation route.
-    apiService
-      .startSimulation(config)
-      .then(() => {
-        navigate(`/`);
-      })
-      .catch((err) => {
-        setError(err.message || 'تعذر بدء المحاكاة');
+    try {
+      const response = await apiService.startSimulation(config);
+      addIdeaLogEntry(query.trim(), {
+        simulationId: response.simulation_id,
+        status: 'running',
+        category: category.trim() || undefined,
       });
+      navigate(`/`);
+    } catch (err: any) {
+      setError(err.message || 'تعذر بدء المحاكاة');
+    }
   };
 
   return (
@@ -144,3 +148,4 @@ const AgentResearchScreen = () => {
 };
 
 export default AgentResearchScreen;
+

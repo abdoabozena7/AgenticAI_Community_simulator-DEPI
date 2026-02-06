@@ -20,6 +20,7 @@ export default defineConfig(({ mode }) => {
         "/research": { target: backendUrl, changeOrigin: true },
         "/court": { target: backendUrl, changeOrigin: true },
         "/admin": { target: backendUrl, changeOrigin: true },
+        "/health": { target: backendUrl, changeOrigin: true },
         "/search": { target: backendUrl, changeOrigin: true },
         "/llm": { target: backendUrl, changeOrigin: true },
         "/ws": { target: backendUrl, changeOrigin: true, ws: true },

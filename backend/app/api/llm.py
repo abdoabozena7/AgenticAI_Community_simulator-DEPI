@@ -11,15 +11,34 @@ import logging
 import re
 from typing import Optional, Dict, Any
 import asyncio
+import os
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Header, status
 from pydantic import BaseModel, Field
 
 from ..core.ollama_client import generate_ollama
+from ..core import auth as auth_core
 
 
 router = APIRouter(prefix="/llm")
 logger = logging.getLogger("llm_api")
+
+
+def _auth_required() -> bool:
+    return os.getenv("AUTH_REQUIRED", "false").lower() in {"1", "true", "yes"}
+
+
+async def _require_user(authorization: Optional[str], perm: Optional[str] = None) -> None:
+    if not _auth_required():
+        return
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid token")
+    token = authorization.split(" ", 1)[1]
+    user = await auth_core.get_user_by_token(token)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+    if perm and not auth_core.has_permission(user, perm):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
 
 
 class GenerateRequest(BaseModel):
@@ -29,12 +48,13 @@ class GenerateRequest(BaseModel):
 
 
 @router.post("/generate")
-async def generate_text(payload: GenerateRequest) -> dict:
+async def generate_text(payload: GenerateRequest, authorization: str = Header(None)) -> dict:
     """Generate arbitrary text from the local LLM.
 
     If the LLM service is unavailable or an error occurs, a 502
     response is returned to the caller.
     """
+    await _require_user(authorization, perm="llm:use")
     try:
         text = await generate_ollama(
             prompt=payload.prompt,
@@ -225,13 +245,14 @@ async def _extract_location_only(message: str, schema: Dict[str, Any]) -> Dict[s
 
 
 @router.post("/extract", response_model=ExtractResponse)
-async def extract_schema(payload: ExtractRequest) -> ExtractResponse:
+async def extract_schema(payload: ExtractRequest, authorization: str = Header(None)) -> ExtractResponse:
     """Extract structured fields from a free‑form chat message using the LLM.
 
     This endpoint uses a prompt to instruct the LLM to return a JSON
     object containing the desired fields. The result is normalised and
     some heuristic fallbacks are applied for country/city extraction.
     """
+    await _require_user(authorization, perm="llm:use")
     from json import dumps
 
     logger.info("extract_schema: message_len=%s", len(payload.message or ""))
@@ -355,7 +376,8 @@ class IntentResponse(BaseModel):
 
 
 @router.post("/intent", response_model=IntentResponse)
-async def detect_intent(payload: IntentRequest) -> IntentResponse:
+async def detect_intent(payload: IntentRequest, authorization: str = Header(None)) -> IntentResponse:
+    await _require_user(authorization, perm="llm:use")
     prompt = (
         "Determine whether the user wants to start the simulation now. "
         "Return JSON only: {\"start\": true/false, \"reason\": \"...\"}. "
@@ -383,8 +405,9 @@ class MessageModeResponse(BaseModel):
 
 
 @router.post("/message_mode", response_model=MessageModeResponse)
-async def detect_message_mode(payload: MessageModeRequest) -> MessageModeResponse:
+async def detect_message_mode(payload: MessageModeRequest, authorization: str = Header(None)) -> MessageModeResponse:
     """Classify whether the message is a discussion or an update to the idea."""
+    await _require_user(authorization, perm="llm:use")
     lang_hint = payload.language or ("ar" if _contains_arabic(payload.message) else "en")
     prompt = (
         "Classify the user's message as one of: update, discuss.\n"

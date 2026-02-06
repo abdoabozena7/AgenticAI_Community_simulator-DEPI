@@ -18,6 +18,10 @@ import mysql.connector
 DEFAULT_DB_NAME = "agentic_simulator"
 
 
+def _resolve_db_name() -> str:
+    return os.getenv("DB_NAME") or os.getenv("MYSQL_DATABASE", DEFAULT_DB_NAME)
+
+
 def _db_config(include_db: bool = True) -> Dict[str, Any]:
     cfg: Dict[str, Any] = {
         "host": os.getenv("DB_HOST") or os.getenv("MYSQL_HOST", "127.0.0.1"),
@@ -27,7 +31,7 @@ def _db_config(include_db: bool = True) -> Dict[str, Any]:
         "autocommit": True,
     }
     if include_db:
-        cfg["database"] = os.getenv("DB_NAME") or os.getenv("MYSQL_DATABASE", DEFAULT_DB_NAME)
+        cfg["database"] = _resolve_db_name()
     return cfg
 
 
@@ -52,7 +56,7 @@ def _split_sql(script: str) -> List[str]:
 
 
 def _init_db_sync() -> None:
-    db_name = os.getenv("DB_NAME", DEFAULT_DB_NAME)
+    db_name = _resolve_db_name()
     conn = _connect(include_db=False)
     cursor = conn.cursor()
     cursor.execute(
@@ -68,9 +72,55 @@ def _init_db_sync() -> None:
     conn = _connect(include_db=True)
     cursor = conn.cursor()
     for stmt in _split_sql(schema_sql):
-        cursor.execute(stmt)
+        try:
+            cursor.execute(stmt)
+        except mysql.connector.Error as exc:
+            # Legacy databases may contain invalid default values on expires_at
+            # columns. Repair those tables, then continue schema bootstrap.
+            if exc.errno == 1067 and "expires_at" in str(exc).lower():
+                _repair_expires_columns(cursor)
+                continue
+            raise
+    # Best-effort migrations for existing databases.
+    _apply_migrations(cursor)
     cursor.close()
     conn.close()
+
+
+def _table_exists(cursor: mysql.connector.cursor.MySQLCursor, table_name: str) -> bool:
+    cursor.execute(
+        "SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = %s",
+        (table_name,),
+    )
+    return bool(cursor.fetchone())
+
+
+def _repair_expires_columns(cursor: mysql.connector.cursor.MySQLCursor) -> None:
+    for table_name in ("refresh_tokens", "email_verifications", "password_resets"):
+        if not _table_exists(cursor, table_name):
+            continue
+        try:
+            cursor.execute(f"ALTER TABLE {table_name} MODIFY expires_at DATETIME NULL")
+            cursor.execute(f"UPDATE {table_name} SET expires_at = UTC_TIMESTAMP() WHERE expires_at IS NULL")
+            cursor.execute(f"ALTER TABLE {table_name} MODIFY expires_at DATETIME NOT NULL")
+        except mysql.connector.Error:
+            # Keep startup resilient: migrations below will attempt repair again.
+            pass
+
+
+def _apply_migrations(cursor: mysql.connector.cursor.MySQLCursor) -> None:
+    migrations = [
+        "ALTER TABLE users ADD COLUMN email_verified TINYINT(1) NOT NULL DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN email_verified_at TIMESTAMP NULL",
+        "ALTER TABLE refresh_tokens MODIFY expires_at DATETIME NOT NULL",
+        "ALTER TABLE email_verifications MODIFY expires_at DATETIME NOT NULL",
+        "ALTER TABLE password_resets MODIFY expires_at DATETIME NOT NULL",
+    ]
+    for stmt in migrations:
+        try:
+            cursor.execute(stmt)
+        except mysql.connector.Error:
+            pass
 
 
 async def init_db() -> None:
@@ -105,13 +155,21 @@ async def execute(
     return await asyncio.to_thread(_run_query, query, params, fetch, many)
 
 
-async def insert_simulation(simulation_id: str, user_context: Dict[str, Any], status: str = "running") -> None:
+async def insert_simulation(
+    simulation_id: str,
+    user_context: Dict[str, Any],
+    status: str = "running",
+    user_id: Optional[int] = None,
+) -> None:
     payload = json.dumps(user_context, ensure_ascii=False)
     await execute(
-        "INSERT INTO simulations (simulation_id, status, user_context) "
-        "VALUES (%s, %s, %s) "
-        "ON DUPLICATE KEY UPDATE status=VALUES(status), user_context=VALUES(user_context)",
-        (simulation_id, status, payload),
+        "INSERT INTO simulations (simulation_id, user_id, status, user_context) "
+        "VALUES (%s, %s, %s, %s) "
+        "ON DUPLICATE KEY UPDATE "
+        "status=VALUES(status), "
+        "user_context=VALUES(user_context), "
+        "user_id=COALESCE(VALUES(user_id), user_id)",
+        (simulation_id, user_id, status, payload),
     )
 
 
@@ -130,6 +188,7 @@ async def update_simulation(
     status: Optional[str] = None,
     summary: Optional[str] = None,
     ended_at: Optional[str] = None,
+    final_metrics: Optional[Dict[str, Any]] = None,
 ) -> None:
     fields: List[str] = []
     params: List[Any] = []
@@ -142,6 +201,9 @@ async def update_simulation(
     if ended_at is not None:
         fields.append("ended_at=%s")
         params.append(ended_at)
+    if final_metrics is not None:
+        fields.append("final_metrics=%s")
+        params.append(json.dumps(final_metrics, ensure_ascii=False))
     if not fields:
         return
     params.append(simulation_id)
@@ -298,3 +360,95 @@ async def fetch_transcript(simulation_id: str) -> List[Dict[str, Any]]:
         )
     grouped = [{"phase": phase, "lines": lines} for phase, lines in phases.items()]
     return grouped
+
+
+async def get_simulation_owner(simulation_id: str) -> Optional[int]:
+    rows = await execute(
+        "SELECT user_id FROM simulations WHERE simulation_id=%s",
+        (simulation_id,),
+        fetch=True,
+    )
+    if not rows:
+        return None
+    owner = rows[0].get("user_id")
+    return int(owner) if owner is not None else None
+
+
+async def fetch_simulations(
+    user_id: Optional[int],
+    limit: int = 25,
+    offset: int = 0,
+    include_all: bool = False,
+) -> List[Dict[str, Any]]:
+    params: List[Any] = []
+    where = ""
+    if not include_all and user_id is not None:
+        where = "WHERE user_id=%s"
+        params.append(user_id)
+    query = (
+        "SELECT simulation_id, user_id, status, user_context, summary, final_metrics, created_at, ended_at "
+        "FROM simulations "
+        f"{where} "
+        "ORDER BY created_at DESC "
+        "LIMIT %s OFFSET %s"
+    )
+    params.extend([limit, offset])
+    rows = await execute(query, params, fetch=True)
+    return rows or []
+
+
+async def count_simulations(user_id: Optional[int], include_all: bool = False) -> int:
+    params: List[Any] = []
+    where = ""
+    if not include_all and user_id is not None:
+        where = "WHERE user_id=%s"
+        params.append(user_id)
+    rows = await execute(
+        f"SELECT COUNT(*) AS total FROM simulations {where}",
+        params,
+        fetch=True,
+    )
+    if not rows:
+        return 0
+    return int(rows[0].get("total") or 0)
+
+
+async def insert_audit_log(
+    user_id: Optional[int],
+    action: str,
+    meta: Optional[Dict[str, Any]] = None,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> None:
+    payload = json.dumps(meta or {}, ensure_ascii=False)
+    await execute(
+        "INSERT INTO audit_logs (user_id, action, meta, ip_address, user_agent) "
+        "VALUES (%s, %s, %s, %s, %s)",
+        (user_id, action, payload, ip_address, user_agent),
+    )
+
+
+async def fetch_audit_logs(user_id: int, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
+    rows = await execute(
+        "SELECT id, action, meta, created_at FROM audit_logs "
+        "WHERE user_id=%s ORDER BY created_at DESC LIMIT %s OFFSET %s",
+        (user_id, limit, offset),
+        fetch=True,
+    )
+    logs: List[Dict[str, Any]] = []
+    for row in rows or []:
+        meta = row.get("meta") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        logs.append(
+            {
+                "id": row.get("id"),
+                "action": row.get("action"),
+                "meta": meta,
+                "created_at": row.get("created_at"),
+            }
+        )
+    return logs

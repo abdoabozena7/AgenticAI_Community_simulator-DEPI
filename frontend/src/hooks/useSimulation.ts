@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useReducer, useRef } from 'react';
 import { websocketService, WebSocketEvent, MetricsEvent, ReasoningStepEvent, ReasoningDebugEvent, AgentsEvent } from '@/services/websocket';
-import { apiService, SimulationConfig, SimulationStateResponse } from '@/services/api';
+import { apiService, SimulationConfig, SimulationStateResponse, getAuthToken } from '@/services/api';
 import { Agent, ReasoningMessage, ReasoningDebug, SimulationMetrics, SimulationStatus } from '@/types/simulation';
 
 interface SimulationState {
@@ -350,9 +350,10 @@ export function useSimulation() {
       const wsBase = (import.meta.env.VITE_WS_URL as string | undefined)
         || apiBase
         || 'http://localhost:8000';
+      const token = getAuthToken();
       const wsUrl = wsBase
         .replace(/^http/, 'ws')
-        .replace(/\/$/, '') + '/ws/simulation';
+        .replace(/\/$/, '') + `/ws/simulation${token ? `?token=${encodeURIComponent(token)}` : ''}`;
       if (!websocketService.isConnected()) {
         try {
           await websocketService.connect(wsUrl);
@@ -362,6 +363,7 @@ export function useSimulation() {
       }
 
       const response = await apiService.startSimulation(config);
+      websocketService.setSimulationSubscription(response.simulation_id);
       dispatch({ type: 'SET_SIMULATION_ID', payload: response.simulation_id });
       dispatch({ type: 'SET_STATUS', payload: 'running' });
 

@@ -2,7 +2,6 @@ import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ThemeProvider } from "next-themes";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import Index from "./pages/Index";
@@ -19,8 +18,13 @@ import IdeaCourtPage from "./pages/IdeaCourtPage";
 import AdminDashboard from "./pages/AdminDashboard";
 import BonusPage from "./pages/BonusPage";
 import SettingsPage from "./pages/SettingsPage";
+import VerifyEmailPage from "./pages/VerifyEmailPage";
+import ResetPasswordPage from "./pages/ResetPasswordPage";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { apiService, getAuthToken } from "@/services/api";
+import { ThemeProvider } from "@/contexts/ThemeContext";
+import { LanguageProvider } from "@/contexts/LanguageContext";
+import { PageTransition } from "@/components/PageTransition";
 
 const queryClient = new QueryClient();
 
@@ -107,16 +111,20 @@ const RequireAdmin = ({ children }: { children: JSX.Element }) => {
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
-    <ThemeProvider attribute="class" defaultTheme="dark">
-      <TooltipProvider>
-        <Toaster />
-        <Sonner />
-        <ErrorBoundary>
-          <BrowserRouter>
-            <AppShell />
-          </BrowserRouter>
-        </ErrorBoundary>
-      </TooltipProvider>
+    <ThemeProvider>
+      <LanguageProvider>
+        <TooltipProvider>
+          <Toaster />
+          <Sonner />
+          <ErrorBoundary>
+            <BrowserRouter>
+              <PageTransition>
+                <AppShell />
+              </PageTransition>
+            </BrowserRouter>
+          </ErrorBoundary>
+        </TooltipProvider>
+      </LanguageProvider>
     </ThemeProvider>
   </QueryClientProvider>
 );
@@ -171,6 +179,22 @@ const AppShell = () => {
                 element={
                   <PublicOnly>
                     <Navigate to="/?auth=login" replace />
+                  </PublicOnly>
+                }
+              />
+              <Route
+                path="/verify-email"
+                element={
+                  <PublicOnly>
+                    <VerifyEmailPage />
+                  </PublicOnly>
+                }
+              />
+              <Route
+                path="/reset-password"
+                element={
+                  <PublicOnly>
+                    <ResetPasswordPage />
                   </PublicOnly>
                 }
               />

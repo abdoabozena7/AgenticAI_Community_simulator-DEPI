@@ -1,0 +1,194 @@
+.landing-network-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: #000000;
+  overflow: hidden;
+  border-radius: 1.25rem;
+}
+
+.landing-network-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.landing-network-popups {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 12;
+}
+
+.landing-network-popup {
+  position: absolute;
+  left: 0;
+  top: 0;
+  min-width: 150px;
+  max-width: 220px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.92);
+  color: rgba(255, 255, 255, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(10px);
+  font-size: 11px;
+  pointer-events: none;
+  --scale: 0.96;
+  transform: translate(-50%, -120%) scale(var(--scale));
+  opacity: 0;
+  transition: opacity 0.25s ease;
+  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.35));
+}
+
+.landing-network-popup.visible {
+  opacity: 1;
+  --scale: 1;
+  animation: landing-network-popup-float 3.2s ease-in-out infinite;
+}
+
+.landing-network-popup-title {
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.6);
+  margin-bottom: 4px;
+}
+
+.landing-network-popup-text {
+  color: rgba(255, 255, 255, 0.86);
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.landing-network-legend {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  background: rgba(20, 20, 30, 0.85);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 10px 12px;
+  z-index: 10;
+}
+
+.landing-network-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.landing-network-legend-item:last-child {
+  margin-bottom: 0;
+}
+
+.landing-network-legend-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+
+.landing-network-legend-dot.accepted {
+  background: #22c55e;
+  box-shadow: 0 0 10px #22c55e;
+}
+
+.landing-network-legend-dot.rejected {
+  background: #ef4444;
+  box-shadow: 0 0 10px #ef4444;
+}
+
+.landing-network-legend-dot.neutral {
+  background: #6b7280;
+}
+
+.landing-network-stats {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  background: rgba(20, 20, 30, 0.85);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 10px 12px;
+  z-index: 10;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+@media (max-width: 900px) {
+  .landing-network-popup {
+    min-width: 140px;
+    max-width: 190px;
+  }
+
+  .landing-network-legend,
+  .landing-network-stats {
+    top: 10px;
+    padding: 8px 10px;
+  }
+
+  .landing-network-legend {
+    left: 10px;
+  }
+
+  .landing-network-stats {
+    right: 10px;
+  }
+}
+
+.landing-network-root.light {
+  background: #ffffff;
+}
+
+.landing-network-root.light .landing-network-legend,
+.landing-network-root.light .landing-network-stats {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(15, 23, 42, 0.12);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+}
+
+.landing-network-root.light .landing-network-legend-item,
+.landing-network-root.light .landing-network-stats {
+  color: rgba(15, 23, 42, 0.75);
+}
+
+.landing-network-root.light .landing-network-legend-dot.neutral {
+  background: #111827;
+  box-shadow: 0 0 10px rgba(17, 24, 39, 0.5);
+}
+
+.landing-network-root.light .landing-network-popup {
+  background: rgba(255, 255, 255, 0.96);
+  border-color: rgba(15, 23, 42, 0.15);
+  color: rgba(15, 23, 42, 0.8);
+}
+
+.landing-network-root.light .landing-network-popup-title {
+  color: rgba(15, 23, 42, 0.55);
+}
+
+.landing-network-root.light .landing-network-popup-text {
+  color: rgba(15, 23, 42, 0.85);
+}
+
+@keyframes landing-network-popup-float {
+  0%, 100% {
+    transform: translate(-50%, -120%) scale(var(--scale)) translateY(0);
+  }
+  50% {
+    transform: translate(-50%, -120%) scale(var(--scale)) translateY(-4px);
+  }
+}

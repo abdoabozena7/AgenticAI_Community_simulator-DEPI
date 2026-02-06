@@ -12,3 +12,4 @@ jinja2
 websockets
 wsproto
 google-auth
+PyJWT

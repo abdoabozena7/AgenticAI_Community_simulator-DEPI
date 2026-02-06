@@ -17,6 +17,7 @@ import { ChatMessage, UserInput } from '@/types/simulation';
 import { websocketService } from '@/services/websocket';
 import { apiService, SearchResponse, UserMe } from '@/services/api';
 import { cn } from '@/lib/utils';
+import { addIdeaLogEntry, updateIdeaLogEntry } from '@/lib/ideaLog';
 
 const CATEGORY_LABEL_BY_VALUE = new Map(
   CATEGORY_OPTIONS.map((label) => [label.toLowerCase(), label])
@@ -248,6 +249,7 @@ const Index = () => {
     structured: undefined,
   });
   const [researchIdea, setResearchIdea] = useState('');
+  const lastLoggedSimulationRef = useRef<string | null>(null);
 
   const getAssistantMessage = useCallback(async (prompt: string) => {
     const context = chatMessages
@@ -738,6 +740,53 @@ const Index = () => {
     setAutoStartPending(false);
     handleStart();
   }, [autoStartPending, handleStart, userInput.idea]);
+
+  useEffect(() => {
+    const simulationId = simulation.simulationId;
+    if (!simulationId) return;
+    if (lastLoggedSimulationRef.current === simulationId) return;
+    lastLoggedSimulationRef.current = simulationId;
+    const ideaValue = userInput.idea.trim();
+    const fallbackIdea = (() => {
+      try {
+        return localStorage.getItem('dashboardIdea') || '';
+      } catch {
+        return '';
+      }
+    })();
+    addIdeaLogEntry(ideaValue || fallbackIdea || 'Untitled idea', {
+      simulationId,
+      status: 'running',
+      category: userInput.category || undefined,
+    });
+  }, [simulation.simulationId, userInput.idea, userInput.category]);
+
+  useEffect(() => {
+    const simulationId = simulation.simulationId;
+    if (!simulationId) return;
+    if (simulation.status !== 'completed' && simulation.status !== 'error') return;
+    const ideaValue = userInput.idea.trim();
+    const patch: { idea?: string } = {};
+    if (ideaValue) {
+      patch.idea = ideaValue;
+    }
+    updateIdeaLogEntry(simulationId, {
+      status: simulation.status === 'completed' ? 'completed' : 'error',
+      acceptanceRate: simulation.metrics.acceptanceRate,
+      totalAgents: simulation.metrics.totalAgents,
+      summary: simulation.summary || undefined,
+      category: userInput.category || undefined,
+      ...patch,
+    });
+  }, [
+    simulation.simulationId,
+    simulation.status,
+    simulation.metrics.acceptanceRate,
+    simulation.metrics.totalAgents,
+    simulation.summary,
+    userInput.category,
+    userInput.idea,
+  ]);
 
   const getSearchLocationLabel = useCallback(() => {
     const city = userInput.city?.trim();

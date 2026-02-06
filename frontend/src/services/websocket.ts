@@ -77,6 +77,7 @@ class WebSocketService {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelay = 1000;
+  private currentSimulationId: string | null = null;
 
   connect(url: string): Promise<void> {
     this.url = url;
@@ -88,6 +89,9 @@ class WebSocketService {
         this.ws.onopen = () => {
           console.log('WebSocket connected');
           this.reconnectAttempts = 0;
+          if (this.currentSimulationId) {
+            this.send({ type: 'subscribe', simulation_id: this.currentSimulationId, replace: true });
+          }
           resolve();
         };
 
@@ -141,6 +145,13 @@ class WebSocketService {
         }
       }
     };
+  }
+
+  setSimulationSubscription(simulationId: string | null) {
+    this.currentSimulationId = simulationId;
+    if (this.ws && this.ws.readyState === WebSocket.OPEN && simulationId) {
+      this.send({ type: 'subscribe', simulation_id: simulationId, replace: true });
+    }
   }
 
   private notifyListeners(event: WebSocketEvent) {

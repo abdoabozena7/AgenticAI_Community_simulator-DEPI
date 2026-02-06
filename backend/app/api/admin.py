@@ -29,7 +29,7 @@ async def require_admin(authorization: Optional[str] = Header(None)) -> Dict[str
     user = await auth_core.get_user_by_token(token)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
-    if user.get("role") != "admin":
+    if not auth_core.has_permission(user, "admin:manage"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin privileges required")
     return {"id": int(user["id"]), "role": "admin"}
 

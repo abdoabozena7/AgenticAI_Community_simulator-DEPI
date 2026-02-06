@@ -19,8 +19,10 @@ import hmac
 import os
 import re
 import uuid
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from typing import Any, Dict, Optional
+
+import jwt
 
 from . import db as db_core
 
@@ -52,7 +54,13 @@ def verify_password(password: str, stored: str) -> bool:
         return False
 
 
-async def create_user(username: str, email: str, password: str, role: str = "user") -> int:
+async def create_user(
+    username: str,
+    email: str,
+    password: str,
+    role: str = "user",
+    email_verified: bool = False,
+) -> int:
     """Create a new user and return the user ID.
 
     Raises RuntimeError if the username already exists.
@@ -67,8 +75,8 @@ async def create_user(username: str, email: str, password: str, role: str = "use
         raise RuntimeError("Username already taken")
     pw_hash = hash_password(password)
     await db_core.execute(
-        "INSERT INTO users (username, email, password_hash, role) VALUES (%s, %s, %s, %s)",
-        (username, email or None, pw_hash, role),
+        "INSERT INTO users (username, email, password_hash, role, email_verified) VALUES (%s, %s, %s, %s, %s)",
+        (username, email or None, pw_hash, role, int(email_verified)),
     )
     row = await db_core.execute(
         "SELECT id FROM users WHERE username=%s",
@@ -92,11 +100,51 @@ async def authenticate_user(username: str, password: str) -> Optional[int]:
             fetch=True,
         )
     if not row:
+        # Lazy-bootstrap well-known local accounts so first login works
+        # even if startup bootstrap didn't run in the current process.
+        admin_username = os.getenv("ADMIN_USERNAME") or os.getenv("BOOTSTRAP_ADMIN_USERNAME") or "admin"
+        admin_password = os.getenv("ADMIN_PASSWORD") or os.getenv("BOOTSTRAP_ADMIN_PASSWORD") or "Admin@1234"
+        default_username = os.getenv("DEFAULT_USER_USERNAME") or "user"
+        default_password = os.getenv("DEFAULT_USER_PASSWORD") or "User@1234"
+
+        if username == admin_username and password == admin_password:
+            await _ensure_bootstrap_user(
+                username=admin_username,
+                password=admin_password,
+                role="admin",
+                email=(os.getenv("ADMIN_EMAIL") or os.getenv("BOOTSTRAP_ADMIN_EMAIL") or None),
+                credits_target=_parse_int(os.getenv("ADMIN_CREDITS") or os.getenv("BOOTSTRAP_ADMIN_CREDITS"), default=0),
+                reset_password=True,
+                ensure_verified=True,
+            )
+        elif username == default_username and password == default_password:
+            await _ensure_bootstrap_user(
+                username=default_username,
+                password=default_password,
+                role="user",
+                email=(os.getenv("DEFAULT_USER_EMAIL") or None),
+                credits_target=_parse_int(os.getenv("DEFAULT_USER_CREDITS"), default=0),
+                reset_password=True,
+                ensure_verified=True,
+            )
+
+        row = await db_core.execute(
+            "SELECT id, password_hash FROM users WHERE username=%s",
+            (username,),
+            fetch=True,
+        )
+        if not row and "@" in username:
+            row = await db_core.execute(
+                "SELECT id, password_hash FROM users WHERE email=%s",
+                (username,),
+                fetch=True,
+            )
+    if not row:
         return None
     stored_hash = row[0].get("password_hash") or ""
     if verify_password(password, stored_hash):
         return int(row[0]["id"])
-    # Admin fallback: if env admin creds match, reset password on the fly (dev only)
+    # Env fallback: if bootstrap creds match, reset password on the fly (dev only)
     admin_username = os.getenv("ADMIN_USERNAME") or os.getenv("BOOTSTRAP_ADMIN_USERNAME")
     admin_password = os.getenv("ADMIN_PASSWORD") or os.getenv("BOOTSTRAP_ADMIN_PASSWORD")
     if admin_username and admin_password and username == admin_username and password == admin_password:
@@ -106,6 +154,15 @@ async def authenticate_user(username: str, password: str) -> Optional[int]:
                 (hash_password(admin_password), "admin", row[0]["id"]),
             )
             return int(row[0]["id"])
+    default_username = os.getenv("DEFAULT_USER_USERNAME")
+    default_password = os.getenv("DEFAULT_USER_PASSWORD")
+    if default_username and default_password and username == default_username and password == default_password:
+        if _env_truthy(os.getenv("DEFAULT_USER_RESET_PASSWORD")):
+            await db_core.execute(
+                "UPDATE users SET password_hash=%s, role=%s WHERE id=%s",
+                (hash_password(default_password), "user", row[0]["id"]),
+            )
+            return int(row[0]["id"])
     return None
 
 
@@ -113,8 +170,17 @@ async def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
     if not email:
         return None
     rows = await db_core.execute(
-        "SELECT id, username, role, credits, email FROM users WHERE email=%s",
+        "SELECT id, username, role, credits, email, email_verified FROM users WHERE email=%s",
         (email,),
+        fetch=True,
+    )
+    return rows[0] if rows else None
+
+
+async def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
+    rows = await db_core.execute(
+        "SELECT id, username, role, credits, email, email_verified FROM users WHERE id=%s",
+        (user_id,),
         fetch=True,
     )
     return rows[0] if rows else None
@@ -152,44 +218,144 @@ async def create_oauth_user(email: str, name: Optional[str] = None, provider: st
             candidate = f"{base}_{uuid.uuid4().hex[:4]}"
             break
     random_password = uuid.uuid4().hex
-    return await create_user(candidate, email, random_password, role="user")
+    return await create_user(candidate, email, random_password, role="user", email_verified=True)
 
 
-def _create_token() -> str:
-    """Generate a random token for session authentication."""
-    return uuid.uuid4().hex
+def _jwt_secret() -> str:
+    secret = os.getenv("JWT_SECRET") or ""
+    if not secret:
+        raise RuntimeError("JWT_SECRET is not configured")
+    return secret
 
 
-async def create_session(user_id: int, ttl_hours: int = 24) -> str:
-    """Create a session for the given user and return the token."""
-    token = _create_token()
-    expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
+def _hash_token(raw: str) -> str:
+    return hashlib.sha256(f"{raw}.{_jwt_secret()}".encode("utf-8")).hexdigest()
+
+
+def _access_ttl_minutes() -> int:
+    try:
+        return int(os.getenv("ACCESS_TOKEN_TTL_MINUTES", "15"))
+    except ValueError:
+        return 15
+
+
+def _refresh_ttl_days() -> int:
+    try:
+        return int(os.getenv("REFRESH_TOKEN_TTL_DAYS", "30"))
+    except ValueError:
+        return 30
+
+
+def create_access_token(user: Dict[str, Any]) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user.get("id")),
+        "role": user.get("role"),
+        "username": user.get("username"),
+        "email": user.get("email"),
+        "type": "access",
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=_access_ttl_minutes())).timestamp()),
+        "jti": uuid.uuid4().hex,
+    }
+    return jwt.encode(payload, _jwt_secret(), algorithm="HS256")
+
+
+async def create_refresh_token(
+    user_id: int,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> str:
+    raw = uuid.uuid4().hex + uuid.uuid4().hex
+    token_hash = _hash_token(raw)
+    expires_at = datetime.utcnow() + timedelta(days=_refresh_ttl_days())
     await db_core.execute(
-        "INSERT INTO sessions (user_id, token, expires_at) VALUES (%s, %s, %s)",
-        (user_id, token, expires_at),
+        "INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip_address, user_agent) "
+        "VALUES (%s, %s, %s, %s, %s)",
+        (user_id, token_hash, expires_at, ip_address, user_agent),
     )
-    return token
+    return raw
 
 
-async def get_user_by_token(token: str) -> Optional[Dict[str, Any]]:
-    """Return user information for a valid session token, or None."""
-    if not token:
-        return None
+async def revoke_refresh_token(raw_token: str, replaced_by: Optional[str] = None) -> None:
+    token_hash = _hash_token(raw_token)
+    await db_core.execute(
+        "UPDATE refresh_tokens SET revoked_at=%s, replaced_by=%s WHERE token_hash=%s",
+        (datetime.utcnow(), replaced_by, token_hash),
+    )
+
+
+async def rotate_refresh_token(
+    raw_token: str,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> Optional[str]:
+    token_hash = _hash_token(raw_token)
     rows = await db_core.execute(
-        "SELECT u.id, u.username, u.role, u.credits, s.expires_at FROM sessions s JOIN users u ON s.user_id=u.id "
-        "WHERE s.token=%s",
-        (token,),
+        "SELECT id, user_id, expires_at, revoked_at FROM refresh_tokens WHERE token_hash=%s",
+        (token_hash,),
         fetch=True,
     )
     if not rows:
         return None
-    user = rows[0]
-    expires_at = user.get("expires_at")
-    if expires_at and isinstance(expires_at, datetime) and expires_at < datetime.utcnow():
-        # Session expired, optionally remove it
-        await db_core.execute("DELETE FROM sessions WHERE token=%s", (token,))
+    record = rows[0]
+    if record.get("revoked_at"):
         return None
+    expires_at = record.get("expires_at")
+    if isinstance(expires_at, datetime) and expires_at < datetime.utcnow():
+        return None
+    new_raw = await create_refresh_token(int(record["user_id"]), ip_address, user_agent)
+    await revoke_refresh_token(raw_token, replaced_by=_hash_token(new_raw))
+    return new_raw
+
+
+async def get_user_by_token_from_refresh(raw_token: str) -> Optional[Dict[str, Any]]:
+    token_hash = _hash_token(raw_token)
+    rows = await db_core.execute(
+        "SELECT user_id, expires_at, revoked_at FROM refresh_tokens WHERE token_hash=%s",
+        (token_hash,),
+        fetch=True,
+    )
+    if not rows:
+        return None
+    record = rows[0]
+    if record.get("revoked_at"):
+        return None
+    expires_at = record.get("expires_at")
+    if isinstance(expires_at, datetime) and expires_at < datetime.utcnow():
+        return None
+    return await get_user_by_id(int(record["user_id"]))
+
+
+async def verify_access_token(token: str) -> Optional[Dict[str, Any]]:
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, _jwt_secret(), algorithms=["HS256"])
+    except Exception:
+        return None
+    if payload.get("type") != "access":
+        return None
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+    user = await get_user_by_id(int(user_id))
     return user
+
+
+async def get_user_by_token(token: str) -> Optional[Dict[str, Any]]:
+    """Return user information for a valid access token, or None."""
+    return await verify_access_token(token)
+
+
+async def create_auth_tokens(
+    user: Dict[str, Any],
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> Dict[str, str]:
+    access = create_access_token(user)
+    refresh = await create_refresh_token(int(user.get("id")), ip_address, user_agent)
+    return {"access_token": access, "refresh_token": refresh, "token_type": "bearer"}
 
 
 async def get_user_daily_usage(user_id: int) -> int:
@@ -294,6 +460,133 @@ async def consume_simulation_credit(user_id: int) -> bool:
     return False
 
 
+async def mark_email_verified(user_id: int) -> None:
+    await db_core.execute(
+        "UPDATE users SET email_verified=1, email_verified_at=%s WHERE id=%s",
+        (datetime.utcnow(), user_id),
+    )
+
+
+async def create_email_verification(user_id: int, ttl_hours: int = 24) -> str:
+    raw = uuid.uuid4().hex + uuid.uuid4().hex
+    token_hash = _hash_token(raw)
+    expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
+    await db_core.execute(
+        "INSERT INTO email_verifications (user_id, token_hash, expires_at) VALUES (%s, %s, %s)",
+        (user_id, token_hash, expires_at),
+    )
+    return raw
+
+
+async def verify_email_token(raw_token: str) -> Optional[int]:
+    token_hash = _hash_token(raw_token)
+    rows = await db_core.execute(
+        "SELECT id, user_id, expires_at, used_at FROM email_verifications WHERE token_hash=%s",
+        (token_hash,),
+        fetch=True,
+    )
+    if not rows:
+        return None
+    record = rows[0]
+    if record.get("used_at"):
+        return None
+    expires_at = record.get("expires_at")
+    if isinstance(expires_at, datetime) and expires_at < datetime.utcnow():
+        return None
+    user_id = int(record["user_id"])
+    await mark_email_verified(user_id)
+    await db_core.execute(
+        "UPDATE email_verifications SET used_at=%s WHERE id=%s",
+        (datetime.utcnow(), record["id"]),
+    )
+    return user_id
+
+
+async def create_password_reset(user_id: int, ttl_hours: int = 2) -> str:
+    raw = uuid.uuid4().hex + uuid.uuid4().hex
+    token_hash = _hash_token(raw)
+    expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
+    await db_core.execute(
+        "INSERT INTO password_resets (user_id, token_hash, expires_at) VALUES (%s, %s, %s)",
+        (user_id, token_hash, expires_at),
+    )
+    return raw
+
+
+async def reset_password_with_token(raw_token: str, new_password: str) -> bool:
+    token_hash = _hash_token(raw_token)
+    rows = await db_core.execute(
+        "SELECT id, user_id, expires_at, used_at FROM password_resets WHERE token_hash=%s",
+        (token_hash,),
+        fetch=True,
+    )
+    if not rows:
+        return False
+    record = rows[0]
+    if record.get("used_at"):
+        return False
+    expires_at = record.get("expires_at")
+    if isinstance(expires_at, datetime) and expires_at < datetime.utcnow():
+        return False
+    user_id = int(record["user_id"])
+    await db_core.execute(
+        "UPDATE users SET password_hash=%s WHERE id=%s",
+        (hash_password(new_password), user_id),
+    )
+    await db_core.execute(
+        "UPDATE password_resets SET used_at=%s WHERE id=%s",
+        (datetime.utcnow(), record["id"]),
+    )
+    return True
+
+
+async def log_audit(
+    user_id: Optional[int],
+    action: str,
+    meta: Optional[Dict[str, Any]] = None,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> None:
+    try:
+        await db_core.insert_audit_log(user_id, action, meta, ip_address, user_agent)
+    except Exception:
+        pass
+
+
+ROLE_PERMISSIONS: Dict[str, set[str]] = {
+    "user": {
+        "simulation:run",
+        "simulation:view",
+        "research:run",
+        "court:run",
+        "llm:use",
+        "search:use",
+        "account:view",
+    },
+    "admin": {
+        "simulation:run",
+        "simulation:view",
+        "research:run",
+        "court:run",
+        "llm:use",
+        "search:use",
+        "account:view",
+        "admin:manage",
+        "admin:users",
+        "admin:credits",
+        "admin:stats",
+    },
+}
+
+
+def has_permission(user: Optional[Dict[str, Any]], perm: str) -> bool:
+    if not user:
+        return False
+    role = str(user.get("role") or "user").lower()
+    perms = ROLE_PERMISSIONS.get(role, set())
+    return perm in perms or role == "admin"
+
+
 def _env_truthy(value: Optional[str]) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
@@ -324,9 +617,29 @@ async def ensure_admin_user() -> Optional[Dict[str, Any]]:
         default=0,
     )
     reset_password = _env_truthy(os.getenv("ADMIN_RESET_PASSWORD"))
+    return await _ensure_bootstrap_user(
+        username=username,
+        password=password,
+        role="admin",
+        email=email or None,
+        credits_target=credits_target,
+        reset_password=reset_password,
+        ensure_verified=True,
+    )
 
+
+async def _ensure_bootstrap_user(
+    *,
+    username: str,
+    password: str,
+    role: str,
+    email: Optional[str] = None,
+    credits_target: int = 0,
+    reset_password: bool = False,
+    ensure_verified: bool = True,
+) -> Dict[str, Any]:
     rows = await db_core.execute(
-        "SELECT id, role, credits, email FROM users WHERE username=%s",
+        "SELECT id, role, credits, email, email_verified FROM users WHERE username=%s",
         (username,),
         fetch=True,
     )
@@ -334,37 +647,58 @@ async def ensure_admin_user() -> Optional[Dict[str, Any]]:
         user = rows[0]
         updates: list[str] = []
         params: list[Any] = []
-        if user.get("role") != "admin":
+
+        if role and user.get("role") != role:
             updates.append("role=%s")
-            params.append("admin")
+            params.append(role)
+
         if email and not user.get("email"):
             updates.append("email=%s")
             params.append(email)
+
         current_credits = int(user.get("credits") or 0)
         if credits_target > current_credits:
             updates.append("credits=%s")
             params.append(credits_target)
             current_credits = credits_target
+
         if reset_password:
             updates.append("password_hash=%s")
             params.append(hash_password(password))
+
+        if ensure_verified and not user.get("email_verified"):
+            updates.append("email_verified=%s")
+            params.append(1)
+            updates.append("email_verified_at=%s")
+            params.append(datetime.utcnow())
+
         if updates:
             params.append(user["id"])
             await db_core.execute(
                 f"UPDATE users SET {', '.join(updates)} WHERE id=%s",
                 params,
             )
+
         return {
             "id": int(user["id"]),
             "username": username,
-            "role": "admin",
+            "role": role,
             "credits": current_credits,
         }
 
     pw_hash = hash_password(password)
     await db_core.execute(
-        "INSERT INTO users (username, email, password_hash, role, credits) VALUES (%s, %s, %s, %s, %s)",
-        (username, email or None, pw_hash, "admin", credits_target),
+        "INSERT INTO users (username, email, password_hash, role, credits, email_verified, email_verified_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (
+            username,
+            email or None,
+            pw_hash,
+            role,
+            credits_target,
+            1 if ensure_verified else 0,
+            datetime.utcnow() if ensure_verified else None,
+        ),
     )
     created = await db_core.execute(
         "SELECT id FROM users WHERE username=%s",
@@ -375,6 +709,35 @@ async def ensure_admin_user() -> Optional[Dict[str, Any]]:
     return {
         "id": user_id,
         "username": username,
-        "role": "admin",
+        "role": role,
         "credits": credits_target,
     }
+
+
+async def ensure_default_user() -> Optional[Dict[str, Any]]:
+    """Ensure a normal (non-admin) bootstrap account exists for testing.
+
+    Environment variables:
+      DEFAULT_USER_USERNAME, DEFAULT_USER_PASSWORD (required)
+      DEFAULT_USER_EMAIL (optional)
+      DEFAULT_USER_CREDITS (optional, minimum credits to set)
+      DEFAULT_USER_RESET_PASSWORD (optional, true/false to overwrite password)
+    """
+    username = os.getenv("DEFAULT_USER_USERNAME")
+    password = os.getenv("DEFAULT_USER_PASSWORD")
+    if not username or not password:
+        return None
+
+    email = os.getenv("DEFAULT_USER_EMAIL") or ""
+    credits_target = _parse_int(os.getenv("DEFAULT_USER_CREDITS"), default=0)
+    reset_password = _env_truthy(os.getenv("DEFAULT_USER_RESET_PASSWORD"))
+
+    return await _ensure_bootstrap_user(
+        username=username,
+        password=password,
+        role="user",
+        email=email or None,
+        credits_target=credits_target,
+        reset_password=reset_password,
+        ensure_verified=True,
+    )
