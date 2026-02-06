@@ -86,6 +86,45 @@ export default function ResearchTab({ loading, result, query, onStartSimulation 
   const readerItem = sources[0];
   const mapCounts = result?.map?.counts || {};
   const mapEntries = Object.entries(mapCounts);
+  const mapCenter = useMemo(() => {
+    const center = result?.map?.center;
+    if (
+      center &&
+      typeof center.lat === 'number' &&
+      typeof center.lon === 'number' &&
+      Number.isFinite(center.lat) &&
+      Number.isFinite(center.lon)
+    ) {
+      return center;
+    }
+    const marker = (result?.map?.markers || []).find(
+      (item) =>
+        typeof item?.lat === 'number' &&
+        typeof item?.lon === 'number' &&
+        Number.isFinite(item.lat) &&
+        Number.isFinite(item.lon)
+    );
+    return marker ? { lat: marker.lat, lon: marker.lon } : null;
+  }, [result?.map]);
+
+  const osmEmbedUrl = useMemo(() => {
+    if (!mapCenter) {
+      // Global fallback so the map card is always functional and not a blank placeholder.
+      return 'https://www.openstreetmap.org/export/embed.html?bbox=-180%2C-85%2C180%2C85&layer=mapnik';
+    }
+    const lat = Math.max(-85, Math.min(85, mapCenter.lat));
+    const lon = Math.max(-180, Math.min(180, mapCenter.lon));
+    const lonDelta = 0.03;
+    const latDelta = 0.02;
+    const bbox = `${lon - lonDelta},${lat - latDelta},${lon + lonDelta},${lat + latDelta}`;
+    const marker = `${lat},${lon}`;
+    return `https://www.openstreetmap.org/export/embed.html?bbox=${encodeURIComponent(bbox)}&layer=mapnik&marker=${encodeURIComponent(marker)}`;
+  }, [mapCenter]);
+
+  const osmPageUrl = useMemo(() => {
+    if (!mapCenter) return null;
+    return `https://www.openstreetmap.org/?mlat=${mapCenter.lat}&mlon=${mapCenter.lon}#map=14/${mapCenter.lat}/${mapCenter.lon}`;
+  }, [mapCenter]);
 
   return (
     <div className="space-y-6">
@@ -194,9 +233,26 @@ export default function ResearchTab({ loading, result, query, onStartSimulation 
 
           <div className="liquid-glass rounded-2xl p-5">
             <h3 className="font-bold mb-3 flex items-center gap-2"><MapPin className="w-4 h-4 text-green-400" />{isRTL ? 'ØªØ­Ù„ÙŠÙ„ Ø§Ù„Ù…Ù†Ø·Ù‚Ø©' : 'Area Analysis'}</h3>
-            <div className="aspect-video rounded-xl bg-secondary/50 mb-3 flex items-center justify-center">
-              <span className="text-muted-foreground text-xs">OpenStreetMap</span>
+            <div className="aspect-video rounded-xl bg-secondary/50 mb-3 overflow-hidden border border-border/50">
+              <iframe
+                title="OpenStreetMap area analysis"
+                src={osmEmbedUrl}
+                className="w-full h-full border-0"
+                loading="lazy"
+                referrerPolicy="no-referrer-when-downgrade"
+              />
             </div>
+            {osmPageUrl && (
+              <a
+                href={osmPageUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors inline-flex items-center gap-1 mb-3"
+              >
+                {isRTL ? 'ÙØªØ­ Ø§Ù„Ø®Ø±ÙŠØ·Ø© ÙÙŠ Ù†Ø§ÙØ°Ø© Ø¬Ø¯ÙŠØ¯Ø©' : 'Open map in new tab'}
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            )}
             {mapEntries.length ? (
               <div className="grid grid-cols-3 gap-2">
                 {mapEntries.slice(0, 6).map(([tag, count]) => (
@@ -208,7 +264,7 @@ export default function ResearchTab({ loading, result, query, onStartSimulation 
               </div>
             ) : (
               <p className="text-xs text-muted-foreground">
-                {isRTL ? 'Ø£Ø¶Ù Ù…ÙˆÙ‚Ø¹Ù‹Ø§ Ù„Ù„Ø­ØµÙˆÙ„ Ø¹Ù„Ù‰ Ø¥Ø­ØµØ§Ø¦ÙŠØ§Øª Ø§Ù„Ù…Ù†Ø·Ù‚Ø©.' : 'Add a location to see area stats.'}
+                {mapCenter ? (isRTL ? 'áã íÊã ÇáÚËæÑ Úáì ÅÍÕÇÆíÇÊ ãæÇŞÚ ŞÑíÈÉ ááÊÕäíİÇÊ ÇáÍÇáíÉ.' : 'No nearby POI stats were found for the selected tags.') : (isRTL ? 'ÃÖİ ãæŞÚğÇ ááÍÕæá Úáì ÅÍÕÇÆíÇÊ ÇáãäØŞÉ.' : 'Add a location to see area stats.')}
               </p>
             )}
           </div>
@@ -217,3 +273,5 @@ export default function ResearchTab({ loading, result, query, onStartSimulation 
     </div>
   );
 }
+
+
