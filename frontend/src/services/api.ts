@@ -43,16 +43,20 @@ export interface SimulationConfig {
   reasoning_detail?: 'short' | 'full';
   llm_batch_size?: number;
   llm_concurrency?: number;
+  parent_simulation_id?: string;
+  followup_mode?: 'make_acceptable' | 'bring_to_world';
+  seed_context?: Record<string, unknown>;
 }
 
 export interface SimulationResponse {
   simulation_id: string;
-  status: 'running' | 'completed' | 'error';
+  status: 'initializing' | 'running' | 'paused' | 'completed' | 'error';
+  status_reason?: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'error' | 'completed';
 }
 
 export interface SimulationResultResponse {
   simulation_id: string;
-  status: 'running' | 'completed';
+  status: 'running' | 'paused' | 'completed' | 'error';
   metrics?: {
     total_agents?: number;
     accepted: number;
@@ -67,9 +71,33 @@ export interface SimulationResultResponse {
 
 export interface SimulationStateResponse {
   simulation_id: string;
-  status: 'running' | 'completed';
+  status: 'running' | 'paused' | 'completed' | 'error';
+  status_reason?: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'error' | 'completed';
+  policy_mode?: 'normal' | 'safety_guard_hard';
+  policy_reason?: string | null;
+  search_quality?: {
+    usable_sources: number;
+    domains: number;
+    extraction_success_rate: number;
+  } | null;
+  current_phase_key?: string | null;
+  phase_progress_pct?: number | null;
+  event_seq?: number;
+  pause_available?: boolean;
   summary_ready?: boolean;
   summary_at?: string;
+  can_resume?: boolean;
+  resume_reason?: string | null;
+  pending_clarification?: {
+    question_id: string;
+    question: string;
+    options: { id?: string; label?: string; text?: string; value?: string }[];
+    reason_tag?: string | null;
+    reason_summary?: string | null;
+    created_at?: number | null;
+    required?: boolean;
+  } | null;
+  can_answer_clarification?: boolean;
   metrics?: {
     total_agents?: number;
     accepted: number;
@@ -88,17 +116,52 @@ export interface SimulationStateResponse {
     confidence?: number;
   }[];
   reasoning?: {
+    step_uid?: string;
+    event_seq?: number;
     agent_id: string;
     agent_short_id?: string;
+    agent_label?: string;
     archetype?: string;
     iteration: number;
     phase?: string;
     reply_to_agent_id?: string;
+    reply_to_short_id?: string;
     message: string;
     opinion?: 'accept' | 'reject' | 'neutral';
-    opinion_source?: 'llm' | 'default' | 'fallback';
-    stance_confidence?: number;
-    reasoning_length?: 'short' | 'full';
+    stance_before?: 'accept' | 'reject' | 'neutral';
+      stance_after?: 'accept' | 'reject' | 'neutral';
+      opinion_source?: 'llm' | 'llm_classified' | 'fallback';
+      stance_confidence?: number;
+      reasoning_length?: 'short' | 'full';
+      fallback_reason?: string | null;
+      relevance_score?: number | null;
+      policy_guard?: boolean;
+      policy_reason?: string | null;
+      stance_locked?: boolean;
+    }[];
+  chat_events?: {
+    event_seq: number;
+    message_id: string;
+    role: 'user' | 'system' | 'research' | 'status';
+    content: string;
+    meta?: Record<string, unknown>;
+    timestamp?: number | null;
+  }[];
+  research_sources?: {
+    event_seq?: number;
+    url?: string | null;
+    domain?: string | null;
+    favicon_url?: string | null;
+    action?: string | null;
+    status?: string | null;
+    title?: string | null;
+    http_status?: number | null;
+    content_chars?: number | null;
+    relevance_score?: number | null;
+    progress_pct?: number | null;
+    snippet?: string | null;
+    error?: string | null;
+    timestamp?: number | null;
   }[];
   summary?: string;
   error?: string;
@@ -124,6 +187,10 @@ export interface UserMe {
   credits: number;
   daily_usage?: number;
   daily_limit?: number;
+  daily_tokens_used?: number;
+  daily_tokens_limit?: number;
+  daily_tokens_remaining?: number;
+  token_price_per_1k_credits?: number;
   email?: string;
   email_verified?: boolean | number;
 }
@@ -136,6 +203,11 @@ export interface RedeemResponse {
 export interface PromoCreateResponse {
   id: number;
   code: string;
+}
+
+export interface BillingSettingsResponse {
+  token_price_per_1k_credits: number;
+  free_daily_tokens: number;
 }
 
 export interface PromoteResponse {
@@ -175,7 +247,7 @@ export interface SearchStructured {
 
 export interface SimulationListItem {
   simulation_id: string;
-  status: 'running' | 'completed' | 'error';
+  status: 'running' | 'paused' | 'completed' | 'error';
   idea: string;
   category?: string;
   created_at?: string;
@@ -183,11 +255,93 @@ export interface SimulationListItem {
   summary?: string;
   acceptance_rate?: number;
   total_agents?: number;
+  can_resume?: boolean;
+  resume_reason?: string | null;
 }
 
 export interface SimulationListResponse {
   items: SimulationListItem[];
   total: number;
+}
+
+export interface SimulationResumeResponse {
+  simulation_id: string;
+  status: 'running' | 'paused' | 'completed' | 'error';
+  resumed: boolean;
+  resume_from_phase?: string | null;
+}
+
+export interface SimulationPauseResponse {
+  simulation_id: string;
+  status: 'running' | 'paused' | 'completed' | 'error';
+  paused: boolean;
+}
+
+export interface SimulationChatEventResponse {
+  ok: boolean;
+  event_seq: number;
+  message_id: string;
+}
+
+export interface SimulationClarificationAnswerResponse {
+  ok: boolean;
+  simulation_id: string;
+  resumed: boolean;
+  applied_answer: string;
+  answer_source: 'custom' | 'option';
+}
+
+export interface SimulationPostActionResponse {
+  action: 'make_acceptable' | 'bring_to_world';
+  title: string;
+  summary: string;
+  steps: string[];
+  risks: string[];
+  kpis: string[];
+  followup_seed?: Record<string, unknown>;
+  revised_idea?: string;
+  compliance_fixes?: string[];
+  blocking_reasons?: string[];
+  mvp_scope?: string[];
+  go_to_market?: string[];
+  '30_day_plan'?: string[];
+}
+
+export interface SimulationAgentsResponse {
+  simulation_id: string;
+  items: {
+    agent_id: string;
+    agent_short_id?: string;
+    agent_label?: string;
+    archetype?: string;
+    category_id?: string;
+    opinion: 'accept' | 'reject' | 'neutral';
+    confidence?: number;
+    phase?: string;
+  }[];
+  page: number;
+  page_size: number;
+  total: number;
+}
+
+export interface SimulationResearchSourcesResponse {
+  simulation_id: string;
+  items: {
+    event_seq?: number;
+    url?: string | null;
+    domain?: string | null;
+    favicon_url?: string | null;
+    action?: string | null;
+    status?: string | null;
+    title?: string | null;
+    http_status?: number | null;
+    content_chars?: number | null;
+    relevance_score?: number | null;
+    progress_pct?: number | null;
+    snippet?: string | null;
+    error?: string | null;
+    timestamp?: number | null;
+  }[];
 }
 
 export interface SimulationAnalyticsResponse {
@@ -421,6 +575,17 @@ class ApiService {
     });
   }
 
+  async getBillingSettings(): Promise<BillingSettingsResponse> {
+    return this.request<BillingSettingsResponse>('/admin/billing');
+  }
+
+  async updateBillingSettings(payload: BillingSettingsResponse): Promise<BillingSettingsResponse> {
+    return this.request<BillingSettingsResponse>('/admin/billing', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
   async updateRole(payload: { user_id?: number; username?: string; role: string }): Promise<any> {
     return this.request('/admin/role', {
       method: 'POST',
@@ -447,6 +612,72 @@ class ApiService {
     return this.request<SimulationResponse>('/simulation/start', {
       method: 'POST',
       body: JSON.stringify(config),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async resumeSimulation(simulationId: string): Promise<SimulationResumeResponse> {
+    return this.request<SimulationResumeResponse>('/simulation/resume', {
+      method: 'POST',
+      body: JSON.stringify({ simulation_id: simulationId }),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async pauseSimulation(simulationId: string, reason?: string): Promise<SimulationPauseResponse> {
+    return this.request<SimulationPauseResponse>('/simulation/pause', {
+      method: 'POST',
+      body: JSON.stringify({ simulation_id: simulationId, reason }),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async submitClarificationAnswer(payload: {
+    simulation_id: string;
+    question_id: string;
+    selected_option_id?: string;
+    custom_text?: string;
+  }): Promise<SimulationClarificationAnswerResponse> {
+    return this.request<SimulationClarificationAnswerResponse>('/simulation/clarification/answer', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async requestPostAction(payload: {
+    simulation_id: string;
+    action: 'make_acceptable' | 'bring_to_world';
+  }): Promise<SimulationPostActionResponse> {
+    return this.request<SimulationPostActionResponse>('/simulation/post-action', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async appendSimulationChatEvent(payload: {
+    simulation_id: string;
+    role: 'user' | 'system' | 'research' | 'status';
+    content: string;
+    message_id?: string;
+    meta?: Record<string, unknown>;
+  }): Promise<SimulationChatEventResponse> {
+    return this.request<SimulationChatEventResponse>('/simulation/chat/event', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async updateSimulationContext(simulationId: string, updates: Record<string, unknown>): Promise<{
+    simulation_id: string;
+    updated: boolean;
+    user_context: Record<string, unknown>;
+  }> {
+    return this.request('/simulation/context', {
+      method: 'POST',
+      body: JSON.stringify({ simulation_id: simulationId, updates }),
       timeoutMs: ApiService.LONG_TIMEOUT_MS,
     });
   }
@@ -483,6 +714,25 @@ class ApiService {
       }
       throw err;
     }
+  }
+
+  async getSimulationAgents(
+    simulationId: string,
+    options?: { stance?: 'accepted' | 'rejected' | 'neutral' | 'accept' | 'reject'; phase?: string; page?: number; pageSize?: number }
+  ): Promise<SimulationAgentsResponse> {
+    const params = new URLSearchParams();
+    params.set('simulation_id', simulationId);
+    if (options?.stance) params.set('stance', options.stance);
+    if (options?.phase) params.set('phase', options.phase);
+    params.set('page', String(Math.max(1, options?.page ?? 1)));
+    params.set('page_size', String(Math.max(1, options?.pageSize ?? 50)));
+    return this.request<SimulationAgentsResponse>(`/simulation/agents?${params.toString()}`);
+  }
+
+  async getSimulationResearchSources(simulationId: string): Promise<SimulationResearchSourcesResponse> {
+    return this.request<SimulationResearchSourcesResponse>(
+      `/simulation/research/sources?simulation_id=${encodeURIComponent(simulationId)}`
+    );
   }
 
   async generateMessage(prompt: string, system?: string): Promise<string> {

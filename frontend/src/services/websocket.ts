@@ -1,19 +1,40 @@
-export type MessageType = 'reasoning_step' | 'reasoning_debug' | 'metrics' | 'agents' | 'summary';
+export type MessageType =
+  | 'reasoning_step'
+  | 'reasoning_debug'
+  | 'metrics'
+  | 'agents'
+  | 'summary'
+  | 'phase_update'
+  | 'research_update'
+  | 'clarification_request'
+  | 'clarification_resolved'
+  | 'chat_event';
 
 export interface ReasoningStepEvent {
   type: 'reasoning_step';
   simulation_id?: string;
+  step_uid?: string;
+  event_seq?: number;
   agent_id: string;
   agent_short_id?: string;
+  agent_label?: string;
   archetype?: string;
   iteration: number;
   phase?: string;
   reply_to_agent_id?: string;
+  reply_to_short_id?: string;
   message: string;
   opinion?: 'accept' | 'reject' | 'neutral';
-  opinion_source?: 'llm' | 'default' | 'fallback';
+  stance_before?: 'accept' | 'reject' | 'neutral';
+  stance_after?: 'accept' | 'reject' | 'neutral';
+  opinion_source?: 'llm' | 'llm_classified' | 'fallback';
   stance_confidence?: number;
   reasoning_length?: 'short' | 'full';
+  fallback_reason?: string | null;
+  relevance_score?: number | null;
+  policy_guard?: boolean;
+  policy_reason?: string | null;
+  stance_locked?: boolean;
   // Backend does not include timestamp; client adds one for ordering.
   timestamp?: number;
 }
@@ -33,6 +54,7 @@ export interface ReasoningDebugEvent {
 export interface MetricsEvent {
   type: 'metrics';
   simulation_id?: string;
+  event_seq?: number;
   accepted: number;
   rejected: number;
   neutral: number;
@@ -55,6 +77,7 @@ export interface AgentSnapshot {
 export interface AgentsEvent {
   type: 'agents';
   simulation_id?: string;
+  event_seq?: number;
   agents: AgentSnapshot[];
   iteration: number;
   total_agents?: number;
@@ -66,7 +89,78 @@ export interface SummaryEvent {
   summary: string;
 }
 
-export type WebSocketEvent = ReasoningStepEvent | ReasoningDebugEvent | MetricsEvent | AgentsEvent | SummaryEvent;
+export interface PhaseUpdateEvent {
+  type: 'phase_update';
+  simulation_id?: string;
+  event_seq?: number;
+  phase_key?: string;
+  phase_label?: string;
+  progress_pct?: number;
+  status?: string;
+  reason?: string;
+}
+
+export interface ResearchUpdateEvent {
+  type: 'research_update';
+  simulation_id?: string;
+  event_seq?: number;
+  action?: 'query_started' | 'query_result' | 'url_opened' | 'url_extracted' | 'url_failed' | 'search_completed' | 'search_failed' | string;
+  status?: string;
+  url?: string | null;
+  domain?: string | null;
+  favicon_url?: string | null;
+  title?: string | null;
+  http_status?: number | null;
+  content_chars?: number | null;
+  relevance_score?: number | null;
+  snippet?: string | null;
+  error?: string | null;
+  progress_pct?: number;
+}
+
+export interface ClarificationRequestEvent {
+  type: 'clarification_request';
+  simulation_id?: string;
+  event_seq?: number;
+  question_id: string;
+  question: string;
+  options: { id?: string; label?: string; text?: string; value?: string }[];
+  reason_tag?: string | null;
+  reason_summary?: string | null;
+  created_at?: number;
+  required?: boolean;
+}
+
+export interface ClarificationResolvedEvent {
+  type: 'clarification_resolved';
+  simulation_id?: string;
+  event_seq?: number;
+  question_id: string;
+  answer_source?: 'custom' | 'option';
+}
+
+export interface ChatEventEvent {
+  type: 'chat_event';
+  simulation_id?: string;
+  event_seq?: number;
+  message_id?: string;
+  role?: 'user' | 'system' | 'research' | 'status';
+  content?: string;
+  meta?: Record<string, unknown>;
+  timestamp?: number;
+}
+
+export type WebSocketEvent =
+  | ReasoningStepEvent
+  | ReasoningDebugEvent
+  | MetricsEvent
+  | AgentsEvent
+  | SummaryEvent
+  | PhaseUpdateEvent
+  | ResearchUpdateEvent
+  | ClarificationRequestEvent
+  | ClarificationResolvedEvent
+  | ChatEventEvent;
 
 type EventCallback = (event: WebSocketEvent) => void;
 

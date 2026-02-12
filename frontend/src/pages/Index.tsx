@@ -1,5 +1,5 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+﻿import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { Header } from '@/components/Header';
 import {
   CATEGORY_OPTIONS,
@@ -41,7 +41,7 @@ const AUDIENCE_DESCRIPTIONS: Record<string, { ar: string; en: string }> = {
   'Millennials (25-40)': { ar: 'شريحة نشطة اقتصادياً', en: 'Economically active cohort' },
   'Gen X (41-56)': { ar: 'خبرة عملية وقرارات محسوبة', en: 'Experienced, pragmatic decision-makers' },
   'Boomers (57-75)': { ar: 'يميلون للثقة والاستقرار', en: 'Trust and stability focused' },
-  Developers: { ar: 'مطوّرون ومهندسو برمجيات', en: 'Software developers and engineers' },
+  Developers: { ar: 'مطورون ومهندسو برمجيات', en: 'Software developers and engineers' },
   Enterprises: { ar: 'شركات كبرى وقرارات مؤسسية', en: 'Large enterprises with formal buying' },
   SMBs: { ar: 'شركات صغيرة ومتوسطة', en: 'Small & medium-sized businesses' },
   Consumers: { ar: 'مستهلكون أفراد', en: 'End consumers' },
@@ -93,6 +93,7 @@ const CATEGORY_KEYWORDS: Record<string, string> = {
 const DEFAULT_CATEGORY = 'technology';
 const DEFAULT_AUDIENCE = ['Consumers'];
 const DEFAULT_GOALS = ['Market Validation'];
+const MAX_CHAT_MESSAGES = 40;
 const SEARCH_TIMEOUT_BASE_MS = 10000;
 const SEARCH_TIMEOUT_STEP_MS = 7000;
 const SEARCH_TIMEOUT_MAX_MS = 30000;
@@ -164,10 +165,99 @@ const normalizeMaturityValue = (value?: string): UserInput['ideaMaturity'] | und
 
 
 
+const inferReplyLanguage = (
+  text: string,
+  fallback: 'ar' | 'en'
+): 'ar' | 'en' | 'mixed' => {
+  const hasArabic = /[\u0600-\u06FF]/.test(text);
+  const hasLatin = /[A-Za-z]/.test(text);
+  if (hasArabic && hasLatin) return 'mixed';
+  if (hasArabic) return 'ar';
+  if (hasLatin) return 'en';
+  return fallback;
+};
+
+const normalizeAssistantText = (text: string): string => {
+  return text
+    .replace(/\r\n/g, '\n')
+    .replace(/^\s*#{1,6}\s*/gm, '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/__(.*?)__/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/^\s*>\s?/gm, '')
+    .replace(/^\s*[-*]\s+/gm, '- ')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '$1 ($2)')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+};
+
+const parseNumericQualityFields = (raw: string) => {
+  const text = String(raw || '');
+  const readPair = (key: string) => {
+    const match = text.match(new RegExp(`${key}=([0-9.]+)/([0-9.]+)`, 'i'));
+    if (!match) return null;
+    return {
+      current: Number(match[1]),
+      required: Number(match[2]),
+    };
+  };
+  const usable = readPair('usable_sources');
+  const domains = readPair('domains');
+  const chars = readPair('max_content_chars');
+  const extraction = (() => {
+    const match = text.match(/extraction_success_rate=([0-9.]+)/i);
+    return match ? Number(match[1]) : null;
+  })();
+  return { usable, domains, chars, extraction };
+};
+
+const formatSearchFailureReason = (
+  reason: string | null | undefined,
+  language: 'ar' | 'en',
+  searchQuality?: {
+    usable_sources: number;
+    domains: number;
+    extraction_success_rate: number;
+  } | null
+) => {
+  const raw = String(reason || '').trim();
+  if (!raw) return '';
+  const isQualityGate = /search quality below threshold/i.test(raw);
+  if (!isQualityGate) return raw;
+
+  const parsed = parseNumericQualityFields(raw);
+  const usableCurrent = parsed.usable?.current ?? searchQuality?.usable_sources ?? 0;
+  const usableRequired = parsed.usable?.required ?? 2;
+  const domainsCurrent = parsed.domains?.current ?? searchQuality?.domains ?? 0;
+  const domainsRequired = parsed.domains?.required ?? 2;
+  const charsCurrent = parsed.chars?.current ?? 0;
+  const charsRequired = parsed.chars?.required ?? 80;
+  const extractionRate = parsed.extraction ?? searchQuality?.extraction_success_rate ?? 0;
+
+  if (language === 'ar') {
+    return `جودة البحث أقل من الحد المطلوب. المصادر الصالحة: ${usableCurrent}/${usableRequired}، النطاقات المختلفة: ${domainsCurrent}/${domainsRequired}، أكبر محتوى مستخرج: ${charsCurrent}/${charsRequired} حرف، ونسبة نجاح الاستخراج: ${(extractionRate * 100).toFixed(0)}%.`;
+  }
+
+  return `Search quality is below the required threshold. Usable sources: ${usableCurrent}/${usableRequired}, domains: ${domainsCurrent}/${domainsRequired}, max extracted content: ${charsCurrent}/${charsRequired} chars, extraction success: ${(extractionRate * 100).toFixed(0)}%.`;
+};
+
+
 
 const Index = () => {
+  const location = useLocation();
   const navigate = useNavigate();
-  const simulation = useSimulation();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedSimulationId = searchParams.get('simulation_id')?.trim() || '';
+  const suppressAutoRestore = !requestedSimulationId && (() => {
+    if (typeof window === 'undefined') return false;
+    const pendingAutoStart = window.localStorage.getItem('pendingAutoStart') === 'true';
+    const pendingIdea = (window.localStorage.getItem('pendingIdea') || '').trim();
+    const routeState = location.state as { idea?: string; autoStart?: boolean } | null;
+    const routeIdea = typeof routeState?.idea === 'string' ? routeState.idea.trim() : '';
+    const routeAutoStart = Boolean(routeState?.autoStart && routeIdea);
+    return Boolean(routeAutoStart || pendingAutoStart || pendingIdea);
+  })();
+  const simulation = useSimulation({ suppressAutoRestore });
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [userInput, setUserInput] = useState<UserInput>({
     idea: '',
@@ -178,7 +268,7 @@ const Index = () => {
     riskAppetite: 50,
     ideaMaturity: 'concept',
     goals: [],
-    agentCount: 30,
+    agentCount: 20,
   });
   const [touched, setTouched] = useState({
     category: false,
@@ -194,17 +284,8 @@ const Index = () => {
   const [hasStarted, setHasStarted] = useState(false);
   const [autoStartPending, setAutoStartPending] = useState(false);
   const summaryRef = useRef<string | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
   const searchPromptedRef = useRef(false);
   const searchAttemptRef = useRef(0);
-  const [leftWidth, setLeftWidth] = useState(320);
-  const [rightWidth, setRightWidth] = useState(320);
-  const dragRef = useRef<{ side: 'left' | 'right' | null; startX: number; startLeft: number; startRight: number }>({
-    side: null,
-    startX: 0,
-    startLeft: 320,
-    startRight: 320,
-  });
   const [settings, setSettings] = useState({
     language: 'ar' as 'ar' | 'en',
     theme: 'dark',
@@ -223,12 +304,35 @@ const Index = () => {
   const [summaryReasons, setSummaryReasons] = useState<string[]>([]);
   const [pendingResearchReview, setPendingResearchReview] = useState(false);
   const [reportBusy, setReportBusy] = useState(false);
+  const [resumeBusy, setResumeBusy] = useState(false);
+  const [pauseBusy, setPauseBusy] = useState(false);
+  const [clarificationBusy, setClarificationBusy] = useState(false);
+  const [postActionBusy, setPostActionBusy] = useState<'make_acceptable' | 'bring_to_world' | null>(null);
+  const [postActionResult, setPostActionResult] = useState<{
+    action: 'make_acceptable' | 'bring_to_world';
+    title: string;
+    summary: string;
+    steps: string[];
+    risks: string[];
+    kpis: string[];
+    revised_idea?: string;
+    followup_seed?: Record<string, unknown>;
+  } | null>(null);
   const [reasoningActive, setReasoningActive] = useState(false);
+  const [selectedStanceFilter, setSelectedStanceFilter] = useState<'accepted' | 'rejected' | 'neutral' | null>(null);
+  const [filteredAgents, setFilteredAgents] = useState<{
+    agent_id: string;
+    agent_label?: string;
+    agent_short_id?: string;
+    archetype?: string;
+    opinion: 'accept' | 'reject' | 'neutral';
+  }[]>([]);
+  const [filteredAgentsTotal, setFilteredAgentsTotal] = useState(0);
   const [creditNotice, setCreditNotice] = useState<string | null>(null);
   const [meSnapshot, setMeSnapshot] = useState<UserMe | null>(null);
   const reasoningTimerRef = useRef<number | null>(null);
   const [searchState, setSearchState] = useState<{
-    status: 'idle' | 'searching' | 'done' | 'timeout';
+    status: 'idle' | 'searching' | 'complete' | 'timeout' | 'error';
     query?: string;
     answer?: string;
     provider?: string;
@@ -250,16 +354,38 @@ const Index = () => {
   });
   const [researchIdea, setResearchIdea] = useState('');
   const lastLoggedSimulationRef = useRef<string | null>(null);
+  const loadedFromQueryRef = useRef<string | null>(null);
+  const consumedRouteStartRef = useRef(false);
+  const persistedChatKeysRef = useRef<Set<string>>(new Set());
+  const persistChatBusyRef = useRef(false);
 
   const getAssistantMessage = useCallback(async (prompt: string) => {
     const context = chatMessages
       .slice(-6)
       .map((msg) => `${msg.type === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
       .join('\n');
+    const userLanguageContext = chatMessages
+      .filter((msg) => msg.type === 'user')
+      .slice(-3)
+      .map((msg) => msg.content)
+      .join('\n');
+    const inferredLanguage = inferReplyLanguage(
+      `${prompt}\n${userLanguageContext}`,
+      settings.language
+    );
+    const languageInstruction =
+      inferredLanguage === 'mixed'
+        ? 'Reply in a natural mixed Arabic-English style that mirrors the user wording.'
+        : inferredLanguage === 'ar'
+        ? 'Reply in Arabic.'
+        : 'Reply in English.';
     const fullPrompt = context ? `Conversation:\n${context}\nUser: ${prompt}\nAssistant:` : prompt;
-    const system = settings.language === 'ar'
-      ? 'أنت مساعد موجز لواجهة محاكاة منتجات. أجب بالعربية وبدون تنسيق Markdown.'
-      : 'You are a concise assistant for a product simulation UI. Avoid markdown formatting like **bold**.';
+    const system = [
+      'You are a concise assistant for a product simulation UI.',
+      languageInstruction,
+      'Keep responses short, practical, and natural.',
+      'Output plain text only. Do not use Markdown formatting like **bold**, headings, or markdown bullets.',
+    ].join(' ');
     try {
       const timeoutMs = 6000;
       const text = await Promise.race([
@@ -268,7 +394,7 @@ const Index = () => {
           setTimeout(() => reject(new Error('LLM timeout')), timeoutMs)
         ),
       ]);
-      return String(text).replace(/\*\*/g, '').trim();
+      return normalizeAssistantText(String(text));
     } catch {
       return '';
     }
@@ -294,29 +420,174 @@ const Index = () => {
     throw new Error('Extract failed');
   }, []);
 
-  const addSystemMessage = useCallback((content: string, options?: ChatMessage['options']) => {
+  const addSystemMessage = useCallback((
+    content: string,
+    options?: ChatMessage['options'],
+    mode: 'replace_previous_system' | 'append' = 'replace_previous_system'
+  ) => {
+    const cleanedContent = normalizeAssistantText(content);
     const message: ChatMessage = {
       id: `sys-${Date.now()}`,
       type: 'system',
-      content,
+      content: cleanedContent,
       timestamp: Date.now(),
       options,
     };
-    setChatMessages((prev) => [...prev, message]);
+    setChatMessages((prev) => {
+      const next =
+        mode === 'replace_previous_system' && prev.length > 0 && prev[prev.length - 1]?.type === 'system'
+          ? [...prev.slice(0, -1), message]
+          : [...prev, message];
+      if (next.length <= MAX_CHAT_MESSAGES) return next;
+      return next.slice(-MAX_CHAT_MESSAGES);
+    });
   }, []);
+
+  const addUserMessage = useCallback((content: string, options?: { dedupe?: boolean }) => {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+    setChatMessages((prev) => {
+      if (options?.dedupe) {
+        const alreadyExists = prev.some(
+          (msg) => msg.type === 'user' && msg.content.trim() === trimmed
+        );
+        if (alreadyExists) return prev;
+      }
+      const next = [
+        ...prev,
+        {
+          id: `user-${Date.now()}`,
+          type: 'user' as const,
+          content: trimmed,
+          timestamp: Date.now(),
+        },
+      ];
+      if (next.length <= MAX_CHAT_MESSAGES) return next;
+      return next.slice(-MAX_CHAT_MESSAGES);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!requestedSimulationId) return;
+    if (
+      loadedFromQueryRef.current === requestedSimulationId
+      && simulation.simulationId === requestedSimulationId
+    ) {
+      return;
+    }
+    loadedFromQueryRef.current = requestedSimulationId;
+    setAutoStartPending(false);
+      simulation.loadSimulation(requestedSimulationId).catch((err: unknown) => {
+      const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
+      addSystemMessage(
+        settings.language === 'ar'
+          ? `تعذر تحميل جلسة المحاكاة.${msg}`.trim()
+          : `Failed to load simulation session.${msg}`.trim()
+      );
+    });
+  }, [
+    addSystemMessage,
+    requestedSimulationId,
+    settings.language,
+    simulation.loadSimulation,
+    simulation.simulationId,
+  ]);
+
+  useEffect(() => {
+    const simulationId = simulation.simulationId?.trim();
+    if (!simulationId) return;
+    if (requestedSimulationId === simulationId) return;
+    const next = new URLSearchParams(searchParams);
+    next.set('simulation_id', simulationId);
+    setSearchParams(next, { replace: true });
+  }, [requestedSimulationId, searchParams, setSearchParams, simulation.simulationId]);
+
+  useEffect(() => {
+    const simulationId = simulation.simulationId?.trim();
+    if (!simulationId) return;
+    if (!simulation.chatEvents || simulation.chatEvents.length === 0) return;
+    const mappedMessages: ChatMessage[] = simulation.chatEvents
+      .map((event) => {
+        const meta = (event.meta && typeof event.meta === 'object') ? event.meta as Record<string, unknown> : {};
+        const optionMeta = meta.options;
+        const options = optionMeta && typeof optionMeta === 'object'
+          ? optionMeta as ChatMessage['options']
+          : undefined;
+        const sanitizedOptions = options?.field === 'clarification_choice'
+          ? undefined
+          : options;
+        return {
+          id: event.messageId || `chat-${event.eventSeq}`,
+          type: event.role === 'user' ? 'user' : 'system',
+          content: event.content || '',
+          timestamp: event.timestamp || Date.now(),
+          options: sanitizedOptions,
+        } satisfies ChatMessage;
+      })
+      .sort((a, b) => a.timestamp - b.timestamp);
+    setChatMessages(mappedMessages.slice(-MAX_CHAT_MESSAGES));
+    const keys = persistedChatKeysRef.current;
+    mappedMessages.forEach((message) => {
+      keys.add(`${simulationId}:${message.id}`);
+    });
+  }, [simulation.chatEvents, simulation.simulationId]);
+
+  useEffect(() => {
+    const simulationId = simulation.simulationId?.trim();
+    if (!simulationId) return;
+    if (persistChatBusyRef.current) return;
+    let cancelled = false;
+    const persistPending = async () => {
+      if (persistChatBusyRef.current) return;
+      persistChatBusyRef.current = true;
+      try {
+        for (const message of chatMessages) {
+          if (cancelled) return;
+          const key = `${simulationId}:${message.id}`;
+          if (persistedChatKeysRef.current.has(key)) continue;
+          persistedChatKeysRef.current.add(key);
+          const role = message.type === 'user'
+            ? 'user'
+            : message.type === 'agent'
+              ? 'status'
+              : 'system';
+          try {
+            await apiService.appendSimulationChatEvent({
+              simulation_id: simulationId,
+              role,
+              content: message.content,
+              message_id: message.id,
+              meta: {
+                ui_type: message.type,
+                options: message.options ?? null,
+              },
+            });
+          } catch {
+            persistedChatKeysRef.current.delete(key);
+          }
+        }
+      } finally {
+        persistChatBusyRef.current = false;
+      }
+    };
+    void persistPending();
+    return () => {
+      cancelled = true;
+    };
+  }, [chatMessages, simulation.simulationId]);
 
   useEffect(() => {
     if (!simulation.summary) return;
     if (simulation.summary === summaryRef.current) return;
     addSystemMessage(simulation.summary);
-    const arMatch = simulation.summary.split('نصيحة لإقناع المعارضين:')[1];
+    const arMatch = simulation.summary.split('صياغة إقناع الرافضين:')[1];
     const enMatch = simulation.summary.split('Advice to persuade rejecters:')[1];
     const advice = (arMatch || enMatch || '').trim();
     if (advice) {
       setSummaryAdvice(advice);
     }
     const reasonKeywords = settings.language === 'ar'
-      ? ['مخاطر', 'قلق', 'رفض', 'غير واضح', 'غير حاسم', 'امتثال', 'ثقة', 'خصوصية', 'تكلفة', 'منافس']
+      ? ['خطر', 'قلق', 'رفض', 'غير واضح', 'غير حاسم', 'امتثال', 'ثقة', 'خصوصية', 'تكلفة', 'منافس']
       : ['risk', 'concern', 'reject', 'unclear', 'inconclusive', 'compliance', 'trust', 'privacy', 'cost', 'competition'];
     const sentences = simulation.summary
       .split(/[.\n]/)
@@ -352,30 +623,41 @@ const Index = () => {
         // ignore
       }
     }
-    const savedLayout = localStorage.getItem('layoutWidths');
-    if (savedLayout) {
-      try {
-        const parsed = JSON.parse(savedLayout);
-        if (parsed.left) setLeftWidth(parsed.left);
-        if (parsed.right) setRightWidth(parsed.right);
-      } catch {
-        // ignore
-      }
-    }
   }, []);
 
   useEffect(() => {
-    const pendingIdea = localStorage.getItem('pendingIdea');
+    const routeState = location.state as { idea?: string; autoStart?: boolean } | null;
+    const canUseRouteState = !consumedRouteStartRef.current;
+    const routeIdea = canUseRouteState && typeof routeState?.idea === 'string'
+      ? routeState.idea.trim()
+      : '';
+    const routeAutoStart = Boolean(canUseRouteState && routeState?.autoStart && routeIdea);
+    if (routeIdea || routeAutoStart) {
+      consumedRouteStartRef.current = true;
+    }
+
+    const pendingIdea = (localStorage.getItem('pendingIdea') || '').trim();
+    const dashboardIdea = (localStorage.getItem('dashboardIdea') || '').trim();
     const pendingAutoStart = localStorage.getItem('pendingAutoStart');
-    if (pendingIdea) {
-      setUserInput((prev) => ({ ...prev, idea: pendingIdea }));
-      localStorage.removeItem('pendingIdea');
+    const hasNewRunIntent = Boolean(routeAutoStart || pendingAutoStart || pendingIdea);
+    if (requestedSimulationId && !hasNewRunIntent) return;
+    if (requestedSimulationId && hasNewRunIntent) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('simulation_id');
+      setSearchParams(next, { replace: true });
+    }
+    const nextIdea = routeIdea || pendingIdea || ((routeAutoStart || pendingAutoStart) ? dashboardIdea : '');
+    if (nextIdea) {
+      setUserInput((prev) => ({ ...prev, idea: nextIdea }));
+    }
+    if (pendingIdea) localStorage.removeItem('pendingIdea');
+    if (routeAutoStart || pendingAutoStart) {
+      setAutoStartPending(true);
     }
     if (pendingAutoStart) {
-      setAutoStartPending(true);
       localStorage.removeItem('pendingAutoStart');
     }
-  }, []);
+  }, [location.state, requestedSimulationId, searchParams, setSearchParams]);
 
   useEffect(() => {
     const trimmedIdea = userInput.idea.trim();
@@ -419,10 +701,6 @@ const Index = () => {
     root.classList.add(`theme-${settings.theme}`);
   }, [settings]);
 
-  useEffect(() => {
-    localStorage.setItem('layoutWidths', JSON.stringify({ left: leftWidth, right: rightWidth }));
-  }, [leftWidth, rightWidth]);
-
   const buildConfig = useCallback((input: UserInput) => {
     const trimmedIdea = input.idea.trim();
     const hasMatchingResearch = Boolean(trimmedIdea && researchIdea && researchIdea === trimmedIdea);
@@ -462,15 +740,12 @@ const Index = () => {
 
   const isCreditsBlocked = useCallback((me?: UserMe | null) => {
     if (!me) return false;
-    if (typeof me.daily_usage === 'number' && typeof me.daily_limit === 'number') {
-      if (me.daily_limit <= 0) {
-        return (me.credits ?? 0) <= 0;
-      }
-      if (me.daily_usage >= me.daily_limit) {
-        return (me.credits ?? 0) <= 0;
-      }
-      return false;
-    }
+    const remainingTokens = typeof me.daily_tokens_remaining === 'number'
+      ? me.daily_tokens_remaining
+      : (typeof me.daily_tokens_limit === 'number' && typeof me.daily_tokens_used === 'number'
+        ? Math.max(0, me.daily_tokens_limit - me.daily_tokens_used)
+        : null);
+    if (remainingTokens !== null && remainingTokens > 0) return false;
     return (me.credits ?? 0) <= 0;
   }, []);
 
@@ -482,8 +757,8 @@ const Index = () => {
         setMeSnapshot(me);
         if (isCreditsBlocked(me)) {
           setCreditNotice(settings.language === 'ar'
-            ? 'الرصيد انتهى. اشحن رصيدك للمتابعة.'
-            : 'Credits exhausted. Add credits to continue.');
+            ? 'نفد رصيد التوكنز. اشحن Credits للمتابعة.'
+            : 'Token budget exhausted. Add credits to continue.');
         } else {
           setCreditNotice(null);
         }
@@ -503,9 +778,7 @@ const Index = () => {
     if (field === 'category') {
       const items = CATEGORY_OPTIONS.map((cat) => ({
         value: cat.toLowerCase(),
-        label: language === 'ar'
-          ? (CATEGORY_DESCRIPTIONS[cat]?.ar ? `${cat} — ${CATEGORY_DESCRIPTIONS[cat].ar}` : cat)
-          : cat,
+        label: cat,
         description: language === 'ar' ? CATEGORY_DESCRIPTIONS[cat]?.ar : CATEGORY_DESCRIPTIONS[cat]?.en,
       }));
       addSystemMessage(intro || (language === 'ar' ? 'اختر الفئة المناسبة لفكرتك:' : 'Pick the closest category:'), {
@@ -521,7 +794,7 @@ const Index = () => {
         label: language === 'ar' ? aud : aud,
         description: language === 'ar' ? AUDIENCE_DESCRIPTIONS[aud]?.ar : AUDIENCE_DESCRIPTIONS[aud]?.en,
       }));
-      addSystemMessage(intro || (language === 'ar' ? 'مين الجمهور المستهدف؟ اختر واحد أو أكثر:' : 'Who is the target audience? Choose one or more:'), {
+      addSystemMessage(intro || (language === 'ar' ? 'من الجمهور المستهدف؟ اختر واحدًا أو أكثر:' : 'Who is the target audience? Choose one or more:'), {
         field: 'audience',
         kind: 'multi',
         items,
@@ -534,7 +807,7 @@ const Index = () => {
         label: language === 'ar' ? goal : goal,
         description: language === 'ar' ? GOAL_DESCRIPTIONS[goal]?.ar : GOAL_DESCRIPTIONS[goal]?.en,
       }));
-      addSystemMessage(intro || (language === 'ar' ? 'ما الهدف الأساسي؟ اختر هدفًا أو أكثر:' : 'Select the primary goal(s):'), {
+      addSystemMessage(intro || (language === 'ar' ? 'ما الأهداف الأساسية؟ اختر هدفًا أو أكثر:' : 'Select the primary goal(s):'), {
         field: 'goals',
         kind: 'multi',
         items,
@@ -551,7 +824,7 @@ const Index = () => {
           ? MATURITY_DESCRIPTIONS[level.value]?.ar
           : MATURITY_DESCRIPTIONS[level.value]?.en,
       }));
-      addSystemMessage(intro || (language === 'ar' ? 'ما مرحلة النضج الحالية؟' : 'What is the current maturity stage?'), {
+      addSystemMessage(intro || (language === 'ar' ? 'ما مرحلة نضج الفكرة الحالية؟' : 'What is the current maturity stage?'), {
         field: 'maturity',
         kind: 'single',
         items,
@@ -570,7 +843,7 @@ const Index = () => {
       addSystemMessage(question);
     } else {
       const fallback = settings.language === 'ar'
-        ? 'ما هي المدينة المستهدفة؟ (لو حابب اذكر الدولة كمان)'
+        ? 'ما المدينة المستهدفة؟ (يمكنك إضافة الدولة أيضًا)'
         : 'Which city should we focus on? (You can add the country too)';
       addSystemMessage(fallback);
     }
@@ -582,7 +855,7 @@ const Index = () => {
 
   const askLocationChoice = useCallback(() => {
     const question = settings.language === 'ar'
-      ? 'فيه مكان معين ف دماغك حابب تنفذ فيه الفكرة دي؟'
+      ? 'هل لديك مكان محدد تريد تنفيذ الفكرة فيه؟'
       : 'Do you have a specific place in mind for this idea?';
     addSystemMessage(question, {
       field: 'location_choice',
@@ -606,7 +879,7 @@ const Index = () => {
       const prompt = 'Ask the user to describe their idea in one clear sentence.';
       const message = await getAssistantMessage(prompt);
       addSystemMessage(message || (settings.language === 'ar'
-        ? 'من فضلك اكتب الفكرة في جملة واحدة.'
+        ? 'من فضلك اكتب الفكرة في جملة واحدة واضحة.'
         : 'Please describe the idea in one clear sentence.'));
       return true;
     }
@@ -648,71 +921,70 @@ const Index = () => {
     if (asked) return;
 
     if (hasStarted || simulation.status === 'running') return;
-    try {
-      const me = await apiService.getMe();
-      setMeSnapshot(me);
-      if (isCreditsBlocked(me)) {
-        const msg = settings.language === 'ar'
-          ? 'الرصيد انتهى. اشحن رصيدك للمتابعة.'
-          : 'Credits exhausted. Add credits to continue.';
-        setCreditNotice(msg);
-        addSystemMessage(msg);
-        return;
-      }
-    } catch {
-      // ignore pre-check failures
+    if (isCreditsBlocked(meSnapshot)) {
+      const msg = settings.language === 'ar'
+        ? 'نفد رصيد التوكنز. اشحن Credits للمتابعة.'
+        : 'Token budget exhausted. Add credits to continue.';
+      setCreditNotice(msg);
+      addSystemMessage(msg);
+      return;
     }
     if (
       simulation.status === 'completed'
       || simulation.status === 'error'
+      || simulation.status === 'paused'
       || simulation.reasoningFeed.length > 0
       || simulation.metrics.currentIteration > 0
     ) {
       simulation.stopSimulation();
     }
+    addUserMessage(userInput.idea, { dedupe: true });
     setHasStarted(true);
+    setActivePanel('chat');
     setReasoningActive(false);
     if (reasoningTimerRef.current) {
       window.clearTimeout(reasoningTimerRef.current);
     }
     try {
+      addSystemMessage(settings.language === 'ar' ? 'بدء المحاكاة...' : 'Starting simulation...');
       await simulation.startSimulation(buildConfig(userInput), { throwOnError: true });
-      const startMessage = await getAssistantMessage('Confirm you are starting the simulation now in one short sentence.');
-      addSystemMessage(startMessage || (settings.language === 'ar' ? 'Starting simulation...' : 'Starting simulation...'));
+      void apiService.getMe().then((me) => {
+        setMeSnapshot(me);
+        if (!isCreditsBlocked(me)) {
+          setCreditNotice(null);
+        }
+      }).catch(() => undefined);
     } catch (err) {
       console.warn('Simulation start failed.', err);
+      setReasoningActive(false);
       const status = err?.status;
       if (status === 429) {
         try {
           const me = await apiService.getMe();
           setMeSnapshot(me);
-          const exhausted = typeof me?.daily_usage === 'number'
-            && typeof me?.daily_limit === 'number'
-            && me.daily_limit > 0
-            && me.daily_usage >= me.daily_limit
-            && (me.credits ?? 0) <= 0;
+          const exhausted = isCreditsBlocked(me);
           addSystemMessage(settings.language === 'ar'
             ? exhausted
-              ? 'الرصيد انتهى بعد الوصول للحد اليومي. اشحن رصيدك للمتابعة.'
-              : 'تم الوصول للحد اليومي. اشحن رصيدك أو انتظر حتى الغد.'
+              ? 'نفد رصيد التوكنز. اشحن Credits للمتابعة.'
+              : 'انتهت الحصة اليومية المجانية من التوكنز. اشحن Credits أو انتظر للغد.'
             : exhausted
-              ? 'Credits exhausted after hitting the daily limit. Add credits to continue.'
-              : 'Daily limit reached. Add credits or wait until tomorrow.');
+              ? 'Token budget exhausted. Add credits to continue.'
+              : 'Daily free token quota reached. Add credits or wait until tomorrow.');
           if (exhausted) {
             setCreditNotice(settings.language === 'ar'
-              ? 'الرصيد انتهى. اشحن رصيدك للمتابعة.'
-              : 'Credits exhausted. Add credits to continue.');
+              ? 'نفد رصيد التوكنز. اشحن Credits للمتابعة.'
+              : 'Token budget exhausted. Add credits to continue.');
           }
         } catch {
           addSystemMessage(settings.language === 'ar'
-            ? 'تم الوصول للحد اليومي. اشحن رصيدك للمتابعة.'
-            : 'Daily limit reached. Add credits to continue.');
+            ? 'انتهت الحصة اليومية المجانية من التوكنز. اشحن Credits أو انتظر للغد.'
+            : 'Daily free token quota reached. Add credits to continue.');
         }
         return;
       }
       if (status === 401) {
         addSystemMessage(settings.language === 'ar'
-          ? 'Session expired. Please log in again.'
+          ? 'فشل بدء الجلسة. سجّل الدخول مرة أخرى.'
           : 'Session expired. Please log in again.');
         return;
       }
@@ -722,24 +994,284 @@ const Index = () => {
         : `Failed to start simulation.${msg}`.trim());
     }
   }, [
+    addUserMessage,
     addSystemMessage,
     buildConfig,
-    getAssistantMessage,
     getMissingForStart,
     hasStarted,
     isCreditsBlocked,
+    meSnapshot,
     promptForMissing,
     settings.language,
     simulation,
     userInput,
   ]);
 
+  const handleManualResume = useCallback(async () => {
+    const simulationId = simulation.simulationId;
+    if (!simulationId || resumeBusy) return;
+    setResumeBusy(true);
+    try {
+      await simulation.resumeSimulation(simulationId);
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'تم استكمال الجلسة من آخر نقطة محفوظة.'
+          : 'Simulation resumed from the last saved checkpoint.'
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
+      addSystemMessage(
+        settings.language === 'ar'
+          ? `تعذر استكمال الجلسة.${msg}`.trim()
+          : `Failed to resume simulation.${msg}`.trim()
+      );
+    } finally {
+      setResumeBusy(false);
+    }
+  }, [
+    addSystemMessage,
+    resumeBusy,
+    settings.language,
+    simulation.resumeSimulation,
+    simulation.simulationId,
+  ]);
+
+  const handleManualPause = useCallback(async () => {
+    const simulationId = simulation.simulationId;
+    if (!simulationId || pauseBusy || simulation.status !== 'running') return;
+    setPauseBusy(true);
+    try {
+      await simulation.pauseSimulation(
+        simulationId,
+        settings.language === 'ar' ? 'تم إيقاف الجلسة يدويًا.' : 'Paused manually by user.',
+      );
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'تم إيقاف التفكير مؤقتًا. يمكنك الاستكمال في أي وقت.'
+          : 'Reasoning paused. You can resume anytime.'
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
+      addSystemMessage(
+        settings.language === 'ar'
+          ? `تعذر إيقاف الجلسة.${msg}`.trim()
+          : `Failed to pause simulation.${msg}`.trim()
+      );
+    } finally {
+      setPauseBusy(false);
+    }
+  }, [
+    addSystemMessage,
+    pauseBusy,
+    settings.language,
+    simulation.pauseSimulation,
+    simulation.simulationId,
+    simulation.status,
+  ]);
+
+  const handleSubmitClarification = useCallback(async (payload: {
+    questionId: string;
+    selectedOptionId?: string;
+    customText?: string;
+  }) => {
+    if (!simulation.simulationId || clarificationBusy) return;
+    setClarificationBusy(true);
+    try {
+      await simulation.submitClarificationAnswer({
+        simulationId: simulation.simulationId,
+        questionId: payload.questionId,
+        selectedOptionId: payload.selectedOptionId,
+        customText: payload.customText,
+      });
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'تم استلام التوضيح واستكمال المحاكاة من نفس النقطة.'
+          : 'Clarification received. Simulation resumed from the same checkpoint.'
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
+      addSystemMessage(
+        settings.language === 'ar'
+          ? `تعذر إرسال التوضيح.${msg}`.trim()
+          : `Failed to submit clarification.${msg}`.trim()
+      );
+    } finally {
+      setClarificationBusy(false);
+    }
+  }, [
+    addSystemMessage,
+    clarificationBusy,
+    settings.language,
+    simulation,
+  ]);
+
+  const handleRunPostAction = useCallback(async (action: 'make_acceptable' | 'bring_to_world') => {
+    if (!simulation.simulationId || postActionBusy) return;
+    setPostActionBusy(action);
+    try {
+      const response = await apiService.requestPostAction({
+        simulation_id: simulation.simulationId,
+        action,
+      });
+      setPostActionResult({
+        action: response.action,
+        title: response.title,
+        summary: response.summary,
+        steps: Array.isArray(response.steps) ? response.steps : [],
+        risks: Array.isArray(response.risks) ? response.risks : [],
+        kpis: Array.isArray(response.kpis) ? response.kpis : [],
+        revised_idea: response.revised_idea,
+        followup_seed: response.followup_seed,
+      });
+      addSystemMessage(response.summary || (settings.language === 'ar' ? 'تم تجهيز خطة المتابعة.' : 'Follow-up plan is ready.'));
+    } catch (err: unknown) {
+      const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
+      addSystemMessage(
+        settings.language === 'ar'
+          ? `تعذر تجهيز خطة المتابعة.${msg}`.trim()
+          : `Failed to build follow-up action.${msg}`.trim()
+      );
+    } finally {
+      setPostActionBusy(null);
+    }
+  }, [addSystemMessage, postActionBusy, settings.language, simulation.simulationId]);
+
+  const handleStartFollowupFromAction = useCallback(async () => {
+    if (!postActionResult || !simulation.simulationId) return;
+    const followupMode = postActionResult.action;
+    const followupIdea = (
+      (typeof postActionResult.followup_seed?.idea === 'string' && postActionResult.followup_seed.idea)
+      || postActionResult.revised_idea
+      || userInput.idea
+    ).trim();
+    if (!followupIdea) return;
+
+    const nextInput: UserInput = {
+      ...userInput,
+      idea: followupIdea,
+    };
+    setUserInput(nextInput);
+    setHasStarted(true);
+    setActivePanel('chat');
+    setReasoningActive(false);
+    if (reasoningTimerRef.current) {
+      window.clearTimeout(reasoningTimerRef.current);
+    }
+    try {
+      addSystemMessage(settings.language === 'ar' ? 'بدء جلسة متابعة...' : 'Starting follow-up simulation...');
+      await simulation.startSimulation(
+        {
+          ...buildConfig(nextInput),
+          parent_simulation_id: simulation.simulationId,
+          followup_mode: followupMode,
+          seed_context: {
+            source_action: followupMode,
+            source_simulation_id: simulation.simulationId,
+            followup_seed: postActionResult.followup_seed ?? {},
+          },
+        },
+        { throwOnError: true },
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
+      addSystemMessage(
+        settings.language === 'ar'
+          ? `تعذر بدء جلسة المتابعة.${msg}`.trim()
+          : `Failed to start follow-up simulation.${msg}`.trim()
+      );
+    }
+  }, [
+    addSystemMessage,
+    buildConfig,
+    postActionResult,
+    settings.language,
+    simulation,
+    userInput,
+  ]);
+
+  const fetchFilteredAgents = useCallback(async (stance: 'accepted' | 'rejected' | 'neutral') => {
+    if (!simulation.simulationId) return;
+    try {
+      const response = await apiService.getSimulationAgents(simulation.simulationId, {
+        stance,
+        phase: simulation.currentPhaseKey || undefined,
+        page: 1,
+        pageSize: 80,
+      });
+      setFilteredAgents(response.items || []);
+      setFilteredAgentsTotal(response.total || 0);
+    } catch (err) {
+      console.warn('Failed to load filtered agent list', err);
+      setFilteredAgents([]);
+      setFilteredAgentsTotal(0);
+    }
+  }, [simulation.currentPhaseKey, simulation.simulationId]);
+
+  const handleSelectStanceFilter = useCallback(async (stance: 'accepted' | 'rejected' | 'neutral') => {
+    if (!simulation.simulationId) return;
+    if (selectedStanceFilter === stance) {
+      setSelectedStanceFilter(null);
+      setFilteredAgents([]);
+      setFilteredAgentsTotal(0);
+      return;
+    }
+    setSelectedStanceFilter(stance);
+    await fetchFilteredAgents(stance);
+  }, [fetchFilteredAgents, selectedStanceFilter, simulation.simulationId]);
+
   useEffect(() => {
-    if (!autoStartPending) return;
-    if (!userInput.idea.trim()) return;
-    setAutoStartPending(false);
-    handleStart();
-  }, [autoStartPending, handleStart, userInput.idea]);
+    setSelectedStanceFilter(null);
+    setFilteredAgents([]);
+    setFilteredAgentsTotal(0);
+    setPostActionResult(null);
+    setPostActionBusy(null);
+    setClarificationBusy(false);
+  }, [simulation.simulationId]);
+
+  useEffect(() => {
+    if (!selectedStanceFilter || !simulation.simulationId) return;
+    let cancelled = false;
+    let intervalId: number | null = null;
+
+    const refresh = async () => {
+      if (cancelled) return;
+      try {
+        const response = await apiService.getSimulationAgents(simulation.simulationId!, {
+          stance: selectedStanceFilter,
+          phase: simulation.currentPhaseKey || undefined,
+          page: 1,
+          pageSize: 80,
+        });
+        if (cancelled) return;
+        setFilteredAgents(response.items || []);
+        setFilteredAgentsTotal(response.total || 0);
+      } catch {
+        if (!cancelled) {
+          setFilteredAgents([]);
+          setFilteredAgentsTotal(0);
+        }
+      }
+    };
+
+    void refresh();
+    if (simulation.status === 'running') {
+      intervalId = window.setInterval(() => {
+        void refresh();
+      }, 1200);
+    }
+
+    return () => {
+      cancelled = true;
+      if (intervalId) {
+        window.clearInterval(intervalId);
+      }
+    };
+  }, [
+    selectedStanceFilter,
+    simulation.currentPhaseKey,
+    simulation.simulationId,
+    simulation.status,
+  ]);
 
   useEffect(() => {
     const simulationId = simulation.simulationId;
@@ -794,16 +1326,54 @@ const Index = () => {
     const label = [city, country].filter(Boolean).join(', ');
     if (label) return label;
     if (locationChoice === 'no') {
-      return settings.language === 'ar' ? 'no specific location' : 'no specific location';
+      return settings.language === 'ar' ? 'بدون مكان محدد' : 'no specific location';
     }
-    return settings.language === 'ar' ? 'the location you entered' : 'the location you entered';
+    return settings.language === 'ar' ? 'المكان الذي أدخلته' : 'the location you entered';
   }, [locationChoice, settings.language, userInput.city, userInput.country]);
 
-  const getSearchTimeoutPrompt = useCallback((locationLabel: string) => (
-    settings.language === 'ar'
-      ? `I searched for a while but couldn't find enough data for ${locationLabel} (like whether the idea exists, price ranges, or public sentiment). Want me to search longer, or should I use the LLM instead?`
-      : `I searched for a while but couldn't find enough data for ${locationLabel} (like whether the idea exists, price ranges, or public sentiment). Want me to search longer, or should I use the LLM instead?`
-  ), [settings.language]);
+  const getSearchTimeoutPrompt = useCallback((params: {
+    locationLabel: string;
+    query: string;
+    timeoutMs: number;
+    attempts: number;
+  }) => {
+    const ideaLabel =
+      params.query?.trim() ||
+      userInput.idea.trim() ||
+      (settings.language === 'ar' ? 'الفكرة الحالية' : 'the current idea');
+    const timeoutSeconds = Math.max(1, Math.round((params.timeoutMs || SEARCH_TIMEOUT_BASE_MS) / 1000));
+    const attempts = Math.max(1, Number(params.attempts || 1));
+
+    const constraints = settings.language === 'ar'
+      ? [
+          `التصنيف: ${userInput.category || 'غير محدد'}`,
+          `الجمهور: ${userInput.targetAudience.length ? userInput.targetAudience.join(', ') : 'غير محدد'}`,
+          `الأهداف: ${userInput.goals.length ? userInput.goals.join(', ') : 'غير محدد'}`,
+          `مرحلة الفكرة: ${userInput.ideaMaturity || 'غير محدد'}`,
+          `شهية المخاطرة: ${Math.max(0, Math.min(100, userInput.riskAppetite ?? 50))}%`,
+          `المكان: ${params.locationLabel}`,
+        ].join(' | ')
+      : [
+          `Category: ${userInput.category || 'not set'}`,
+          `Audience: ${userInput.targetAudience.length ? userInput.targetAudience.join(', ') : 'not set'}`,
+          `Goals: ${userInput.goals.length ? userInput.goals.join(', ') : 'not set'}`,
+          `Maturity: ${userInput.ideaMaturity || 'not set'}`,
+          `Risk appetite: ${Math.max(0, Math.min(100, userInput.riskAppetite ?? 50))}%`,
+          `Location: ${params.locationLabel}`,
+        ].join(' | ');
+
+    return settings.language === 'ar'
+      ? `بحثت ${attempts} محاولة عن "${ideaLabel}" في "${params.locationLabel}" (مهلة ${timeoutSeconds} ثانية لكل محاولة) ولم أصل بعد لبيانات محلية كافية مرتبطة بالفكرة. الناقص تحديدًا: وجود الفكرة في السوق المحلي، نطاق أسعار واقعي، مستوى الطلب، آراء المستخدمين، وملاحظات تنظيمية مرتبطة بالموقع. قيود البحث: ${constraints}. هل تريد إعادة البحث بوقت أطول؟`
+      : `I searched ${attempts} attempt(s) for "${ideaLabel}" in "${params.locationLabel}" (${timeoutSeconds}s timeout per attempt) but still don't have enough location-specific evidence for this idea. Missing specifically: local market presence, realistic price range, demand level, user/public sentiment, and location-related regulatory notes. Search constraints used: ${constraints}. Do you want me to retry with more time?`;
+  }, [
+    settings.language,
+    userInput.idea,
+    userInput.category,
+    userInput.targetAudience,
+    userInput.goals,
+    userInput.ideaMaturity,
+    userInput.riskAppetite,
+  ]);
 
   const formatLevel = useCallback((value?: 'low' | 'medium' | 'high') => {
     if (!value) return '';
@@ -837,7 +1407,7 @@ const Index = () => {
     }
     if (structured?.price_sensitivity) {
       parts.push(settings.language === 'ar'
-        ? `رينج الأسعار/حساسية السعر: ${formatLevel(structured.price_sensitivity)}`
+        ? `نطاق الأسعار/حساسية السعر: ${formatLevel(structured.price_sensitivity)}`
         : `Price sensitivity: ${formatLevel(structured.price_sensitivity)}`);
     }
     if (structured?.regulatory_risk) {
@@ -878,43 +1448,6 @@ const Index = () => {
     return parts.length ? `${prefix} ${parts.join(settings.language === 'ar' ? ' | ' : ' | ')}` : '';
   }, [formatLevel, settings.language]);
 
-  const parseStructuredFromLlm = useCallback((text: string): SearchResponse['structured'] | undefined => {
-    if (!text) return undefined;
-    const trimmed = text.trim();
-    const direct = (() => {
-      try {
-        return JSON.parse(trimmed);
-      } catch {
-        return undefined;
-      }
-    })();
-    if (direct && typeof direct === 'object') return direct as SearchResponse['structured'];
-
-    const match = trimmed.match(/\{[\s\S]*\}/);
-    if (!match) return undefined;
-    try {
-      return JSON.parse(match[0]) as SearchResponse['structured'];
-    } catch {
-      return undefined;
-    }
-  }, []);
-
-  const normalizeStructured = useCallback((structured?: SearchResponse['structured']) => {
-    if (!structured) return undefined;
-    const normalizeLevel = (value?: string) => {
-      const lower = value?.toLowerCase().trim();
-      if (lower === 'low' || lower === 'medium' || lower === 'high') return lower as 'low' | 'medium' | 'high';
-      return undefined;
-    };
-    return {
-      ...structured,
-      competition_level: normalizeLevel(structured.competition_level),
-      demand_level: normalizeLevel(structured.demand_level),
-      regulatory_risk: normalizeLevel(structured.regulatory_risk),
-      price_sensitivity: normalizeLevel(structured.price_sensitivity),
-    } as SearchResponse['structured'];
-  }, []);
-
   const escapeHtml = useCallback((value: string) => (
     value
       .replace(/&/g, '&amp;')
@@ -930,9 +1463,9 @@ const Index = () => {
     try {
       const structured = researchContext.structured || {};
       const prompt = settings.language === 'ar'
-        ? `عايز تقرير تحليل عميق للفكرة دي في ملف منظم بعناوين واضحة ونقاط قصيرة.
-لا تبالغ في السلبية؛ اذكر النواقص فقط لو موجودة في البيانات.
-اربط التحليل بالبحث التالي وبملخص المحاكاة لو موجود.
+        ? `أريد تقرير تحليل عميق للفكرة في ملف منظم بعناوين واضحة ونقاط قصيرة.
+لا تبالغ في السلبية، واذكر النواقص فقط إذا كانت ظاهرة في البيانات.
+اربط التحليل بنتائج البحث وملخص المحاكاة إن وُجد.
 
 الفكرة: ${userInput.idea}
 المكان: ${userInput.city || '-'}, ${userInput.country || '-'}
@@ -952,7 +1485,7 @@ const Index = () => {
 3) المنافسة والتموضع
 4) التسعير وحساسية السعر
 5) المخاطر التنظيمية
-6) فرص التحسين (لو موجودة)
+6) فرص التحسين (إن وجدت)
 7) أسباب تجعل الفكرة قابلة للتنفيذ
 8) توصيات عملية قصيرة`
         : `Write a deep analysis report for this idea with clear headings and concise bullet points.
@@ -995,14 +1528,15 @@ Required sections:
     } catch (err) {
       console.warn('Report generation failed', err);
       addSystemMessage(settings.language === 'ar'
-        ? 'حصل مشكلة أثناء تجهيز التقرير.'
+        ? 'حصلت مشكلة أثناء تجهيز التقرير.'
         : 'Report generation failed.');
     } finally {
       setReportBusy(false);
     }
   }, [addSystemMessage, escapeHtml, reportBusy, researchContext.summary, researchContext.structured, settings.language, simulation.summary, userInput.city, userInput.country, userInput.idea]);
 
-  const runSearch = useCallback(async (query: string, timeoutMs: number) => {
+  const runSearch = useCallback(async (query: string, timeoutMs: number, options?: { promptOnTimeout?: boolean }) => {
+    const promptOnTimeout = options?.promptOnTimeout ?? true;
     searchAttemptRef.current += 1;
     const attempt = searchAttemptRef.current;
     setResearchIdea(query.trim());
@@ -1039,14 +1573,19 @@ Required sections:
           attempts: attempt,
         });
         setResearchContext({ summary: '', sources: [], structured: undefined });
-        if (!searchPromptedRef.current) {
-          addSystemMessage(getSearchTimeoutPrompt(locationLabel));
+        if (promptOnTimeout && !searchPromptedRef.current) {
+          addSystemMessage(getSearchTimeoutPrompt({
+            locationLabel,
+            query,
+            timeoutMs,
+            attempts: attempt,
+          }));
           searchPromptedRef.current = true;
         }
         return { status: 'timeout' as const };
       }
       setSearchState({
-        status: 'done',
+        status: 'complete',
         query,
         answer: searchData.answer,
         provider: searchData.provider,
@@ -1064,7 +1603,7 @@ Required sections:
         addSystemMessage(report);
       }
       searchPromptedRef.current = false;
-      return { status: 'done' as const };
+      return { status: 'complete' as const };
     } catch {
       setSearchState({
         status: 'timeout',
@@ -1077,8 +1616,13 @@ Required sections:
         attempts: attempt,
       });
       setResearchContext({ summary: '', sources: [], structured: undefined });
-      if (!searchPromptedRef.current) {
-        addSystemMessage(getSearchTimeoutPrompt(getSearchLocationLabel()));
+      if (promptOnTimeout && !searchPromptedRef.current) {
+        addSystemMessage(getSearchTimeoutPrompt({
+          locationLabel: getSearchLocationLabel(),
+          query,
+          timeoutMs,
+          attempts: attempt,
+        }));
         searchPromptedRef.current = true;
       }
       return { status: 'timeout' as const };
@@ -1095,7 +1639,7 @@ Required sections:
     if (missing.length > 0) {
       if (missing.includes('location_choice')) {
         setActivePanel('chat');
-        await promptForMissing(['location_choice']);
+        await promptForMissing(missing);
       }
       return;
     }
@@ -1103,15 +1647,8 @@ Required sections:
     setPendingConfigReview(false);
     setPendingResearchReview(false);
     setActivePanel('chat');
-    const ideaText = userInput.idea.trim();
-    searchAttemptRef.current = 0;
-    searchPromptedRef.current = false;
-
-    const result = await runSearch(ideaText, SEARCH_TIMEOUT_BASE_MS);
-    if (result.status === 'done') {
-      await handleStart();
-    }
-  }, [getMissingForStart, handleStart, promptForMissing, runSearch, userInput, setPendingConfigReview, setActivePanel]);
+    await handleStart();
+  }, [getMissingForStart, handleStart, promptForMissing, userInput, setPendingConfigReview, setActivePanel]);
 
   const handleSearchRetry = useCallback(async () => {
     if (searchState.status !== 'timeout') return;
@@ -1122,106 +1659,10 @@ Required sections:
       SEARCH_TIMEOUT_MAX_MS
     );
     const result = await runSearch(query, nextTimeout);
-    if (result.status === 'done') {
+    if (result.status === 'complete') {
       await handleStart();
     }
   }, [handleStart, runSearch, searchState, userInput.idea]);
-
-  const handleSearchUseLlm = useCallback(async () => {
-    if (searchState.status !== 'timeout') return;
-    const locationLabel = getSearchLocationLabel();
-    setResearchIdea(userInput.idea.trim());
-    setSearchState({
-      status: 'done',
-      query: searchState.query,
-      answer: '',
-      provider: 'llm',
-      isLive: false,
-      results: [],
-    });
-    setResearchContext({ summary: '', sources: [], structured: undefined });
-    searchPromptedRef.current = false;
-    setIsChatThinking(true);
-    let structured: SearchResponse['structured'] | undefined;
-    let summaryText = '';
-    try {
-      const prompt = settings.language === 'ar'
-        ? `انت مساعد بحث. مطلوب منك توليد بيانات مبدئية عن الفكرة حسب المكان.
-الفكرة: "${userInput.idea}"
-المكان: "${locationLabel}"
-ارجع JSON فقط بدون شرح. استخدم هذا الشكل:
-{
-  "summary": "",
-  "signals": ["", ""],
-  "competition_level": "low|medium|high",
-  "demand_level": "low|medium|high",
-  "regulatory_risk": "low|medium|high",
-  "price_sensitivity": "low|medium|high",
-  "notable_locations": ["", ""],
-  "gaps": ["", ""]
-}
-لو مش متأكد، خليك صريح في summary.`
-        : `You are a research assistant. Produce initial data about the idea for the given location.
-Idea: "${userInput.idea}"
-Location: "${locationLabel}"
-Return JSON only, no explanation, using:
-{
-  "summary": "",
-  "signals": ["", ""],
-  "competition_level": "low|medium|high",
-  "demand_level": "low|medium|high",
-  "regulatory_risk": "low|medium|high",
-  "price_sensitivity": "low|medium|high",
-  "notable_locations": ["", ""],
-  "gaps": ["", ""]
-}
-If unsure, say so in summary.`;
-
-      const raw = await apiService.generateMessage(prompt);
-      structured = normalizeStructured(parseStructuredFromLlm(raw));
-      summaryText = structured?.summary?.trim() || raw.trim();
-    } catch (err) {
-      console.warn('LLM research fallback failed', err);
-      summaryText = settings.language === 'ar'
-        ? 'لم أستطع توليد بيانات كافية الآن.'
-        : 'I could not generate enough data right now.';
-    }
-
-    setIsChatThinking(false);
-    if (summaryText) {
-      setResearchContext({ summary: summaryText, sources: [], structured });
-      const report = buildSearchSummary(
-        {
-          provider: 'llm',
-          is_live: false,
-          answer: summaryText,
-          results: [],
-          structured,
-        },
-        locationLabel
-      );
-      if (report) {
-        addSystemMessage(report);
-      }
-    }
-
-    setPendingResearchReview(true);
-    addSystemMessage(settings.language === 'ar'
-      ? 'تحب أبدأ المحاكاة؟ ولا عايز تصححلي معلومة معينة؟'
-      : 'Do you want me to start the simulation, or do you want to correct any specific detail?');
-  }, [
-    addSystemMessage,
-    buildSearchSummary,
-    getSearchLocationLabel,
-    normalizeStructured,
-    parseStructuredFromLlm,
-    searchState,
-    setSearchState,
-    setResearchContext,
-    setResearchIdea,
-    settings.language,
-    userInput.idea,
-  ]);
 
   const handleConfirmStart = useCallback(async () => {
     if (!pendingResearchReview) return;
@@ -1235,13 +1676,7 @@ If unsure, say so in summary.`;
       if (!trimmed) return;
 
       if (!options?.skipUserMessage) {
-        const userMessage: ChatMessage = {
-          id: `user-${Date.now()}`,
-          type: 'user',
-          content,
-          timestamp: Date.now(),
-        };
-        setChatMessages((prev) => [...prev, userMessage]);
+        addUserMessage(trimmed);
       }
 
       void (async () => {
@@ -1255,10 +1690,10 @@ If unsure, say so in summary.`;
                 : { summary: nextSummary };
               setResearchContext({ summary: nextSummary, sources: researchContext.sources, structured: nextStructured });
               addSystemMessage(settings.language === 'ar'
-                ? 'تمام، حدثت البيانات بناءً على ملاحظتك.'
+                ? 'تم تحديث البيانات بناءً على ملاحظتك.'
                 : 'Got it. I updated the data based on your note.');
               addSystemMessage(settings.language === 'ar'
-                ? 'تحب أبدأ المحاكاة؟ ولا عايز تصحح حاجة تانية؟'
+                ? 'تحب أبدأ المحاكاة الآن ولا في تعديل إضافي؟'
                 : 'Start the simulation, or correct anything else?');
             }
             return;
@@ -1274,14 +1709,14 @@ If unsure, say so in summary.`;
             if (edit.includes(lower)) {
               setActivePanel('config');
               addSystemMessage(settings.language === 'ar'
-                ? 'عدل الإعدادات ثم اضغط تأكيد البيانات.'
+                ? 'عدّل الإعدادات ثم اضغط تأكيد البيانات.'
                 : 'Update the configuration, then confirm.');
               return;
             }
           }
           if (pendingUpdate) {
-            const yes = ['yes', 'ok', 'okay', 'go', 'start', 'run', 'y', 'نعم', 'اه', 'أيوه', 'ايوه', 'تمام', 'حاضر', 'ماشي'];
-            const no = ['no', 'nope', 'cancel', 'stop', 'لا', 'مش', 'مش موافق', 'ارفض'];
+            const yes = ['yes', 'ok', 'okay', 'go', 'start', 'run', 'y', 'نعم', 'اه', 'ابدأ', 'ابدا', 'موافق', 'حاضر', 'تمام'];
+            const no = ['no', 'nope', 'cancel', 'stop', 'لا', 'مش', 'مش موافق', 'رفض'];
             const lower = trimmed.toLowerCase();
             if (yes.includes(lower)) {
               const nextIdea = userInput.idea
@@ -1291,7 +1726,7 @@ If unsure, say so in summary.`;
               setUserInput(nextInput);
               setPendingUpdate(null);
               addSystemMessage(settings.language === 'ar'
-                ? 'تم تأكيد التحديث، سأرسله للمجتمع الآن.'
+                ? 'تم تأكيد التحديث. سأرسله للوكلاء الآن.'
                 : 'Update confirmed. Sending it to the agents now.');
               setReasoningActive(false);
               if (reasoningTimerRef.current) {
@@ -1304,21 +1739,21 @@ If unsure, say so in summary.`;
               setPendingUpdate(null);
               const reply = await getAssistantMessage(
                 settings.language === 'ar'
-                  ? `تمام، سنكمل النقاش بدون إرسال التحديث. رد على: "${trimmed}".`
+                  ? `تمام، هنكمل النقاش بدون إرسال التحديث. رد على: "${trimmed}".`
                   : `Okay, we won't send the update. Reply to: "${trimmed}".`
               );
               addSystemMessage(reply || (settings.language === 'ar' ? 'تمام، لن أرسل التحديث.' : 'Okay, no update will be sent.'));
               return;
             }
             addSystemMessage(settings.language === 'ar'
-              ? 'هل تريد إرسال هذا التحديث للمجتمع؟ اكتب نعم أو لا.'
+              ? 'هل تريد إرسال هذا التحديث للوكلاء؟ اكتب نعم أو لا.'
               : 'Do you want to send this update to the agents? Type yes or no.');
             return;
           }
 
           if (isWaitingForLocationChoice) {
-            const yes = ['yes', 'y', 'ok', 'okay', 'نعم', 'اه', 'أيوه', 'ايوه', 'تمام', 'ماشي'];
-            const no = ['no', 'n', 'nope', 'cancel', 'لا', 'مش', 'مش عايز', 'ارفض'];
+            const yes = ['yes', 'y', 'ok', 'okay', 'نعم', 'اه', 'ابدأ', 'ابدا', 'موافق', 'تمام'];
+            const no = ['no', 'n', 'nope', 'cancel', 'لا', 'مش', 'مش عايز', 'رفض'];
             const lower = trimmed.toLowerCase();
             if (yes.includes(lower)) {
               setLocationChoice('yes');
@@ -1326,8 +1761,8 @@ If unsure, say so in summary.`;
               setIsWaitingForCountry(false);
               setIsWaitingForCity(true);
               addSystemMessage(settings.language === 'ar'
-                ? 'تمام، اكتب المدينة اللي في دماغك. (ولو حابب اذكر الدولة كمان)'
-                : 'Great—what city are you targeting? (You can add the country too)');
+                ? 'تمام، اكتب المدينة المستهدفة الآن. (ممكن تضيف الدولة أيضًا)'
+                : 'Great, what city are you targeting? (You can add the country too)');
               return;
             }
             if (no.includes(lower)) {
@@ -1347,7 +1782,7 @@ If unsure, say so in summary.`;
               return;
             }
             addSystemMessage(settings.language === 'ar'
-              ? 'اختار نعم أو لا بس عشان نكمل.'
+              ? 'اختر نعم أو لا عشان نكمل.'
               : 'Please reply with yes or no so we can continue.');
             return;
           }
@@ -1399,7 +1834,7 @@ If unsure, say so in summary.`;
             setActivePanel('config');
             setMissingFields([]);
             addSystemMessage(settings.language === 'ar'
-              ? 'راجِع الإعدادات ثم اضغط تأكيد البيانات للمتابعة.'
+              ? 'راجع الإعدادات ثم اضغط تأكيد البيانات للمتابعة.'
               : 'Review the configuration, then confirm to continue.');
             return;
           }
@@ -1431,11 +1866,11 @@ If unsure, say so in summary.`;
               setIsChatThinking(true);
               const reply = await getAssistantMessage(
                 settings.language === 'ar'
-                  ? `جاوب بشكل طبيعي على: "${trimmed}". اربط إجابتك بما قاله الوكلاء وبنتائج البحث. لا تذكر إعدادات خام أو أرقام. استخدم السياق لتفسير الرفض إن وجد.
+                  ? `جاوب بشكل طبيعي على: "${trimmed}". اربط الإجابة بما قاله الوكلاء ونتائج البحث. لا تعرض إعدادات خام أو أرقام بدون سياق.
 سياق الوكلاء: ${reasoningContext}
 سياق البحث: ${researchContextText}
 القيود (للفهم فقط): ${constraintsContext}
-إذا كان الرفض بسبب المنافسة أو الموقع، اقترح بحثاً عن موقع أفضل واسأل المستخدم.`
+لو سبب الرفض هو المنافسة أو المكان، اقترح البحث عن موقع أفضل واسأل المستخدم.`
                   : `Reply naturally to: "${trimmed}". Tie your answer to agent reasoning and research. Do not list raw settings or numbers. Use simulation context to explain rejections.
 Reasoning context: ${reasoningContext}
 Research context: ${researchContextText}
@@ -1443,7 +1878,7 @@ Constraints (for understanding only): ${constraintsContext}
 If rejection is about competition or location, suggest searching for a better location and ask the user.`
               );
               setIsChatThinking(false);
-              addSystemMessage(reply || (settings.language === 'ar' ? 'حسناً، دعنا نناقش ذلك.' : "Sure, let's discuss that."));
+              addSystemMessage(reply || (settings.language === 'ar' ? 'حسنًا، دعنا نناقش ذلك.' : "Sure, let's discuss that."));
               return;
             }
 
@@ -1532,17 +1967,18 @@ If rejection is about competition or location, suggest searching for a better lo
           setActivePanel('config');
           setMissingFields([]);
           addSystemMessage(settings.language === 'ar'
-            ? 'راجِع الإعدادات ثم اضغط تأكيد البيانات للمتابعة.'
+            ? 'راجع الإعدادات ثم اضغط تأكيد البيانات للمتابعة.'
             : 'Review the configuration, then confirm to continue.');
         } catch (err) {
           console.error('Schema extraction failed', err);
           addSystemMessage(settings.language === 'ar'
-            ? 'الـ LLM غير متاح. رجاءً أعد تشغيل الباك إند.'
+            ? 'الـ LLM غير متاح الآن. أعد تشغيل الخلفية ثم حاول مرة أخرى.'
             : 'LLM unavailable. Please restart the backend.');
         }
       })();
     },
       [
+        addUserMessage,
         addSystemMessage,
         extractWithRetry,
         getAssistantMessage,
@@ -1562,6 +1998,16 @@ If rejection is about competition or location, suggest searching for a better lo
         userInput,
       ]
   );
+
+  useEffect(() => {
+    if (!autoStartPending) return;
+    const ideaText = userInput.idea.trim();
+    if (!ideaText) return;
+    if (simulation.status === 'running') return;
+    setAutoStartPending(false);
+    // Match manual chat behavior so schema extraction/analysis runs first.
+    handleSendMessage(ideaText);
+  }, [autoStartPending, handleSendMessage, simulation.status, userInput.idea]);
 
   const handleCategoryChange = useCallback((value: string) => {
     setTouched((prev) => ({ ...prev, category: true }));
@@ -1593,7 +2039,16 @@ If rejection is about competition or location, suggest searching for a better lo
   }, []);
 
   const handleOptionSelect = useCallback(
-    async (field: 'category' | 'audience' | 'goals' | 'maturity' | 'location_choice', value: string) => {
+    async (field: 'category' | 'audience' | 'goals' | 'maturity' | 'location_choice' | 'clarification_choice', value: string) => {
+      if (field === 'clarification_choice') {
+        const pending = simulation.pendingClarification;
+        if (!pending?.questionId) return;
+        await handleSubmitClarification({
+          questionId: pending.questionId,
+          selectedOptionId: value,
+        });
+        return;
+      }
       if (field === 'location_choice') {
         const nextChoice = value === 'yes' ? 'yes' : 'no';
         if (locationChoice === nextChoice && !isWaitingForLocationChoice) {
@@ -1605,15 +2060,15 @@ If rejection is about competition or location, suggest searching for a better lo
           setIsWaitingForCountry(false);
           setIsWaitingForCity(true);
           addSystemMessage(settings.language === 'ar'
-            ? 'تمام، اكتب المدينة اللي في دماغك. (ولو حابب اذكر الدولة كمان)'
-            : 'Great—what city are you targeting? (You can add the country too)');
+            ? 'تمام، اكتب المدينة المستهدفة الآن. (ممكن تضيف الدولة أيضًا)'
+            : 'Great, what city are you targeting? (You can add the country too)');
           return;
         } else {
           setIsWaitingForCountry(false);
           setIsWaitingForCity(false);
           addSystemMessage(settings.language === 'ar'
-            ? 'تمام، مش هنحتاج مكان محدد.'
-            : 'Got it—no specific location needed.');
+            ? 'تمام، لا نحتاج مكانًا محددًا.'
+            : 'Got it, no specific location needed.');
           const missing = getMissingForStart(userInput, nextChoice);
           const asked = await promptForMissing(missing);
           if (asked) return;
@@ -1660,6 +2115,7 @@ If rejection is about competition or location, suggest searching for a better lo
     },
     [
       addSystemMessage,
+      handleSubmitClarification,
       handleAudienceChange,
       handleCategoryChange,
       handleGoalsChange,
@@ -1668,6 +2124,7 @@ If rejection is about competition or location, suggest searching for a better lo
       isWaitingForLocationChoice,
       locationChoice,
       promptForMissing,
+      simulation.pendingClarification,
       setActivePanel,
       setPendingConfigReview,
       setMissingFields,
@@ -1696,52 +2153,90 @@ If rejection is about competition or location, suggest searching for a better lo
   }, [navigate]);
 
   useEffect(() => {
-    const handleMove = (event: MouseEvent) => {
-      if (!dragRef.current.side || !containerRef.current) return;
-      const rect = containerRef.current.getBoundingClientRect();
-      const minSide = 260;
-      const minCenter = 360;
-      const dx = event.clientX - dragRef.current.startX;
-      if (dragRef.current.side === 'left') {
-        const maxLeft = rect.width - rightWidth - minCenter - 12;
-        const nextLeft = Math.min(Math.max(dragRef.current.startLeft + dx, minSide), maxLeft);
-        setLeftWidth(nextLeft);
-      } else if (dragRef.current.side === 'right') {
-        const maxRight = rect.width - leftWidth - minCenter - 12;
-        const nextRight = Math.min(Math.max(dragRef.current.startRight - dx, minSide), maxRight);
-        setRightWidth(nextRight);
-      }
-    };
-    const handleUp = () => {
-      dragRef.current.side = null;
-    };
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleUp);
-    return () => {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleUp);
-    };
-  }, [leftWidth, rightWidth]);
-
-  useEffect(() => {
     if (
       simulation.status === 'error' ||
       simulation.status === 'idle' ||
+      simulation.status === 'paused' ||
       simulation.status === 'completed'
     ) {
       setHasStarted(false);
     }
   }, [simulation.status]);
 
+  useEffect(() => {
+    const needsClarification = Boolean(
+      simulation.simulationId
+      && simulation.status === 'paused'
+      && simulation.statusReason === 'paused_clarification_needed'
+      && simulation.pendingClarification?.questionId
+    );
+    if (!needsClarification) return;
+    setActivePanel('chat');
+  }, [
+    simulation.pendingClarification,
+    simulation.simulationId,
+    simulation.status,
+    simulation.statusReason,
+  ]);
+
+  useEffect(() => {
+    if (simulation.status !== 'paused' || simulation.statusReason !== 'paused_credits_exhausted') return;
+    const message = settings.language === 'ar'
+      ? 'توقف التنفيذ لأن الرصيد نفد أثناء المحاكاة. اشحن Credits ثم اضغط استكمال للمتابعة من نفس النقطة.'
+      : 'Token budget was exhausted mid-run. Add credits and press Resume.';
+    setCreditNotice(message);
+  }, [settings.language, simulation.status, simulation.statusReason]);
+
   const hasProgress = simulation.metrics.currentIteration > 0 || simulation.reasoningFeed.length > 0;
   const isSummarizing = simulation.status === 'running'
     && hasProgress
     && !simulation.summary
     && !reasoningActive;
+  const showResumeAction = Boolean(
+    simulation.simulationId
+    && simulation.canResume
+    && (simulation.status === 'paused' || simulation.status === 'error')
+    && (
+      simulation.statusReason === 'interrupted'
+      || simulation.statusReason === 'error'
+      || simulation.statusReason === 'paused_manual'
+      || simulation.statusReason === 'paused_search_failed'
+      || simulation.statusReason === 'paused_credits_exhausted'
+    )
+  );
+  const isClarificationPause = Boolean(
+    simulation.simulationId
+    && simulation.status === 'paused'
+    && simulation.statusReason === 'paused_clarification_needed'
+    && simulation.pendingClarification?.questionId
+  );
+  const resumeBannerText = simulation.statusReason === 'paused_manual'
+    ? (settings.language === 'ar'
+      ? 'تم إيقاف الجلسة يدويًا. يمكنك المتابعة من آخر نقطة محفوظة.'
+      : 'Simulation is paused manually. Resume from the last checkpoint.')
+    : simulation.statusReason === 'paused_credits_exhausted'
+      ? (settings.language === 'ar'
+        ? 'توقفت الجلسة بسبب نفاد الرصيد. اشحن Credits ثم استكمل من نفس النقطة.'
+        : 'Simulation paused because credits were exhausted. Recharge and resume from the same point.')
+      : simulation.statusReason === 'paused_search_failed'
+        ? (settings.language === 'ar'
+          ? 'توقف البحث الأولي قبل اكتمال الجلسة. يمكنك إعادة الاستكمال من آخر نقطة.'
+          : 'Search bootstrap failed before completion. You can resume from the latest checkpoint.')
+        : (settings.language === 'ar'
+          ? 'تم إيقاف الجلسة مؤقتًا. يمكنك المتابعة من آخر نقطة محفوظة.'
+          : 'This simulation was interrupted. You can resume from the latest checkpoint.');
+  const formattedResumeReason = formatSearchFailureReason(
+    simulation.resumeReason,
+    settings.language,
+    simulation.searchQuality
+  );
+  const clarificationBannerText = settings.language === 'ar'
+    ? 'المحاكاة متوقفة مؤقتًا لأن الوكلاء يحتاجون توضيحًا منك قبل الاستكمال.'
+    : 'Simulation is paused because agents require clarification before continuing.';
   const quickReplies = pendingUpdate
     ? [
-        { label: settings.language === 'ar' ? 'موافق' : 'Yes', value: 'yes' },
-        { label: settings.language === 'ar' ? 'مش موافق' : 'No', value: 'no' },
+        { label: settings.language === 'ar' ? 'نعم' : 'Yes', value: 'yes' },
+        { label: settings.language === 'ar' ? 'لا' : 'No', value: 'no' },
       ]
     : pendingConfigReview
     ? [
@@ -1750,12 +2245,162 @@ If rejection is about competition or location, suggest searching for a better lo
       ]
     : null;
 
+  const handleOpenReasoning = useCallback(() => {
+    setActivePanel('chat');
+  }, []);
+
+  const primaryControl = useMemo(() => {
+    const hasIdea = Boolean(userInput.idea.trim());
+    const hasReasoning = simulation.reasoningFeed.length > 0;
+
+    if (simulation.status === 'running') {
+      return {
+        key: 'pause_reasoning',
+        label: settings.language === 'ar' ? 'إيقاف التفكير مؤقتًا' : 'Pause reasoning',
+        description: settings.language === 'ar' ? 'يمكنك الاستكمال لاحقًا من نفس النقطة' : 'Resume later from the same checkpoint',
+        disabled: pauseBusy || !simulation.simulationId,
+        busy: pauseBusy,
+        tone: 'warning' as const,
+        icon: 'pause' as const,
+        onClick: () => { void handleManualPause(); },
+      };
+    }
+
+    if (isClarificationPause) {
+      return {
+        key: 'clarification_required',
+        label: settings.language === 'ar' ? 'مطلوب توضيح للاستكمال' : 'Clarification required to continue',
+        description: settings.language === 'ar' ? 'أجب على سؤال التوضيح داخل الدردشة' : 'Answer the clarification card in chat',
+        disabled: false,
+        busy: clarificationBusy,
+        tone: 'warning' as const,
+        icon: 'reasoning' as const,
+        onClick: () => { setActivePanel('chat'); },
+      };
+    }
+
+    if (showResumeAction) {
+      const isSearchFailure = simulation.statusReason === 'paused_search_failed';
+      return {
+        key: 'resume_reasoning',
+        label: isSearchFailure
+          ? (settings.language === 'ar' ? 'إعادة البحث' : 'Retry search')
+          : (settings.language === 'ar' ? 'استكمال التفكير' : 'Resume reasoning'),
+        description: isSearchFailure
+          ? (settings.language === 'ar' ? 'إعادة محاولة البحث من نفس النقطة' : 'Retry search from the same checkpoint')
+          : (settings.language === 'ar' ? 'الاستكمال من آخر نقطة محفوظة' : 'Continue from last checkpoint'),
+        disabled: resumeBusy || !simulation.simulationId,
+        busy: resumeBusy,
+        tone: (isSearchFailure ? 'warning' : 'success') as const,
+        icon: (isSearchFailure ? 'retry' : 'play') as const,
+        onClick: () => { void handleManualResume(); },
+      };
+    }
+
+    if (searchState.status === 'searching' || isConfigSearching || isChatThinking) {
+      return {
+        key: 'searching',
+        label: settings.language === 'ar' ? 'جاري البحث...' : 'Searching...',
+        description: simulation.currentPhaseKey || (settings.language === 'ar' ? 'يتم تحليل المصادر الآن' : 'Collecting and extracting sources'),
+        disabled: true,
+        busy: true,
+        tone: 'secondary' as const,
+        icon: 'sparkles' as const,
+      };
+    }
+
+    if (searchState.status === 'timeout') {
+      return {
+        key: 'retry_search',
+        label: settings.language === 'ar' ? 'إعادة البحث' : 'Retry search',
+        description: settings.language === 'ar' ? 'سنحاول بمصادر إضافية قبل الإيقاف' : 'Try again with expanded source queries',
+        disabled: false,
+        busy: false,
+        tone: 'warning' as const,
+        icon: 'retry' as const,
+        onClick: () => { void handleSearchRetry(); },
+      };
+    }
+
+    if (pendingConfigReview) {
+      return {
+        key: 'confirm_start',
+        label: settings.language === 'ar' ? 'تأكيد البيانات وبدء المحاكاة' : 'Confirm data and start',
+        description: settings.language === 'ar' ? 'سيبدأ البحث أولًا ثم التفكير' : 'Search starts first, then reasoning',
+        disabled: isConfigSearching,
+        busy: isConfigSearching,
+        tone: 'primary' as const,
+        icon: 'play' as const,
+        onClick: () => { void handleConfigSubmit(); },
+      };
+    }
+
+    if (pendingResearchReview) {
+      return {
+        key: 'start_reasoning',
+        label: settings.language === 'ar' ? 'ابدأ المحاكاة الآن' : 'Start simulation now',
+        description: settings.language === 'ar' ? 'سيتم تشغيل مرحلة التفكير مباشرة' : 'Reasoning phase will begin now',
+        disabled: false,
+        busy: false,
+        tone: 'primary' as const,
+        icon: 'play' as const,
+        onClick: () => { void handleConfirmStart(); },
+      };
+    }
+
+    if (simulation.status === 'completed' && hasReasoning) {
+      return {
+        key: 'open_reasoning',
+        label: settings.language === 'ar' ? 'عرض التفكير النهائي' : 'Open final reasoning',
+        description: settings.language === 'ar' ? 'عرض كامل من نفس زر التحكم الرئيسي' : 'Open full reasoning from the main controller',
+        disabled: false,
+        busy: false,
+        tone: 'secondary' as const,
+        icon: 'reasoning' as const,
+        onClick: handleOpenReasoning,
+      };
+    }
+
+    return {
+      key: 'start',
+      label: settings.language === 'ar' ? 'ابدأ المحاكاة' : 'Start simulation',
+      description: settings.language === 'ar' ? 'التحقق من البيانات ثم البحث ثم التفكير' : 'Validate data, run search, then reason',
+      disabled: !hasIdea,
+      busy: false,
+      tone: 'primary' as const,
+      icon: 'play' as const,
+      onClick: () => { void handleConfigSubmit(); },
+    };
+  }, [
+    clarificationBusy,
+    handleConfigSubmit,
+    handleConfirmStart,
+    handleManualPause,
+    handleManualResume,
+    handleOpenReasoning,
+    handleSearchRetry,
+    isClarificationPause,
+    isChatThinking,
+    isConfigSearching,
+    pauseBusy,
+    pendingConfigReview,
+    pendingResearchReview,
+    simulation.currentPhaseKey,
+    resumeBusy,
+    searchState.status,
+    settings.language,
+    showResumeAction,
+    simulation.reasoningFeed.length,
+    simulation.simulationId,
+    simulation.status,
+    setActivePanel,
+    userInput.idea,
+  ]);
   return (
     <div className="h-screen w-screen bg-background flex flex-col overflow-hidden">
       {/* Header */}
       <Header
         simulationStatus={simulation.status}
-              simulationError={simulation.error}
         isConnected={websocketService.isConnected()}
         language={settings.language}
         settings={settings}
@@ -1773,168 +2418,181 @@ If rejection is about competition or location, suggest searching for a better lo
             onClick={() => navigate('/bonus')}
             className="rounded-full bg-white px-4 py-1.5 text-xs font-semibold text-slate-900"
           >
-            {settings.language === 'ar' ? 'شراء رصيد' : 'Buy credits'}
+            {settings.language === 'ar' ? 'شحن رصيد' : 'Buy credits'}
           </button>
         </div>
       )}
-
-      {/* Main Content */}
-      <div
-        ref={containerRef}
-        className="flex-1 grid overflow-hidden min-h-0"
-        style={{
-          gridTemplateColumns: `${leftWidth}px 6px 1fr 6px ${rightWidth}px`,
-        }}
-      >
-        {/* Left Panel - Config / Chat */}
-        <div className="border-r border-border/50 flex flex-col min-h-0">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border/40">
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setActivePanel('chat')}
-                className={cn(
-                  'px-3 py-1.5 rounded-full text-xs font-medium transition',
-                  activePanel === 'chat'
-                    ? 'bg-primary text-primary-foreground'
-                    : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
-                )}
-              >
-                {settings.language === 'ar' ? 'الدردشة' : 'Chat'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setActivePanel('config')}
-                className={cn(
-                  'px-3 py-1.5 rounded-full text-xs font-medium transition',
-                  activePanel === 'config'
-                    ? 'bg-primary text-primary-foreground'
-                    : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
-                )}
-              >
-                {settings.language === 'ar' ? '\u0627\u0644\u0625\u0639\u062f\u0627\u062f\u0627\u062a' : 'Config'}
-              </button>
-            </div>
-          </div>
-
-          {activePanel === 'config' ? (
-            <ConfigPanel
-              value={userInput}
-              onChange={(updates) => {
-                setUserInput((prev) => {
-                  const next = { ...prev, ...updates };
-                  const hasLocation = Boolean(next.city.trim() || next.country.trim());
-                  if (hasLocation) {
-                    setLocationChoice('yes');
-                    setIsWaitingForLocationChoice(false);
-                  }
-                  const missing = getMissingForStart(next, hasLocation ? 'yes' : undefined);
-                  setMissingFields(missing.filter((field) => field !== 'location_choice'));
-                  return next;
-                });
-              }}
-              onSubmit={handleConfigSubmit}
-              missingFields={missingFields}
-              language={settings.language}
-              isSearching={isConfigSearching}
-            />
-          ) : (
-            <ChatPanel
-              messages={chatMessages}
-              reasoningFeed={simulation.reasoningFeed}
-              reasoningDebug={simulation.reasoningDebug}
-              onSendMessage={handleSendMessage}
-              onSelectOption={handleOptionSelect}
-              isWaitingForCity={isWaitingForCity}
-              isWaitingForCountry={isWaitingForCountry}
-              isWaitingForLocationChoice={isWaitingForLocationChoice}
-              searchState={searchState}
-              isThinking={isChatThinking}
-              showRetry={llmBusy}
-              onRetryLlm={handleRetryLlm}
-              onSearchRetry={handleSearchRetry}
-              onSearchUseLlm={handleSearchUseLlm}
-              canConfirmStart={pendingResearchReview}
-              onConfirmStart={handleConfirmStart}
-              simulationStatus={simulation.status}
-              reasoningActive={reasoningActive}
-              isSummarizing={isSummarizing}
-              rejectedCount={simulation.metrics.rejected}
-              quickReplies={quickReplies || undefined}
-              onQuickReply={handleQuickReply}
-              reportBusy={reportBusy}
-              onDownloadReport={handleDownloadReport}
-              insights={{
-                idea: userInput.idea,
-                location: `${userInput.city || ""}${userInput.city && userInput.country ? ", " : ""}${userInput.country || ""}`.trim(),
-                category: userInput.category,
-                audience: userInput.targetAudience,
-                goals: userInput.goals,
-                maturity: userInput.ideaMaturity,
-                risk: userInput.riskAppetite,
-                summary: simulation.summary || "",
-                rejectAdvice: summaryAdvice,
-                rejectReasons: summaryReasons,
-              }}
-              research={{
-                summary: researchContext.summary,
-                signals: researchContext.structured?.signals,
-                competition: researchContext.structured?.competition_level,
-                demand: researchContext.structured?.demand_level,
-                priceSensitivity: researchContext.structured?.price_sensitivity,
-                regulatoryRisk: researchContext.structured?.regulatory_risk,
-                gaps: researchContext.structured?.gaps,
-                notableLocations: researchContext.structured?.notable_locations,
-                sourcesCount: researchContext.sources.length,
-              }}
-              settings={settings}
-            />
+      {simulation.status === 'running' && simulation.simulationId && (
+        <div className="mx-4 mt-3 rounded-2xl border border-slate-400/30 bg-slate-500/10 px-4 py-3 text-sm text-slate-100">
+          {settings.language === 'ar'
+            ? 'المحاكاة تعمل الآن. يمكنك التحكم الكامل من زر التحكم الرئيسي داخل الدردشة.'
+            : 'Simulation is running. Use the main controller button in chat for pause/resume actions.'}
+        </div>
+      )}
+      {isClarificationPause && (
+        <div className="mx-4 mt-3 rounded-2xl border border-cyan-400/30 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100">
+          <p>{clarificationBannerText}</p>
+          {simulation.pendingClarification?.reasonSummary && (
+            <p className="text-xs text-cyan-200/80 mt-1">{simulation.pendingClarification.reasonSummary}</p>
           )}
         </div>
-        <div
-          className="resize-handle"
-          onMouseDown={(e) => {
-            dragRef.current = {
-              side: 'left',
-              startX: e.clientX,
-              startLeft: leftWidth,
-              startRight: rightWidth,
-            };
-          }}
-        />
+      )}
+      {showResumeAction && (
+        <div className="mx-4 mt-3 rounded-2xl border border-cyan-400/30 bg-cyan-400/10 px-4 py-3 text-sm text-cyan-100">
+          <p>{resumeBannerText}</p>
+          {formattedResumeReason && (
+            <p className="text-xs text-cyan-200/80 mt-1">{formattedResumeReason}</p>
+          )}
+        </div>
+      )}
 
-        {/* Center - Simulation Arena */}
-        <div className="flex flex-col p-4 gap-4 overflow-hidden min-h-0">
-          <div className="flex-1">
-        <SimulationArena
-          agents={Array.from(simulation.agents.values())}
-          activePulses={simulation.activePulses}
-        />
+      <div className="flex-1 overflow-hidden min-h-0 p-3 md:p-4">
+        <div className="h-full grid grid-cols-1 xl:grid-cols-[62%_38%] gap-4 min-h-0">
+          <div className="order-2 xl:order-1 min-h-0 grid grid-rows-[minmax(0,1fr)_auto] gap-4">
+            <div className="min-h-0 grid grid-cols-1 2xl:grid-cols-[minmax(0,1fr)_340px] gap-4">
+              <div className="min-h-0 rounded-2xl border border-border/50 overflow-hidden">
+                <SimulationArena
+                  agents={Array.from(simulation.agents.values())}
+                  activePulses={simulation.activePulses}
+                />
+              </div>
+              <div className="min-h-0">
+                <MetricsPanel
+                  metrics={simulation.metrics}
+                  language={settings.language}
+                  onSelectStance={handleSelectStanceFilter}
+                  selectedStance={selectedStanceFilter}
+                  filteredAgents={filteredAgents}
+                  filteredAgentsTotal={filteredAgentsTotal}
+                />
+              </div>
+            </div>
+            <IterationTimeline
+              currentIteration={simulation.metrics.currentIteration}
+              totalIterations={simulation.metrics.totalIterations}
+              language={settings.language}
+              currentPhaseKey={simulation.currentPhaseKey}
+              phaseProgressPct={simulation.phaseProgressPct}
+            />
           </div>
 
-          {/* Iteration Timeline */}
-          <IterationTimeline
-            currentIteration={simulation.metrics.currentIteration}
-            totalIterations={simulation.metrics.totalIterations}
-            language={settings.language}
-          />
-        </div>
+          <div className="order-1 xl:order-2 min-h-0 rounded-2xl border border-border/50 bg-card/20 overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border/40 bg-background/50 backdrop-blur">
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setActivePanel('chat')}
+                  className={cn(
+                    'px-3 py-1.5 rounded-full text-xs font-medium transition',
+                    activePanel === 'chat'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  {settings.language === 'ar' ? 'الدردشة' : 'Chat'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActivePanel('config')}
+                  className={cn(
+                    'px-3 py-1.5 rounded-full text-xs font-medium transition',
+                    activePanel === 'config'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  {settings.language === 'ar' ? 'الإعدادات' : 'Config'}
+                </button>
+              </div>
+            </div>
 
-        <div
-          className="resize-handle"
-          onMouseDown={(e) => {
-            dragRef.current = {
-              side: 'right',
-              startX: e.clientX,
-              startLeft: leftWidth,
-              startRight: rightWidth,
-            };
-          }}
-        />
-
-        {/* Right Panel - Metrics */}
-        <div className="border-l border-border/50 flex flex-col min-h-0">
-          <MetricsPanel metrics={simulation.metrics} language={settings.language} />
+            <div className="min-h-0 flex-1">
+              {activePanel === 'config' ? (
+                <ConfigPanel
+                  value={userInput}
+                  onChange={(updates) => {
+                    setUserInput((prev) => {
+                      const next = { ...prev, ...updates };
+                      const hasLocation = Boolean(next.city.trim() || next.country.trim());
+                      if (hasLocation) {
+                        setLocationChoice('yes');
+                        setIsWaitingForLocationChoice(false);
+                      }
+                      const missing = getMissingForStart(next, hasLocation ? 'yes' : undefined);
+                      setMissingFields(missing.filter((field) => field !== 'location_choice'));
+                      return next;
+                    });
+                  }}
+                  onSubmit={handleConfigSubmit}
+                  missingFields={missingFields}
+                  language={settings.language}
+                  isSearching={isConfigSearching}
+                />
+              ) : (
+                <ChatPanel
+                  messages={chatMessages}
+                  reasoningFeed={simulation.reasoningFeed}
+                  reasoningDebug={simulation.reasoningDebug}
+                  onSendMessage={handleSendMessage}
+                  onSelectOption={handleOptionSelect}
+                  isWaitingForCity={isWaitingForCity}
+                  isWaitingForCountry={isWaitingForCountry}
+                  isWaitingForLocationChoice={isWaitingForLocationChoice}
+                  searchState={searchState}
+                  isThinking={isChatThinking}
+                  showRetry={llmBusy}
+                  onRetryLlm={handleRetryLlm}
+                  simulationStatus={simulation.status}
+                  reasoningActive={reasoningActive}
+                  isSummarizing={isSummarizing}
+                  rejectedCount={simulation.metrics.rejected}
+                  phaseState={{
+                    currentPhaseKey: simulation.currentPhaseKey,
+                    progressPct: simulation.phaseProgressPct,
+                  }}
+                  researchSourcesLive={simulation.researchSources}
+                  quickReplies={quickReplies || undefined}
+                  onQuickReply={handleQuickReply}
+                  primaryControl={primaryControl}
+                  onOpenReasoning={handleOpenReasoning}
+                  pendingClarification={simulation.pendingClarification}
+                  canAnswerClarification={simulation.canAnswerClarification}
+                  clarificationBusy={clarificationBusy}
+                  onSubmitClarification={handleSubmitClarification}
+                  postActionsEnabled={simulation.status === 'completed' && Boolean(simulation.simulationId)}
+                  postActionBusy={postActionBusy}
+                  postActionResult={postActionResult}
+                  onRunPostAction={(action) => { void handleRunPostAction(action); }}
+                  onStartFollowupFromPostAction={() => { void handleStartFollowupFromAction(); }}
+                  reportBusy={reportBusy}
+                  onDownloadReport={handleDownloadReport}
+                  insights={{
+                    idea: userInput.idea,
+                    location: `${userInput.city || ''}${userInput.city && userInput.country ? ', ' : ''}${userInput.country || ''}`.trim(),
+                    category: userInput.category,
+                    audience: userInput.targetAudience,
+                    goals: userInput.goals,
+                    maturity: userInput.ideaMaturity,
+                    risk: userInput.riskAppetite,
+                    summary: simulation.summary || '',
+                    rejectReasons: summaryReasons,
+                  }}
+                  research={{
+                    summary: researchContext.summary,
+                    signals: researchContext.structured?.signals,
+                    competition: researchContext.structured?.competition_level,
+                    demand: researchContext.structured?.demand_level,
+                    priceSensitivity: researchContext.structured?.price_sensitivity,
+                    regulatoryRisk: researchContext.structured?.regulatory_risk,
+                    gaps: researchContext.structured?.gaps,
+                    notableLocations: researchContext.structured?.notable_locations,
+                    sourcesCount: researchContext.sources.length,
+                  }}
+                  settings={settings}
+                />
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -1942,3 +2600,7 @@ If rejection is about competition or location, suggest searching for a better lo
 };
 
 export default Index;
+
+
+
+

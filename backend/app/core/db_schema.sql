@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS users (
   email VARCHAR(128) NULL,
   password_hash VARCHAR(256) NOT NULL,
   role VARCHAR(16) NOT NULL DEFAULT 'user',
-  credits INT NOT NULL DEFAULT 0,
+  credits DECIMAL(12,2) NOT NULL DEFAULT 0.00,
   email_verified TINYINT(1) NOT NULL DEFAULT 0,
   email_verified_at TIMESTAMP NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -102,6 +102,25 @@ CREATE TABLE IF NOT EXISTS daily_usage (
     REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS daily_token_usage (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  usage_date DATE NOT NULL,
+  used_tokens INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_daily_tokens_user_date (user_id, usage_date),
+  INDEX idx_daily_tokens_user (user_id),
+  CONSTRAINT fk_daily_tokens_user FOREIGN KEY (user_id)
+    REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  setting_key VARCHAR(64) PRIMARY KEY,
+  setting_value VARCHAR(255) NOT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Promo codes that grant credits/attempts
 CREATE TABLE IF NOT EXISTS promo_codes (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -149,6 +168,20 @@ CREATE TABLE IF NOT EXISTS simulations (
     REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS simulation_token_usage (
+  simulation_id VARCHAR(36) PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  used_tokens INT NOT NULL DEFAULT 0,
+  free_tokens_applied INT NOT NULL DEFAULT 0,
+  credits_charged DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_sim_token_user (user_id),
+  CONSTRAINT fk_sim_token_sim FOREIGN KEY (simulation_id)
+    REFERENCES simulations(simulation_id) ON DELETE CASCADE,
+  CONSTRAINT fk_sim_token_user FOREIGN KEY (user_id)
+    REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS agents (
   agent_id VARCHAR(36) PRIMARY KEY,
   simulation_id VARCHAR(36) NOT NULL,
@@ -163,6 +196,7 @@ CREATE TABLE IF NOT EXISTS agents (
   fixed_opinion VARCHAR(16) NULL,
   initial_opinion VARCHAR(16) NULL,
   current_opinion VARCHAR(16) NULL,
+  last_phase VARCHAR(64) NULL,
   confidence FLOAT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_agents_sim (simulation_id),
@@ -176,6 +210,7 @@ CREATE TABLE IF NOT EXISTS reasoning_steps (
   simulation_id VARCHAR(36) NOT NULL,
   agent_id VARCHAR(36) NOT NULL,
   agent_short_id VARCHAR(8) NULL,
+  agent_label VARCHAR(32) NULL,
   archetype_name VARCHAR(64) NULL,
   iteration INT NULL,
   phase VARCHAR(32) NULL,
@@ -183,10 +218,26 @@ CREATE TABLE IF NOT EXISTS reasoning_steps (
   opinion VARCHAR(16) NULL,
   triggered_by VARCHAR(32) NULL,
   reply_to_agent_id VARCHAR(36) NULL,
+  reply_to_short_id VARCHAR(8) NULL,
+  opinion_source VARCHAR(24) NULL,
+  stance_confidence FLOAT NULL,
+  reasoning_length VARCHAR(16) NULL,
+  fallback_reason VARCHAR(64) NULL,
+  relevance_score FLOAT NULL,
+  policy_guard TINYINT(1) NULL,
+  policy_reason VARCHAR(128) NULL,
+  stance_locked TINYINT(1) NULL,
+  reason_tag VARCHAR(64) NULL,
+  clarification_triggered TINYINT(1) NULL,
+  step_uid VARCHAR(96) NULL,
+  event_seq BIGINT NULL,
+  stance_before VARCHAR(16) NULL,
+  stance_after VARCHAR(16) NULL,
   evidence_keys JSON NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_steps_sim (simulation_id),
   INDEX idx_steps_agent (agent_id),
+  UNIQUE KEY uq_reasoning_step_uid (simulation_id, step_uid),
   CONSTRAINT fk_steps_sim FOREIGN KEY (simulation_id)
     REFERENCES simulations(simulation_id) ON DELETE CASCADE,
   CONSTRAINT fk_steps_agent FOREIGN KEY (agent_id)
@@ -202,10 +253,62 @@ CREATE TABLE IF NOT EXISTS metrics (
   neutral INT NULL,
   acceptance_rate FLOAT NULL,
   polarization FLOAT NULL,
+  total_agents INT NULL,
   per_category JSON NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_metrics_sim (simulation_id),
   CONSTRAINT fk_metrics_sim FOREIGN KEY (simulation_id)
+    REFERENCES simulations(simulation_id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS simulation_checkpoints (
+  simulation_id VARCHAR(36) PRIMARY KEY,
+  checkpoint_json LONGTEXT NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'running',
+  last_error TEXT NULL,
+  status_reason VARCHAR(32) NULL,
+  current_phase_key VARCHAR(64) NULL,
+  phase_progress_pct FLOAT NULL,
+  event_seq BIGINT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_checkpoint_sim FOREIGN KEY (simulation_id)
+    REFERENCES simulations(simulation_id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS research_events (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  simulation_id VARCHAR(36) NOT NULL,
+  event_seq BIGINT NULL,
+  url TEXT NULL,
+  domain VARCHAR(255) NULL,
+  favicon_url VARCHAR(1024) NULL,
+  action VARCHAR(32) NULL,
+  status VARCHAR(24) NULL,
+  title VARCHAR(512) NULL,
+  http_status INT NULL,
+  content_chars INT NULL,
+  relevance_score FLOAT NULL,
+  snippet TEXT NULL,
+  error TEXT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_research_events_sim (simulation_id),
+  INDEX idx_research_events_seq (simulation_id, event_seq),
+  CONSTRAINT fk_research_events_sim FOREIGN KEY (simulation_id)
+    REFERENCES simulations(simulation_id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS simulation_chat_events (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  simulation_id VARCHAR(36) NOT NULL,
+  event_seq BIGINT NOT NULL,
+  message_id VARCHAR(64) NOT NULL,
+  role VARCHAR(16) NOT NULL,
+  content LONGTEXT NOT NULL,
+  meta_json JSON NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_chat_events_sim_seq (simulation_id, event_seq),
+  UNIQUE KEY uq_chat_events_sim_msg (simulation_id, message_id),
+  CONSTRAINT fk_chat_events_sim FOREIGN KEY (simulation_id)
     REFERENCES simulations(simulation_id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

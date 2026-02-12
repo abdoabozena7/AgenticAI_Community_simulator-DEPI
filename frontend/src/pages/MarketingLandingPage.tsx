@@ -5,6 +5,7 @@ import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { Navbar } from '@/components/landing/Navbar';
 import { HeroSection } from '@/components/landing/HeroSection';
+import { ProofMetricsSection } from '@/components/landing/ProofMetricsSection';
 import { ProblemSection } from '@/components/landing/ProblemSection';
 import { SolutionSection } from '@/components/landing/SolutionSection';
 import { SimulationSection } from '@/components/landing/SimulationSection';
@@ -71,6 +72,8 @@ const MarketingLandingPage = () => {
         />
 
         <HeroSection onGetStarted={handleGetStarted} />
+
+        <ProofMetricsSection />
 
         <ProblemSection />
 

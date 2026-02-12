@@ -117,7 +117,11 @@ export function HeroSection({ onGetStarted }: HeroSectionProps) {
         {/* Title */}
         <h1
           ref={titleRef}
-          className="text-5xl md:text-7xl lg:text-8xl font-bold text-foreground tracking-tight leading-[1.1] mb-6"
+          className={`font-bold text-foreground tracking-tight ${
+            isRTL
+              ? 'text-5xl md:text-7xl lg:text-[5.5rem] leading-[1.2] mb-8'
+              : 'text-5xl md:text-7xl lg:text-8xl leading-[1.1] mb-6'
+          }`}
           style={{ perspective: '1000px' }}
         >
           <span>{t('hero.title1')}</span>
@@ -130,7 +134,11 @@ export function HeroSection({ onGetStarted }: HeroSectionProps) {
         {/* Subtitle */}
         <p
           ref={subtitleRef}
-          className="text-lg md:text-xl text-muted-foreground max-w-2xl mx-auto mb-10 leading-relaxed"
+          className={`text-muted-foreground mx-auto ${
+            isRTL
+              ? 'text-base md:text-lg max-w-xl mb-12 leading-[1.9]'
+              : 'text-lg md:text-xl max-w-2xl mb-10 leading-relaxed'
+          }`}
         >
           {t('hero.subtitle')}
         </p>

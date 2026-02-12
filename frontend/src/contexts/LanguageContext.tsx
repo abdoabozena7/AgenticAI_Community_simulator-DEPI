@@ -88,7 +88,7 @@ const translations = {
     'pricing.trialTitle': '7-Day Trial',
     'pricing.price': '$0',
     'pricing.per': '/week',
-    'pricing.includes': '3 simulations daily • Full access',
+    'pricing.includes': '3 simulations daily â€¢ Full access',
     'pricing.f1': '3 simulations per day',
     'pricing.f2': '24 AI agents per simulation',
     'pricing.f3': 'Real-time analytics',
@@ -104,7 +104,7 @@ const translations = {
     'cta.button': 'Try ASSET Free',
 
     // Footer
-    'footer.rights': '© 2024 ASSET. All rights reserved.',
+    'footer.rights': 'آ© 2024 ASSET. All rights reserved.',
     'footer.privacy': 'Privacy Policy',
     'footer.terms': 'Terms of Service',
   },
@@ -119,7 +119,7 @@ const translations = {
     // Hero
     'hero.title1': 'جرّب فكرتك',
     'hero.title2': 'قبل ما تبنيها',
-    'hero.subtitle': 'عندك فكرة مشروع في دماغك.. بس لسه مش عارف هي حلوة ولا وحشة؟ 🤔 فيه فرق شاسع بين إن الفكرة تكون "حلوة" في خيالك، وبين إنها تكون واقعية، قابلة للتنفيذ، والأهم.. إنها تعجب الناس.',
+    'hero.subtitle': 'عندك فكرة مشروع ومحتاج تعرف هل تنفع فعلاً؟ ASSET يختبرها مع وكلاء متعددين قبل ما تصرف وقت وفلوس.',
     'hero.cta': 'ابدأ تجربة مجانية',
     'hero.watchDemo': 'شاهد العرض',
     'hero.stat1': '24+ وكيل ذكي',

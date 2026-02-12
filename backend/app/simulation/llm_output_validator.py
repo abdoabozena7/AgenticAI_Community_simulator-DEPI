@@ -65,11 +65,16 @@ class LLMOutputValidator:
             logger.error(f"LLM Judge error: {e}")
             return ValidationResult(ok=True, reasons=[], critique="Validation bypassed")
 
-    async def classify_opinion(self, text: str, idea_label: str, language: str = "en") -> str | None:
-        """Ask the LLM to classify stance (accept/reject/neutral) with no keyword matching."""
+    async def classify_opinion_with_confidence(
+        self,
+        text: str,
+        idea_label: str,
+        language: str = "en",
+    ) -> tuple[str | None, float | None]:
+        """Ask the LLM to classify stance and confidence."""
         t = (text or "").strip()
         if not t:
-            return None
+            return None, None
         is_arabic = bool(re.search(r"[\u0600-\u06FF]", t))
         lang_note = "Arabic" if (language == "ar" or is_arabic) else "English"
         prompt = (
@@ -88,14 +93,31 @@ class LLMOutputValidator:
                 temperature=self.temperature,
                 response_format="json",
             )
-            data = json.loads((raw_response or "").strip())
+            payload = (raw_response or "").strip()
+            data = json.loads(payload)
             stance = str(data.get("stance", "")).strip().lower()
             if stance in {"accept", "reject", "neutral"}:
-                return stance
-            return None
+                conf_val = data.get("confidence")
+                try:
+                    confidence = float(conf_val)
+                except Exception:
+                    confidence = None
+                if confidence is not None:
+                    confidence = max(0.0, min(1.0, confidence))
+                return stance, confidence
+            return None, None
         except Exception as e:
             logger.error(f"LLM stance error: {e}")
-            return None
+            return None, None
+
+    async def classify_opinion(self, text: str, idea_label: str, language: str = "en") -> str | None:
+        """Compatibility wrapper for callers that only need the stance."""
+        stance, _confidence = await self.classify_opinion_with_confidence(
+            text=text,
+            idea_label=idea_label,
+            language=language,
+        )
+        return stance
 
 
 def build_default_forbidden_phrases() -> List[str]:

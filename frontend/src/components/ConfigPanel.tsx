@@ -293,7 +293,7 @@ export function ConfigPanel({
         </label>
         <div className="flex items-center gap-3">
           <Slider
-            value={[value.agentCount ?? 30]}
+            value={[value.agentCount ?? 20]}
             onValueChange={(v) => onChange({ agentCount: Math.min(500, Math.max(5, v[0])) })}
             min={5}
             max={500}
@@ -301,7 +301,7 @@ export function ConfigPanel({
             className="w-full"
           />
           <div className="w-16 text-right text-sm tabular-nums">
-            {value.agentCount ?? 30}
+            {value.agentCount ?? 20}
           </div>
         </div>
       </div>

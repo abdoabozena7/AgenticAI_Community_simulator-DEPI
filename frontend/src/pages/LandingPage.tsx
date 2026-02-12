@@ -1,67 +1,67 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiService, UserMe } from "@/services/api";
 import { Input } from "@/components/ui/input";
 
 const ideaList = [
   {
-    title: { en: "Agent Insights Hub", ar: "مركز رؤى الوكلاء" },
-    tag: { en: "Simulation", ar: "محاكاة" },
+    title: { en: "Agent Insights Hub", ar: "ظ…ط±ظƒط² ط±ط¤ظ‰ ط§ظ„ظˆظƒظ„ط§ط،" },
+    tag: { en: "Simulation", ar: "ظ…ط­ط§ظƒط§ط©" },
     description: {
       en: "Multi-agent feedback for a SaaS launch in MENA markets.",
-      ar: "آراء متعددة الوكلاء لإطلاق SaaS في أسواق الشرق الأوسط وشمال إفريقيا.",
+      ar: "ط¢ط±ط§ط، ظ…طھط¹ط¯ط¯ط© ط§ظ„ظˆظƒظ„ط§ط، ظ„ط¥ط·ظ„ط§ظ‚ SaaS ظپظٹ ط£ط³ظˆط§ظ‚ ط§ظ„ط´ط±ظ‚ ط§ظ„ط£ظˆط³ط· ظˆط´ظ…ط§ظ„ ط¥ظپط±ظٹظ‚ظٹط§.",
     },
     prompt: {
       en: "Agent insights hub for SaaS launches in MENA markets",
-      ar: "مركز رؤى الوكلاء لإطلاقات SaaS في أسواق الشرق الأوسط وشمال إفريقيا",
+      ar: "ظ…ط±ظƒط² ط±ط¤ظ‰ ط§ظ„ظˆظƒظ„ط§ط، ظ„ط¥ط·ظ„ط§ظ‚ط§طھ SaaS ظپظٹ ط£ط³ظˆط§ظ‚ ط§ظ„ط´ط±ظ‚ ط§ظ„ط£ظˆط³ط· ظˆط´ظ…ط§ظ„ ط¥ظپط±ظٹظ‚ظٹط§",
     },
   },
   {
-    title: { en: "Retail Demand Pulse", ar: "نبض الطلب في التجزئة" },
-    tag: { en: "Research", ar: "أبحاث" },
+    title: { en: "Retail Demand Pulse", ar: "ظ†ط¨ط¶ ط§ظ„ط·ظ„ط¨ ظپظٹ ط§ظ„طھط¬ط²ط¦ط©" },
+    tag: { en: "Research", ar: "ط£ط¨ط­ط§ط«" },
     description: {
       en: "Market signals for retail pricing automation.",
-      ar: "إشارات السوق لأتمتة تسعير التجزئة.",
+      ar: "ط¥ط´ط§ط±ط§طھ ط§ظ„ط³ظˆظ‚ ظ„ط£طھظ…طھط© طھط³ط¹ظٹط± ط§ظ„طھط¬ط²ط¦ط©.",
     },
     prompt: {
       en: "Retail demand pulse for pricing automation",
-      ar: "نبض الطلب في التجزئة لأتمتة التسعير",
+      ar: "ظ†ط¨ط¶ ط§ظ„ط·ظ„ط¨ ظپظٹ ط§ظ„طھط¬ط²ط¦ط© ظ„ط£طھظ…طھط© ط§ظ„طھط³ط¹ظٹط±",
     },
   },
   {
-    title: { en: "Idea Court Draft", ar: "مسودة محكمة الأفكار" },
-    tag: { en: "Debate", ar: "مناظرة" },
+    title: { en: "Idea Court Draft", ar: "ظ…ط³ظˆط¯ط© ظ…ط­ظƒظ…ط© ط§ظ„ط£ظپظƒط§ط±" },
+    tag: { en: "Debate", ar: "ظ…ظ†ط§ط¸ط±ط©" },
     description: {
       en: "Run pro/con arguments on a new fintech feature.",
-      ar: "طرح حجج مؤيدة ومعارضة لميزة مالية تقنية جديدة.",
+      ar: "ط·ط±ط­ ط­ط¬ط¬ ظ…ط¤ظٹط¯ط© ظˆظ…ط¹ط§ط±ط¶ط© ظ„ظ…ظٹط²ط© ظ…ط§ظ„ظٹط© طھظ‚ظ†ظٹط© ط¬ط¯ظٹط¯ط©.",
     },
     prompt: {
       en: "Debate a new fintech feature for subscription pricing",
-      ar: "مناظرة حول ميزة مالية تقنية جديدة لتسعير الاشتراكات",
+      ar: "ظ…ظ†ط§ط¸ط±ط© ط­ظˆظ„ ظ…ظٹط²ط© ظ…ط§ظ„ظٹط© طھظ‚ظ†ظٹط© ط¬ط¯ظٹط¯ط© ظ„طھط³ط¹ظٹط± ط§ظ„ط§ط´طھط±ط§ظƒط§طھ",
     },
   },
 ];
 
 const templates = [
   {
-    title: { en: "Launch Readiness", ar: "جاهزية الإطلاق" },
+    title: { en: "Launch Readiness", ar: "ط¬ط§ظ‡ط²ظٹط© ط§ظ„ط¥ط·ظ„ط§ظ‚" },
     description: {
       en: "Validate a new product idea with agent feedback.",
-      ar: "تحقق من فكرة منتج جديدة عبر ملاحظات الوكلاء.",
+      ar: "طھط­ظ‚ظ‚ ظ…ظ† ظپظƒط±ط© ظ…ظ†طھط¬ ط¬ط¯ظٹط¯ط© ط¹ط¨ط± ظ…ظ„ط§ط­ط¸ط§طھ ط§ظ„ظˆظƒظ„ط§ط،.",
     },
   },
   {
-    title: { en: "Market Research", ar: "أبحاث السوق" },
+    title: { en: "Market Research", ar: "ط£ط¨ط­ط§ط« ط§ظ„ط³ظˆظ‚" },
     description: {
       en: "Summarize demand, competition, and gaps.",
-      ar: "تلخيص الطلب والمنافسة والفجوات.",
+      ar: "طھظ„ط®ظٹطµ ط§ظ„ط·ظ„ط¨ ظˆط§ظ„ظ…ظ†ط§ظپط³ط© ظˆط§ظ„ظپط¬ظˆط§طھ.",
     },
   },
   {
-    title: { en: "Idea Court", ar: "محكمة الأفكار" },
+    title: { en: "Idea Court", ar: "ظ…ط­ظƒظ…ط© ط§ظ„ط£ظپظƒط§ط±" },
     description: {
       en: "Run a debate between advocates and skeptics.",
-      ar: "مناظرة بين المؤيدين والمتشككين.",
+      ar: "ظ…ظ†ط§ط¸ط±ط© ط¨ظٹظ† ط§ظ„ظ…ط¤ظٹط¯ظٹظ† ظˆط§ظ„ظ…طھط´ظƒظƒظٹظ†.",
     },
   },
 ];
@@ -186,11 +186,15 @@ const LandingPage = () => {
   const pick = (value: { en: string; ar: string }) => (appSettings.language === "ar" ? value.ar : value.en);
 
   const creditsBlocked = Boolean(user)
-    && (typeof user?.daily_usage === "number" && typeof user?.daily_limit === "number"
-      ? (user.daily_limit <= 0
-        ? user.credits <= 0
-        : user.daily_usage >= user.daily_limit && user.credits <= 0)
-      : user?.credits <= 0);
+    && (() => {
+      const remainingTokens = typeof user?.daily_tokens_remaining === "number"
+        ? user.daily_tokens_remaining
+        : (typeof user?.daily_tokens_limit === "number" && typeof user?.daily_tokens_used === "number"
+          ? Math.max(0, user.daily_tokens_limit - user.daily_tokens_used)
+          : null);
+      if (remainingTokens !== null && remainingTokens > 0) return false;
+      return (user?.credits ?? 0) <= 0;
+    })();
 
   useEffect(() => {
     if (!creditsBlocked) {
@@ -199,8 +203,8 @@ const LandingPage = () => {
     }
     setCreditNotice(
       t(
-        "Credits exhausted. Add credits to continue running simulations.",
-        "الرصيد انتهى. اشحن رصيدك لتكملة المحاكاة."
+        "Token budget exhausted. Add credits to continue running simulations.",
+        "ط§ظ„ط±طµظٹط¯ ط§ظ†طھظ‡ظ‰. ط§ط´ط­ظ† ط±طµظٹط¯ظƒ ظ„طھظƒظ…ظ„ط© ط§ظ„ظ…ط­ط§ظƒط§ط©."
       )
     );
   }, [creditsBlocked, t]);
@@ -214,8 +218,8 @@ const LandingPage = () => {
     if (creditsBlocked) {
       setCreditNotice(
         t(
-          "Credits exhausted. Add credits to continue.",
-          "الرصيد انتهى. اشحن رصيدك للمتابعة."
+          "Token budget exhausted. Add credits to continue.",
+          "ط§ظ„ط±طµظٹط¯ ط§ظ†طھظ‡ظ‰. ط§ط´ط­ظ† ط±طµظٹط¯ظƒ ظ„ظ„ظ…طھط§ط¨ط¹ط©."
         )
       );
       return;
@@ -223,6 +227,7 @@ const LandingPage = () => {
     const text = (idea || quickIdea).trim();
     if (text) {
       localStorage.setItem("pendingIdea", text);
+      localStorage.setItem("pendingAutoStart", "true");
     }
     navigate("/simulate");
   };
@@ -268,7 +273,7 @@ const LandingPage = () => {
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#0b0b12] text-white">
-        {t("Loading dashboard...", "جاري تحميل لوحة التحكم...")}
+        {t("Loading dashboard...", "ط¬ط§ط±ظٹ طھط­ظ…ظٹظ„ ظ„ظˆط­ط© ط§ظ„طھط­ظƒظ…...")}
       </div>
     );
   }
@@ -276,7 +281,7 @@ const LandingPage = () => {
   if (!user) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#0b0b12] text-white">
-        {t("Session not found.", "لم يتم العثور على الجلسة.")}
+        {t("Session not found.", "ظ„ظ… ظٹطھظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ ط§ظ„ط¬ظ„ط³ط©.")}
       </div>
     );
   }
@@ -319,7 +324,7 @@ const LandingPage = () => {
                     }}
                     className="w-full rounded-lg px-3 py-2 text-left text-white/80 hover:bg-white/10"
                   >
-                    {t("Settings", "الإعدادات")}
+                    {t("Settings", "ط§ظ„ط¥ط¹ط¯ط§ط¯ط§طھ")}
                   </button>
                   <button
                     type="button"
@@ -329,14 +334,14 @@ const LandingPage = () => {
                     }}
                     className="w-full rounded-lg px-3 py-2 text-left text-white/80 hover:bg-white/10"
                   >
-                    {t("Bonus (coming soon)", "المكافآت (قريبًا)")}
+                    {t("Bonus (coming soon)", "ط§ظ„ظ…ظƒط§ظپط¢طھ (ظ‚ط±ظٹط¨ظ‹ط§)")}
                   </button>
                   <button
                     type="button"
                     onClick={handleLogout}
                     className="w-full rounded-lg px-3 py-2 text-left text-white/80 hover:bg-white/10"
                   >
-                    {t("Log out", "تسجيل الخروج")}
+                    {t("Log out", "طھط³ط¬ظٹظ„ ط§ظ„ط®ط±ظˆط¬")}
                   </button>
                 </div>
               )}
@@ -350,33 +355,33 @@ const LandingPage = () => {
               type="button"
               className="flex w-full items-center gap-2 rounded-lg bg-white/10 px-3 py-2 text-left"
             >
-              {t("Home", "الرئيسية")}
+              {t("Home", "ط§ظ„ط±ط¦ظٹط³ظٹط©")}
             </button>
             <button
               type="button"
               onClick={() => navigate("/simulate")}
               className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-white/70 hover:bg-white/5"
             >
-              {t("Simulation", "المحاكاة")}
+              {t("Simulation", "ط§ظ„ظ…ط­ط§ظƒط§ط©")}
             </button>
             <button
               type="button"
               onClick={() => navigate("/research")}
               className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-white/70 hover:bg-white/5"
             >
-              {t("Research", "الأبحاث")}
+              {t("Research", "ط§ظ„ط£ط¨ط­ط§ط«")}
             </button>
             <button
               type="button"
               onClick={() => navigate("/court")}
               className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-white/70 hover:bg-white/5"
             >
-              {t("Idea Court", "محكمة الأفكار")}
+              {t("Idea Court", "ظ…ط­ظƒظ…ط© ط§ظ„ط£ظپظƒط§ط±")}
             </button>
           </div>
 
           <div className="mt-8">
-            <div className="text-xs uppercase tracking-[0.25em] text-white/40">{t("Ideas", "الأفكار")}</div>
+            <div className="text-xs uppercase tracking-[0.25em] text-white/40">{t("Ideas", "ط§ظ„ط£ظپظƒط§ط±")}</div>
             <div className="mt-3 space-y-1 text-sm text-white/70">
               {ideaList.map((idea) => (
                 <button
@@ -394,17 +399,24 @@ const LandingPage = () => {
               onClick={() => navigate("/simulate")}
               className="mt-3 text-xs text-white/60 hover:text-white"
             >
-              {t("All ideas", "كل الأفكار")}
+              {t("All ideas", "ظƒظ„ ط§ظ„ط£ظپظƒط§ط±")}
             </button>
           </div>
 
           <div className="mt-auto space-y-4 pt-6">
             <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-white/50">{t("Credits", "الرصيد")}</div>
+              <div className="text-xs uppercase tracking-[0.2em] text-white/50">{t("Credits", "ط§ظ„ط±طµظٹط¯")}</div>
               <div className="mt-2 text-2xl font-semibold">{user.credits}</div>
-              {typeof user.daily_usage === "number" && typeof user.daily_limit === "number" && (
+              {typeof user.daily_tokens_used === "number" && typeof user.daily_tokens_limit === "number" ? (
                 <div className="mt-1 text-xs text-white/50">
-                  {t("Daily usage", "الاستخدام اليومي")}{' '}
+                  {t("Daily tokens", "التوكنز اليومية")}{' '}
+                  <span dir="ltr">
+                    {user.daily_tokens_used} / {user.daily_tokens_limit}
+                  </span>
+                </div>
+              ) : (typeof user.daily_usage === "number" && typeof user.daily_limit === "number" && (
+                <div className="mt-1 text-xs text-white/50">
+                  {t("Daily usage", "ط§ظ„ط§ط³طھط®ط¯ط§ظ… ط§ظ„ظٹظˆظ…ظٹ")}{' '}
                   <span dir="ltr">
                     {user.daily_usage} / {user.daily_limit}
                   </span>
@@ -417,7 +429,7 @@ const LandingPage = () => {
               onClick={() => navigate("/bonus")}
               className="w-full rounded-full border border-white/20 py-2 text-sm text-white/80"
             >
-              {t("Buy credits", "شراء رصيد")}
+              {t("Buy credits", "ط´ط±ط§ط، ط±طµظٹط¯")}
             </button>
           </div>
         </aside>
@@ -433,24 +445,24 @@ const LandingPage = () => {
                   onClick={() => navigate("/bonus")}
                   className="rounded-full bg-white px-4 py-1.5 text-xs font-semibold text-slate-900"
                 >
-                  {t("Buy credits", "شراء رصيد")}
+                  {t("Buy credits", "ط´ط±ط§ط، ط±طµظٹط¯")}
                 </button>
               </div>
             )}
             <div className="flex items-center justify-center">
               <div className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-4 py-2 text-xs text-white/70">
-                {t("New", "جديد")}
-                <span className="text-white/90">{t("Introducing Agentic Lab Pro", "نقدم Agentic Lab Pro")}</span>
+                {t("New", "ط¬ط¯ظٹط¯")}
+                <span className="text-white/90">{t("Introducing Agentic Lab Pro", "ظ†ظ‚ط¯ظ… Agentic Lab Pro")}</span>
               </div>
             </div>
 
             <h1 className="mt-6 text-center text-4xl font-semibold text-white md:text-5xl">
-              {t(`Lets build something, ${displayName}`, `بتفكر ف ايه؟ `)}
+              {t(`Lets build something, ${displayName}`, `ط¨طھظپظƒط± ظپ ط§ظٹظ‡طں `)}
             </h1>
 
             <div className="mt-8 flex justify-center">
               <div className="w-full max-w-4xl rounded-[28px] border border-white/15 bg-black/60 p-6 shadow-2xl backdrop-blur-xl">
-                <div className="text-sm text-white/60">{t("Ask Agentic to simulate a launch for", "اطلب من Agentic محاكاة إطلاق لـ")}</div>
+                <div className="text-sm text-white/60">{t("Ask Agentic to simulate a launch for", "ط§ط·ظ„ط¨ ظ…ظ† Agentic ظ…ط­ط§ظƒط§ط© ط¥ط·ظ„ط§ظ‚ ظ„ظ€")}</div>
                 <div className="mt-4 flex flex-col gap-4 md:flex-row md:items-center">
                   <button
                     type="button"
@@ -466,11 +478,11 @@ const LandingPage = () => {
                   <input
                     value={quickIdea}
                     onChange={(event) => setQuickIdea(event.target.value)}
-                    placeholder={t("Describe your idea", "صف فكرتك")}
+                    placeholder={t("Describe your idea", "طµظپ ظپظƒط±طھظƒ")}
                     className="flex-1 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-white/30"
                   />
                   <div className="flex items-center gap-4">
-                    <span className="text-xs uppercase tracking-[0.3em] text-white/50">{t("Plan", "الخطة")}</span>
+                    <span className="text-xs uppercase tracking-[0.3em] text-white/50">{t("Plan", "ط§ظ„ط®ط·ط©")}</span>
                     <button
                       type="button"
                       onClick={() => {
@@ -487,31 +499,31 @@ const LandingPage = () => {
 
                 {showIdeaActions && quickIdea.trim() && (
                   <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4">
-                    <div className="text-xs uppercase tracking-[0.3em] text-white/50">{t("Next steps", "الخطوات التالية")}</div>
+                    <div className="text-xs uppercase tracking-[0.3em] text-white/50">{t("Next steps", "ط§ظ„ط®ط·ظˆط§طھ ط§ظ„طھط§ظ„ظٹط©")}</div>
                     <div className="mt-3 space-y-2">
                       <button
                         type="button"
                         onClick={() => handleStartSimulation()}
                         className="flex w-full items-center justify-between rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-white/90 hover:border-white/30"
                       >
-                        <span>{t("1 - Simulate your idea", "1 - حاكي فكرتك")}</span>
-                        <span className="text-xs text-white/40">{t("Start", "ابدأ")}</span>
+                        <span>{t("1 - Simulate your idea", "1 - ط­ط§ظƒظٹ ظپظƒط±طھظƒ")}</span>
+                        <span className="text-xs text-white/40">{t("Start", "ط§ط¨ط¯ط£")}</span>
                       </button>
                       <button
                         type="button"
                         onClick={handleIdeaCourt}
                         className="flex w-full items-center justify-between rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-white/90 hover:border-white/30"
                       >
-                        <span>{t("2 - Take it to court", "2 - اعرضها على محكمة الأفكار")}</span>
-                        <span className="text-xs text-white/40">{t("Debate", "نقاش")}</span>
+                        <span>{t("2 - Take it to court", "2 - ط§ط¹ط±ط¶ظ‡ط§ ط¹ظ„ظ‰ ظ…ط­ظƒظ…ط© ط§ظ„ط£ظپظƒط§ط±")}</span>
+                        <span className="text-xs text-white/40">{t("Debate", "ظ†ظ‚ط§ط´")}</span>
                       </button>
                       <button
                         type="button"
                         disabled
                         className="flex w-full items-center justify-between rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white/60 opacity-60"
                       >
-                        <span>{t("3 - Simulate your project live (virtual)", "3 - حاكي مشروعك مباشرة (افتراضي)")}</span>
-                        <span className="text-xs text-white/40">{t("Coming soon", "قريبًا")}</span>
+                        <span>{t("3 - Simulate your project live (virtual)", "3 - ط­ط§ظƒظٹ ظ…ط´ط±ظˆط¹ظƒ ظ…ط¨ط§ط´ط±ط© (ط§ظپطھط±ط§ط¶ظٹ)")}</span>
+                        <span className="text-xs text-white/40">{t("Coming soon", "ظ‚ط±ظٹط¨ظ‹ط§")}</span>
                       </button>
                     </div>
                   </div>
@@ -526,10 +538,10 @@ const LandingPage = () => {
                     type="button"
                     className="rounded-full border border-white/15 bg-white/10 px-4 py-2 text-white"
                   >
-                    {t("Recently viewed", "شوهد مؤخرًا")}
+                    {t("Recently viewed", "ط´ظˆظ‡ط¯ ظ…ط¤ط®ط±ظ‹ط§")}
                   </button>
                   <button type="button" className="rounded-full px-4 py-2 hover:bg-white/5">
-                    {t("My ideas", "أفكاري")}
+                    {t("My ideas", "ط£ظپظƒط§ط±ظٹ")}
                   </button>
            
                 </div>
@@ -538,7 +550,7 @@ const LandingPage = () => {
                   onClick={() => navigate("/simulate")}
                   className="text-sm text-white/70 hover:text-white"
                 >
-                  {t("Browse all", "تصفح الكل")} -{'>'}
+                  {t("Browse all", "طھطµظپط­ ط§ظ„ظƒظ„")} -{'>'}
                 </button>
               </div>
               <div className="mt-6 grid gap-4 md:grid-cols-3">
@@ -559,7 +571,7 @@ const LandingPage = () => {
 
             <div className="mt-10 grid gap-6 lg:grid-cols-[2fr_1fr]">
               <div className="rounded-3xl border border-white/10 bg-white/5 p-6">
-                <div className="text-xs uppercase tracking-[0.3em] text-white/50">{t("Idea templates", "قوالب الأفكار")}</div>
+                <div className="text-xs uppercase tracking-[0.3em] text-white/50">{t("Idea templates", "ظ‚ظˆط§ظ„ط¨ ط§ظ„ط£ظپظƒط§ط±")}</div>
                 <div className="mt-4 grid gap-4 md:grid-cols-3">
                   {templates.map((template) => (
                     <button
@@ -577,10 +589,10 @@ const LandingPage = () => {
 
               <div className="space-y-6">
                 <div className="rounded-3xl border border-white/10 bg-white/5 p-6">
-                  <div className="text-xs uppercase tracking-[0.3em] text-white/50">{t("Redeem code", "استبدال كود")}</div>
+                  <div className="text-xs uppercase tracking-[0.3em] text-white/50">{t("Redeem code", "ط§ط³طھط¨ط¯ط§ظ„ ظƒظˆط¯")}</div>
                   <Input
                     value={promo}
-                    placeholder={t("Enter promo code", "أدخل كود الترويج")}
+                    placeholder={t("Enter promo code", "ط£ط¯ط®ظ„ ظƒظˆط¯ ط§ظ„طھط±ظˆظٹط¬")}
                     onChange={(event) => setPromo(event.target.value)}
                     className="mt-3 bg-white/5 border-white/10 text-white placeholder:text-white/40 focus-visible:ring-emerald-300"
                   />
@@ -589,7 +601,7 @@ const LandingPage = () => {
                     onClick={handleRedeem}
                     className="mt-3 w-full rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-900"
                   >
-                    {t("Redeem", "استبدال")}
+                    {t("Redeem", "ط§ط³طھط¨ط¯ط§ظ„")}
                   </button>
                   {redeemMessage && <p className="mt-2 text-xs text-white/60">{redeemMessage}</p>}
                 </div>
@@ -600,14 +612,14 @@ const LandingPage = () => {
                     onClick={() => navigate("/control-center")}
                     className="w-full rounded-full border border-white/20 py-3 text-sm text-white/80"
                   >
-                    {t("Open admin dashboard", "فتح لوحة الإدارة")}
+                    {t("Open admin dashboard", "ظپطھط­ ظ„ظˆط­ط© ط§ظ„ط¥ط¯ط§ط±ط©")}
                   </button>
                 ) : (
                   <div className="rounded-3xl border border-white/10 bg-white/5 p-6">
-                    <div className="text-xs uppercase tracking-[0.3em] text-white/50">{t("Admin access", "وصول الإدارة")}</div>
+                    <div className="text-xs uppercase tracking-[0.3em] text-white/50">{t("Admin access", "ظˆطµظˆظ„ ط§ظ„ط¥ط¯ط§ط±ط©")}</div>
                     <Input
                       value={promoteSecret}
-                      placeholder={t("Promotion secret", "سر الترقية")}
+                      placeholder={t("Promotion secret", "ط³ط± ط§ظ„طھط±ظ‚ظٹط©")}
                       onChange={(event) => setPromoteSecret(event.target.value)}
                       className="mt-3 bg-white/5 border-white/10 text-white placeholder:text-white/40 focus-visible:ring-emerald-300"
                     />
@@ -617,7 +629,7 @@ const LandingPage = () => {
                       disabled={promoteBusy}
                       className="mt-3 w-full rounded-full border border-white/20 py-2 text-sm text-white/80 disabled:opacity-60"
                     >
-                      {promoteBusy ? t("Please wait...", "يرجى الانتظار...") : t("Promote", "ترقية")}
+                      {promoteBusy ? t("Please wait...", "ظٹط±ط¬ظ‰ ط§ظ„ط§ظ†طھط¸ط§ط±...") : t("Promote", "طھط±ظ‚ظٹط©")}
                     </button>
                     {promoteMessage && <p className="mt-2 text-xs text-white/60">{promoteMessage}</p>}
                   </div>
@@ -633,3 +645,4 @@ const LandingPage = () => {
 };
 
 export default LandingPage;
+

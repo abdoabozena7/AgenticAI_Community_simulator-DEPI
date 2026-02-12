@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS users (
     email VARCHAR(128),
     password_hash VARCHAR(256) NOT NULL,
     role ENUM('user','admin') DEFAULT 'user',
-    credits INT DEFAULT 0,
+    credits DECIMAL(12,2) DEFAULT 0.00,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -56,6 +56,23 @@ CREATE TABLE IF NOT EXISTS daily_usage (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS daily_token_usage (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    usage_date DATE NOT NULL,
+    used_tokens INT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_user_token_date (user_id, usage_date),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    setting_key VARCHAR(64) PRIMARY KEY,
+    setting_value VARCHAR(255) NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS simulations (
     simulation_id VARCHAR(36) PRIMARY KEY,
     user_id INT NULL,
@@ -65,6 +82,17 @@ CREATE TABLE IF NOT EXISTS simulations (
     started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     ended_at TIMESTAMP NULL,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS simulation_token_usage (
+    simulation_id VARCHAR(36) PRIMARY KEY,
+    user_id INT NOT NULL,
+    used_tokens INT DEFAULT 0,
+    free_tokens_applied INT DEFAULT 0,
+    credits_charged DECIMAL(12,2) DEFAULT 0.00,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (simulation_id) REFERENCES simulations(simulation_id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -82,6 +110,7 @@ CREATE TABLE IF NOT EXISTS agents (
     fixed_opinion VARCHAR(16),
     initial_opinion VARCHAR(16),
     current_opinion VARCHAR(16),
+    last_phase VARCHAR(64),
     confidence FLOAT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (simulation_id) REFERENCES simulations(simulation_id) ON DELETE CASCADE
@@ -92,13 +121,30 @@ CREATE TABLE IF NOT EXISTS reasoning_steps (
     simulation_id VARCHAR(36) NOT NULL,
     agent_id VARCHAR(64),
     agent_short_id VARCHAR(16),
+    agent_label VARCHAR(32),
     archetype_name VARCHAR(128),
     iteration INT,
     phase VARCHAR(64),
     reply_to_agent_id VARCHAR(64),
+    reply_to_short_id VARCHAR(8),
     opinion VARCHAR(16),
+    opinion_source VARCHAR(24),
+    stance_confidence FLOAT,
+    reasoning_length VARCHAR(16),
+    fallback_reason VARCHAR(64),
+    relevance_score FLOAT,
+    policy_guard TINYINT(1),
+    policy_reason VARCHAR(128),
+    stance_locked TINYINT(1),
+    reason_tag VARCHAR(64),
+    clarification_triggered TINYINT(1),
+    step_uid VARCHAR(96),
+    event_seq BIGINT,
+    stance_before VARCHAR(16),
+    stance_after VARCHAR(16),
     message TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_reasoning_step_uid (simulation_id, step_uid),
     FOREIGN KEY (simulation_id) REFERENCES simulations(simulation_id) ON DELETE CASCADE
 );
 
@@ -111,8 +157,57 @@ CREATE TABLE IF NOT EXISTS metrics (
     neutral INT,
     acceptance_rate FLOAT,
     polarization FLOAT,
+    total_agents INT,
     per_category JSON,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (simulation_id) REFERENCES simulations(simulation_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS simulation_checkpoints (
+    simulation_id VARCHAR(36) PRIMARY KEY,
+    checkpoint_json LONGTEXT,
+    status VARCHAR(24) NOT NULL DEFAULT 'running',
+    last_error TEXT,
+    status_reason VARCHAR(32),
+    current_phase_key VARCHAR(64),
+    phase_progress_pct FLOAT,
+    event_seq BIGINT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (simulation_id) REFERENCES simulations(simulation_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS research_events (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    simulation_id VARCHAR(36) NOT NULL,
+    event_seq BIGINT,
+    url TEXT,
+    domain VARCHAR(255),
+    favicon_url VARCHAR(1024),
+    action VARCHAR(32),
+    status VARCHAR(24),
+    title VARCHAR(512),
+    http_status INT,
+    content_chars INT,
+    relevance_score FLOAT,
+    snippet TEXT,
+    error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_research_events_sim (simulation_id),
+    INDEX idx_research_events_seq (simulation_id, event_seq),
+    FOREIGN KEY (simulation_id) REFERENCES simulations(simulation_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS simulation_chat_events (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    simulation_id VARCHAR(36) NOT NULL,
+    event_seq BIGINT NOT NULL,
+    message_id VARCHAR(64) NOT NULL,
+    role VARCHAR(16) NOT NULL,
+    content LONGTEXT NOT NULL,
+    meta_json JSON,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_chat_events_sim_seq (simulation_id, event_seq),
+    UNIQUE KEY uq_chat_events_sim_msg (simulation_id, message_id),
     FOREIGN KEY (simulation_id) REFERENCES simulations(simulation_id) ON DELETE CASCADE
 );
 

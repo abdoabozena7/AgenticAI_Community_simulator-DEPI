@@ -19,12 +19,20 @@ import hmac
 import os
 import re
 import uuid
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, timedelta, date, timezone
 from typing import Any, Dict, Optional
 
 import jwt
 
 from . import db as db_core
+
+
+TOKEN_PRICE_SETTING_KEY = "token_price_per_1k_credits"
+FREE_DAILY_TOKENS_SETTING_KEY = "free_daily_tokens"
+DEFAULT_TOKEN_PRICE_PER_1K = Decimal("0.10")
+DEFAULT_FREE_DAILY_TOKENS = 2500
+_TWOPLACES = Decimal("0.01")
 
 
 def _pbkdf2_hash(password: str, salt: bytes) -> bytes:
@@ -52,6 +60,31 @@ def verify_password(password: str, stored: str) -> bool:
         return hmac.compare_digest(computed, stored_hash)
     except Exception:
         return False
+
+
+def _to_decimal(value: Any, default: Decimal = Decimal("0")) -> Decimal:
+    if value is None:
+        return default
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return default
+
+
+def _round_credits(value: Decimal) -> Decimal:
+    if value <= Decimal("0"):
+        return Decimal("0.00")
+    return value.quantize(_TWOPLACES, rounding=ROUND_HALF_UP)
+
+
+def _normalize_tokens(value: Any, default: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, parsed)
 
 
 async def create_user(
@@ -381,11 +414,241 @@ async def increment_daily_usage(user_id: int) -> None:
     )
 
 
-async def adjust_user_credits(user_id: int, delta: int) -> None:
-    """Adjust a user's credits by delta (positive or negative)."""
+async def get_billing_settings() -> Dict[str, Any]:
+    rows = await db_core.execute(
+        "SELECT setting_key, setting_value FROM app_settings "
+        "WHERE setting_key IN (%s, %s)",
+        (TOKEN_PRICE_SETTING_KEY, FREE_DAILY_TOKENS_SETTING_KEY),
+        fetch=True,
+    )
+    values: Dict[str, str] = {}
+    for row in rows or []:
+        key = str(row.get("setting_key") or "")
+        val = str(row.get("setting_value") or "")
+        if key:
+            values[key] = val
+
+    token_price = _to_decimal(values.get(TOKEN_PRICE_SETTING_KEY), DEFAULT_TOKEN_PRICE_PER_1K)
+    token_price = _round_credits(token_price)
+    free_daily_tokens = _normalize_tokens(values.get(FREE_DAILY_TOKENS_SETTING_KEY), DEFAULT_FREE_DAILY_TOKENS)
+
+    if TOKEN_PRICE_SETTING_KEY not in values:
+        await db_core.execute(
+            "INSERT INTO app_settings (setting_key, setting_value) VALUES (%s, %s) "
+            "ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)",
+            (TOKEN_PRICE_SETTING_KEY, str(token_price)),
+        )
+    if FREE_DAILY_TOKENS_SETTING_KEY not in values:
+        await db_core.execute(
+            "INSERT INTO app_settings (setting_key, setting_value) VALUES (%s, %s) "
+            "ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)",
+            (FREE_DAILY_TOKENS_SETTING_KEY, str(free_daily_tokens)),
+        )
+
+    return {
+        "token_price_per_1k_credits": float(token_price),
+        "free_daily_tokens": int(free_daily_tokens),
+    }
+
+
+async def set_billing_settings(token_price_per_1k_credits: float, free_daily_tokens: int) -> Dict[str, Any]:
+    price_decimal = _to_decimal(token_price_per_1k_credits, DEFAULT_TOKEN_PRICE_PER_1K)
+    if price_decimal < 0:
+        raise ValueError("token_price_per_1k_credits must be >= 0")
+    price_decimal = _round_credits(price_decimal)
+    if free_daily_tokens < 0:
+        raise ValueError("free_daily_tokens must be >= 0")
+
+    await db_core.execute(
+        "INSERT INTO app_settings (setting_key, setting_value) VALUES (%s, %s) "
+        "ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)",
+        (TOKEN_PRICE_SETTING_KEY, str(price_decimal)),
+    )
+    await db_core.execute(
+        "INSERT INTO app_settings (setting_key, setting_value) VALUES (%s, %s) "
+        "ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)",
+        (FREE_DAILY_TOKENS_SETTING_KEY, str(int(free_daily_tokens))),
+    )
+    return await get_billing_settings()
+
+
+async def get_user_daily_token_usage(user_id: int, usage_date: Optional[date] = None) -> int:
+    target_date = usage_date or date.today()
+    rows = await db_core.execute(
+        "SELECT used_tokens FROM daily_token_usage WHERE user_id=%s AND usage_date=%s",
+        (user_id, target_date),
+        fetch=True,
+    )
+    if not rows:
+        return 0
+    return _normalize_tokens(rows[0].get("used_tokens"), 0)
+
+
+async def _get_user_credit_balance(user_id: int) -> Decimal:
+    rows = await db_core.execute(
+        "SELECT credits FROM users WHERE id=%s",
+        (user_id,),
+        fetch=True,
+    )
+    if not rows:
+        return Decimal("0.00")
+    return _round_credits(_to_decimal(rows[0].get("credits"), Decimal("0")))
+
+
+async def get_user_billing_overview(user_id: int) -> Dict[str, Any]:
+    settings = await get_billing_settings()
+    free_daily_tokens = int(settings.get("free_daily_tokens") or 0)
+    used_today = await get_user_daily_token_usage(user_id)
+    remaining = max(0, free_daily_tokens - used_today)
+    credits = await _get_user_credit_balance(user_id)
+    return {
+        "credits": float(credits),
+        "daily_tokens_used": int(used_today),
+        "daily_tokens_limit": int(free_daily_tokens),
+        "daily_tokens_remaining": int(remaining),
+        "token_price_per_1k_credits": float(settings.get("token_price_per_1k_credits") or 0.0),
+    }
+
+
+async def _ensure_simulation_token_usage_row(user_id: int, simulation_id: str) -> None:
+    await db_core.execute(
+        "INSERT INTO simulation_token_usage (simulation_id, user_id, used_tokens, free_tokens_applied, credits_charged) "
+        "VALUES (%s, %s, 0, 0, 0.00) "
+        "ON DUPLICATE KEY UPDATE user_id=VALUES(user_id)",
+        (simulation_id, user_id),
+    )
+
+
+async def get_simulation_outstanding_credits(user_id: int, simulation_id: str) -> Dict[str, Any]:
+    settings = await get_billing_settings()
+    price_per_1k = _round_credits(_to_decimal(settings.get("token_price_per_1k_credits"), DEFAULT_TOKEN_PRICE_PER_1K))
+    await _ensure_simulation_token_usage_row(user_id, simulation_id)
+    rows = await db_core.execute(
+        "SELECT used_tokens, free_tokens_applied, credits_charged "
+        "FROM simulation_token_usage WHERE simulation_id=%s AND user_id=%s",
+        (simulation_id, user_id),
+        fetch=True,
+    )
+    row = (rows or [{}])[0]
+    used_tokens = _normalize_tokens(row.get("used_tokens"), 0)
+    free_tokens_applied = _normalize_tokens(row.get("free_tokens_applied"), 0)
+    charged = _round_credits(_to_decimal(row.get("credits_charged"), Decimal("0")))
+    billable_tokens = max(0, used_tokens - free_tokens_applied)
+    target_total = _round_credits((Decimal(billable_tokens) / Decimal(1000)) * price_per_1k)
+    outstanding = _round_credits(max(Decimal("0.00"), target_total - charged))
+    credits_available = await _get_user_credit_balance(user_id)
+    return {
+        "used_tokens": used_tokens,
+        "free_tokens_applied": free_tokens_applied,
+        "billable_tokens": billable_tokens,
+        "target_total_credits": float(target_total),
+        "charged_credits": float(charged),
+        "outstanding_credits": float(outstanding),
+        "credits_available": float(credits_available),
+    }
+
+
+async def settle_simulation_outstanding(user_id: int, simulation_id: str) -> Dict[str, Any]:
+    snapshot = await get_simulation_outstanding_credits(user_id, simulation_id)
+    outstanding = _round_credits(_to_decimal(snapshot.get("outstanding_credits"), Decimal("0")))
+    if outstanding <= Decimal("0.00"):
+        return {**snapshot, "charged_now": 0.0, "ok": True}
+
+    available = _round_credits(_to_decimal(snapshot.get("credits_available"), Decimal("0")))
+    charge_now = _round_credits(min(outstanding, available))
+    if charge_now > Decimal("0.00"):
+        await db_core.execute(
+            "UPDATE users SET credits=GREATEST(0, credits-%s) WHERE id=%s",
+            (float(charge_now), user_id),
+        )
+        await db_core.execute(
+            "UPDATE simulation_token_usage SET credits_charged=credits_charged+%s WHERE simulation_id=%s AND user_id=%s",
+            (float(charge_now), simulation_id, user_id),
+        )
+    refreshed = await get_simulation_outstanding_credits(user_id, simulation_id)
+    refreshed["charged_now"] = float(charge_now)
+    refreshed["ok"] = float(refreshed.get("outstanding_credits") or 0.0) <= 0.0001
+    return refreshed
+
+
+async def consume_simulation_tokens(user_id: int, simulation_id: str, tokens_used: int) -> Dict[str, Any]:
+    """Apply simulation token usage and charge credits progressively.
+
+    Returns a billing snapshot including whether charging fully succeeded.
+    """
+    tokens = _normalize_tokens(tokens_used, 0)
+    if tokens <= 0:
+        snapshot = await get_simulation_outstanding_credits(user_id, simulation_id)
+        snapshot["ok"] = float(snapshot.get("outstanding_credits") or 0.0) <= 0.0001
+        snapshot["charged_now"] = 0.0
+        snapshot["tokens_added"] = 0
+        return snapshot
+
+    settings = await get_billing_settings()
+    free_daily_tokens = int(settings.get("free_daily_tokens") or 0)
+    price_per_1k = _round_credits(_to_decimal(settings.get("token_price_per_1k_credits"), DEFAULT_TOKEN_PRICE_PER_1K))
+    await _ensure_simulation_token_usage_row(user_id, simulation_id)
+
+    today = date.today()
+    daily_before = await get_user_daily_token_usage(user_id, today)
+    free_remaining = max(0, free_daily_tokens - daily_before)
+    free_applied_now = min(tokens, free_remaining)
+
+    sim_rows = await db_core.execute(
+        "SELECT used_tokens, free_tokens_applied, credits_charged "
+        "FROM simulation_token_usage WHERE simulation_id=%s AND user_id=%s",
+        (simulation_id, user_id),
+        fetch=True,
+    )
+    sim_row = (sim_rows or [{}])[0]
+    sim_used_before = _normalize_tokens(sim_row.get("used_tokens"), 0)
+    sim_free_before = _normalize_tokens(sim_row.get("free_tokens_applied"), 0)
+    sim_charged_before = _round_credits(_to_decimal(sim_row.get("credits_charged"), Decimal("0")))
+
+    sim_used_after = sim_used_before + tokens
+    sim_free_after = sim_free_before + free_applied_now
+    billable_after = max(0, sim_used_after - sim_free_after)
+    target_credits_after = _round_credits((Decimal(billable_after) / Decimal(1000)) * price_per_1k)
+    delta_due = _round_credits(max(Decimal("0.00"), target_credits_after - sim_charged_before))
+
+    credits_available = await _get_user_credit_balance(user_id)
+    charge_now = _round_credits(min(delta_due, credits_available))
+
+    await db_core.execute(
+        "INSERT INTO daily_token_usage (user_id, usage_date, used_tokens) VALUES (%s, %s, %s) "
+        "ON DUPLICATE KEY UPDATE used_tokens=used_tokens+VALUES(used_tokens)",
+        (user_id, today, tokens),
+    )
+    await db_core.execute(
+        "UPDATE simulation_token_usage SET "
+        "used_tokens=used_tokens+%s, "
+        "free_tokens_applied=free_tokens_applied+%s, "
+        "credits_charged=credits_charged+%s "
+        "WHERE simulation_id=%s AND user_id=%s",
+        (tokens, free_applied_now, float(charge_now), simulation_id, user_id),
+    )
+    if charge_now > Decimal("0.00"):
+        await db_core.execute(
+            "UPDATE users SET credits=GREATEST(0, credits-%s) WHERE id=%s",
+            (float(charge_now), user_id),
+        )
+
+    snapshot = await get_simulation_outstanding_credits(user_id, simulation_id)
+    snapshot["ok"] = float(snapshot.get("outstanding_credits") or 0.0) <= 0.0001
+    snapshot["charged_now"] = float(charge_now)
+    snapshot["tokens_added"] = tokens
+    snapshot["free_applied_now"] = free_applied_now
+    return snapshot
+
+
+async def adjust_user_credits(user_id: int, delta: float) -> None:
+    """Adjust a user's credits by delta (positive or negative) with 2-decimal precision."""
+    delta_decimal = _round_credits(_to_decimal(delta, Decimal("0")))
+    if delta_decimal == Decimal("0.00"):
+        return
     await db_core.execute(
         "UPDATE users SET credits=GREATEST(0, credits+%s) WHERE id=%s",
-        (delta, user_id),
+        (float(delta_decimal), user_id),
     )
 
 
@@ -453,9 +716,9 @@ async def consume_simulation_credit(user_id: int) -> bool:
     )
     if not rows:
         return False
-    credits = int(rows[0]["credits"] or 0)
-    if credits > 0:
-        await adjust_user_credits(user_id, -1)
+    credits = _round_credits(_to_decimal(rows[0].get("credits"), Decimal("0")))
+    if credits > Decimal("0.00"):
+        await adjust_user_credits(user_id, -1.0)
         return True
     return False
 

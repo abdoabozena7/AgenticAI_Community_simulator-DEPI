@@ -261,6 +261,7 @@ async def get_me(current_user: dict = Depends(get_current_user)) -> dict:
     """Return the current authenticated user."""
     user_id = int(current_user.get("id"))
     daily_usage = await auth_core.get_user_daily_usage(user_id)
+    billing = await auth_core.get_user_billing_overview(user_id)
     try:
         daily_limit = int(os.getenv("DAILY_LIMIT", "5") or 5)
     except ValueError:
@@ -269,11 +270,15 @@ async def get_me(current_user: dict = Depends(get_current_user)) -> dict:
         "id": user_id,
         "username": current_user.get("username"),
         "role": current_user.get("role"),
-        "credits": current_user.get("credits", 0),
+        "credits": billing.get("credits", current_user.get("credits", 0)),
         "email": current_user.get("email"),
         "email_verified": current_user.get("email_verified", 0),
         "daily_usage": daily_usage,
         "daily_limit": daily_limit,
+        "daily_tokens_used": billing.get("daily_tokens_used", 0),
+        "daily_tokens_limit": billing.get("daily_tokens_limit", 0),
+        "daily_tokens_remaining": billing.get("daily_tokens_remaining", 0),
+        "token_price_per_1k_credits": billing.get("token_price_per_1k_credits", 0.0),
     }
 
 

@@ -81,7 +81,7 @@ async def create_promo(request: PromoCreateRequest, _admin_user: Dict[str, Any] 
 class CreditAdjustRequest(BaseModel):
     user_id: Optional[int] = None
     username: Optional[str] = None
-    delta: int = Field(..., description="Positive or negative credit delta")
+    delta: float = Field(..., description="Positive or negative credit delta (2 decimals)")
 
 
 @router.post("/credits")
@@ -108,6 +108,28 @@ async def adjust_credits(
         fetch=True,
     )
     return updated[0] if updated else {"id": user_id, "credits": None}
+
+
+@router.get("/billing")
+async def get_billing_settings(_admin_user: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    return await auth_core.get_billing_settings()
+
+
+class BillingSettingsUpdateRequest(BaseModel):
+    token_price_per_1k_credits: float = Field(..., ge=0)
+    free_daily_tokens: int = Field(..., ge=0)
+
+
+@router.post("/billing")
+async def update_billing_settings(
+    request: BillingSettingsUpdateRequest,
+    _admin_user: Dict[str, Any] = Depends(require_admin),
+) -> Dict[str, Any]:
+    settings = await auth_core.set_billing_settings(
+        token_price_per_1k_credits=request.token_price_per_1k_credits,
+        free_daily_tokens=request.free_daily_tokens,
+    )
+    return settings
 
 
 class RoleUpdateRequest(BaseModel):

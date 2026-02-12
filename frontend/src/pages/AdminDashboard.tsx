@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiService } from "../services/api";
+import { apiService, BillingSettingsResponse } from "../services/api";
 
 export default function AdminDashboard() {
   const navigate = useNavigate();
@@ -11,6 +11,11 @@ export default function AdminDashboard() {
   const [creditDelta, setCreditDelta] = useState(10);
   const [creditMessage, setCreditMessage] = useState<string | null>(null);
   const [creditBusy, setCreditBusy] = useState(false);
+  const [billing, setBilling] = useState<BillingSettingsResponse | null>(null);
+  const [billingPrice, setBillingPrice] = useState("0.10");
+  const [billingFreeDailyTokens, setBillingFreeDailyTokens] = useState("2500");
+  const [billingMessage, setBillingMessage] = useState<string | null>(null);
+  const [billingBusy, setBillingBusy] = useState(false);
   const [roleTarget, setRoleTarget] = useState("");
   const [roleValue, setRoleValue] = useState("admin");
   const [roleMessage, setRoleMessage] = useState<string | null>(null);
@@ -30,10 +35,16 @@ export default function AdminDashboard() {
 
   const loadAdminData = async () => {
     try {
-      const u = await apiService.listUsers();
-      const s = await apiService.getStats();
+      const [u, s, b] = await Promise.all([
+        apiService.listUsers(),
+        apiService.getStats(),
+        apiService.getBillingSettings(),
+      ]);
       setUsers(u);
       setStats(s);
+      setBilling(b);
+      setBillingPrice(Number(b.token_price_per_1k_credits ?? 0).toFixed(2));
+      setBillingFreeDailyTokens(String(b.free_daily_tokens ?? 0));
     } catch (e: any) {
       setError(e?.message || "Failed to load admin data");
     }
@@ -44,7 +55,7 @@ export default function AdminDashboard() {
   }, []);
 
   const userCount = users.length;
-  const totalCredits = useMemo(() => users.reduce((sum, u) => sum + (u?.credits || 0), 0), [users]);
+  const totalCredits = useMemo(() => users.reduce((sum, u) => sum + (Number(u?.credits) || 0), 0), [users]);
 
   const handleGrantCredits = async () => {
     setCreditMessage(null);
@@ -72,6 +83,37 @@ export default function AdminDashboard() {
       setError(e?.message || "Failed to update credits");
     } finally {
       setCreditBusy(false);
+    }
+  };
+
+  const handleUpdateBilling = async () => {
+    setBillingMessage(null);
+    setError(null);
+    const parsedPrice = Number.parseFloat(billingPrice);
+    const parsedTokens = Number.parseInt(billingFreeDailyTokens, 10);
+    if (!Number.isFinite(parsedPrice) || parsedPrice < 0) {
+      setBillingMessage("Enter a valid token price.");
+      return;
+    }
+    if (!Number.isFinite(parsedTokens) || parsedTokens < 0) {
+      setBillingMessage("Enter a valid free daily token limit.");
+      return;
+    }
+    setBillingBusy(true);
+    try {
+      const payload: BillingSettingsResponse = {
+        token_price_per_1k_credits: Number(parsedPrice.toFixed(2)),
+        free_daily_tokens: parsedTokens,
+      };
+      const res = await apiService.updateBillingSettings(payload);
+      setBilling(res);
+      setBillingPrice(Number(res.token_price_per_1k_credits ?? 0).toFixed(2));
+      setBillingFreeDailyTokens(String(res.free_daily_tokens ?? 0));
+      setBillingMessage("Billing settings updated.");
+    } catch (e: any) {
+      setError(e?.message || "Failed to update billing settings");
+    } finally {
+      setBillingBusy(false);
     }
   };
 
@@ -204,7 +246,7 @@ export default function AdminDashboard() {
           </div>
         </header>
 
-        {(error || creditMessage || roleMessage || usageMessage || promoMessage || resetAllMessage) && (
+        {(error || creditMessage || roleMessage || usageMessage || promoMessage || resetAllMessage || billingMessage) && (
           <div className="mt-6 grid gap-2">
             {error && <div className="rounded-xl border border-rose-400/30 bg-rose-500/10 px-4 py-2 text-sm text-rose-100">{error}</div>}
             {creditMessage && <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-2 text-sm text-emerald-100">{creditMessage}</div>}
@@ -212,6 +254,7 @@ export default function AdminDashboard() {
             {usageMessage && <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-2 text-sm text-emerald-100">{usageMessage}</div>}
             {promoMessage && <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-2 text-sm text-emerald-100">{promoMessage}</div>}
             {resetAllMessage && <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-2 text-sm text-emerald-100">{resetAllMessage}</div>}
+            {billingMessage && <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-2 text-sm text-emerald-100">{billingMessage}</div>}
           </div>
         )}
 
@@ -224,7 +267,7 @@ export default function AdminDashboard() {
               </div>
               <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
                 <div className="text-xs uppercase tracking-[0.2em] text-white/50">Total credits</div>
-                <div className="mt-2 text-2xl font-semibold">{totalCredits}</div>
+                <div className="mt-2 text-2xl font-semibold">{totalCredits.toFixed(2)}</div>
               </div>
               <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
                 <div className="text-xs uppercase tracking-[0.2em] text-white/50">Simulations today</div>
@@ -268,7 +311,7 @@ export default function AdminDashboard() {
                         <td className="py-2">{u.id}</td>
                         <td className="py-2">{u.username}</td>
                         <td className="py-2">{u.role}</td>
-                        <td className="py-2">{u.credits}</td>
+                        <td className="py-2">{Number(u.credits ?? 0).toFixed(2)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -278,6 +321,42 @@ export default function AdminDashboard() {
           </section>
 
           <section className="space-y-5">
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <h3 className="text-sm font-semibold">Token billing</h3>
+              <p className="mt-1 text-xs text-white/60">Set how many credits are charged per 1000 tokens and the free daily token quota.</p>
+              <div className="mt-3 space-y-2">
+                <label className="text-xs text-white/60">Credits per 1000 tokens</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={billingPrice}
+                  onChange={(e) => setBillingPrice(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm"
+                />
+                <label className="text-xs text-white/60">Free daily tokens</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={billingFreeDailyTokens}
+                  onChange={(e) => setBillingFreeDailyTokens(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={handleUpdateBilling}
+                  disabled={billingBusy}
+                  className="w-full rounded-lg bg-white px-3 py-2 text-sm font-semibold text-slate-900 disabled:opacity-60"
+                >
+                  {billingBusy ? "Updating..." : "Update billing"}
+                </button>
+                <div className="text-xs text-white/50">
+                  Current: {Number(billing?.token_price_per_1k_credits ?? 0).toFixed(2)} credits / 1000 tokens, {billing?.free_daily_tokens ?? 0} free tokens/day
+                </div>
+              </div>
+            </div>
+
             <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
               <h3 className="text-sm font-semibold">Credits</h3>
               <div className="mt-3 space-y-2">
@@ -290,8 +369,9 @@ export default function AdminDashboard() {
                 />
                 <input
                   type="number"
+                  step="0.01"
                   value={creditDelta}
-                  onChange={(e) => setCreditDelta(Number(e.target.value))}
+                  onChange={(e) => setCreditDelta(Number.parseFloat(e.target.value))}
                   className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm"
                 />
                 <button

@@ -1,28 +1,70 @@
-import { useState, useCallback, useEffect, useReducer, useRef } from 'react';
+﻿import { useState, useCallback, useEffect, useReducer, useRef } from 'react';
 import { websocketService, WebSocketEvent, MetricsEvent, ReasoningStepEvent, ReasoningDebugEvent, AgentsEvent } from '@/services/websocket';
 import { apiService, SimulationConfig, SimulationStateResponse, getAuthToken } from '@/services/api';
-import { Agent, ReasoningMessage, ReasoningDebug, SimulationMetrics, SimulationStatus } from '@/types/simulation';
+import { Agent, ReasoningMessage, ReasoningDebug, SimulationMetrics, SimulationStatus, SimulationChatEvent, PendingClarification } from '@/types/simulation';
 
 interface SimulationState {
   status: SimulationStatus;
+  statusReason: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'error' | 'completed' | null;
+  policyMode: 'normal' | 'safety_guard_hard';
+  policyReason: string | null;
+  searchQuality: {
+    usable_sources: number;
+    domains: number;
+    extraction_success_rate: number;
+  } | null;
   simulationId: string | null;
+  currentPhaseKey: string | null;
+  phaseProgressPct: number;
+  lastEventSeq: number;
   agents: Map<string, Agent>;
   metrics: SimulationMetrics;
   reasoningFeed: ReasoningMessage[];
   reasoningDebug: ReasoningDebug[];
+  chatEvents: SimulationChatEvent[];
+  researchSources: {
+    eventSeq?: number;
+    action?: string | null;
+    status?: string | null;
+    url?: string | null;
+    domain?: string | null;
+    faviconUrl?: string | null;
+    title?: string | null;
+    httpStatus?: number | null;
+    contentChars?: number | null;
+    relevanceScore?: number | null;
+    progressPct?: number | null;
+    snippet?: string | null;
+    error?: string | null;
+    timestamp: number;
+  }[];
   summary: string | null;
+  canResume: boolean;
+  resumeReason: string | null;
+  pendingClarification: PendingClarification | null;
+  canAnswerClarification: boolean;
   activePulses: { from: string; to: string; active: boolean; pulseProgress: number }[];
 }
 
 type SimulationAction =
   | { type: 'SET_STATUS'; payload: SimulationStatus }
+  | { type: 'SET_STATUS_REASON'; payload: SimulationState['statusReason'] }
+  | { type: 'SET_POLICY'; payload: { policyMode: SimulationState['policyMode']; policyReason: string | null; searchQuality: SimulationState['searchQuality'] } }
   | { type: 'SET_SIMULATION_ID'; payload: string }
+  | { type: 'SET_PHASE'; payload: { currentPhaseKey: string | null; phaseProgressPct: number } }
+  | { type: 'SET_LAST_EVENT_SEQ'; payload: number }
   | { type: 'UPDATE_METRICS'; payload: MetricsEvent }
   | { type: 'UPDATE_AGENTS'; payload: AgentsEvent }
   | { type: 'SET_REASONING'; payload: ReasoningMessage[] }
+  | { type: 'SET_CHAT_EVENTS'; payload: SimulationChatEvent[] }
+  | { type: 'ADD_CHAT_EVENT'; payload: SimulationChatEvent }
   | { type: 'ADD_REASONING'; payload: ReasoningStepEvent }
   | { type: 'ADD_REASONING_DEBUG'; payload: ReasoningDebugEvent }
+  | { type: 'SET_RESEARCH_SOURCES'; payload: SimulationState['researchSources'] }
+  | { type: 'ADD_RESEARCH_SOURCE'; payload: SimulationState['researchSources'][number] }
   | { type: 'SET_SUMMARY'; payload: string | null }
+  | { type: 'SET_RESUME_META'; payload: { canResume: boolean; resumeReason: string | null } }
+  | { type: 'SET_CLARIFICATION'; payload: { pendingClarification: PendingClarification | null; canAnswerClarification: boolean } }
   | { type: 'SET_PULSES'; payload: { from: string; to: string; active: boolean; pulseProgress: number }[] }
   | { type: 'ADD_PULSES'; payload: { from: string; to: string; active: boolean; pulseProgress: number }[] }
   | { type: 'RESET' };
@@ -41,14 +83,29 @@ const initialMetrics: SimulationMetrics = {
 
 const initialState: SimulationState = {
   status: 'idle',
+  statusReason: null,
+  policyMode: 'normal',
+  policyReason: null,
+  searchQuality: null,
   simulationId: null,
+  currentPhaseKey: null,
+  phaseProgressPct: 0,
+  lastEventSeq: 0,
   agents: new Map(),
   metrics: initialMetrics,
   reasoningFeed: [],
   reasoningDebug: [],
+  chatEvents: [],
+  researchSources: [],
   summary: null,
+  canResume: false,
+  resumeReason: null,
+  pendingClarification: null,
+  canAnswerClarification: false,
   activePulses: [],
 };
+
+const ACTIVE_SIMULATION_KEY = 'activeSimulationId';
 
 const hashString = (value: string) => {
   let hash = 0;
@@ -57,6 +114,29 @@ const hashString = (value: string) => {
     hash |= 0;
   }
   return Math.abs(hash);
+};
+
+const buildReasoningId = (input: {
+  stepUid?: string;
+  agentId: string;
+  iteration: number;
+  phase?: string;
+  replyToShortId?: string;
+  opinion?: string;
+  message: string;
+}) => {
+  if (input.stepUid) {
+    return `r-${input.stepUid}`;
+  }
+  const key = [
+    input.agentId,
+    String(input.iteration ?? 0),
+    input.phase ?? '',
+    input.replyToShortId ?? '',
+    input.opinion ?? '',
+    (input.message || '').trim(),
+  ].join('|');
+  return `r-${hashString(key)}`;
 };
 
 const createPosition = (seed: string, index: number, total: number): [number, number, number] => {
@@ -107,14 +187,39 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
   switch (action.type) {
     case 'SET_STATUS':
       return { ...state, status: action.payload };
-    
+
+    case 'SET_STATUS_REASON':
+      return { ...state, statusReason: action.payload };
+
+    case 'SET_POLICY':
+      return {
+        ...state,
+        policyMode: action.payload.policyMode,
+        policyReason: action.payload.policyReason,
+        searchQuality: action.payload.searchQuality,
+      };
+
     case 'SET_SIMULATION_ID':
       return { ...state, simulationId: action.payload };
-    
+
+    case 'SET_PHASE':
+      return {
+        ...state,
+        currentPhaseKey: action.payload.currentPhaseKey,
+        phaseProgressPct: action.payload.phaseProgressPct,
+      };
+
+    case 'SET_LAST_EVENT_SEQ':
+      return {
+        ...state,
+        lastEventSeq: Math.max(state.lastEventSeq, action.payload),
+      };
+
     case 'UPDATE_METRICS': {
       const event = action.payload;
       return {
         ...state,
+        lastEventSeq: typeof event.event_seq === 'number' ? Math.max(state.lastEventSeq, event.event_seq) : state.lastEventSeq,
         metrics: {
           totalAgents: event.total_agents,
           accepted: event.accepted,
@@ -130,47 +235,73 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
     }
 
     case 'UPDATE_AGENTS': {
-      const nextAgents = new Map(state.agents);
+      const previousAgents = state.agents;
+      const nextAgents = new Map<string, Agent>();
       const ts = Date.now();
       const incomingIds = action.payload.agents.map((agent) => agent.agent_id);
-      const allIds = Array.from(new Set([...nextAgents.keys(), ...incomingIds]));
-      const connectionMap = buildConnections(allIds);
+      const connectionMap = buildConnections(incomingIds);
       action.payload.agents.forEach((agent, index) => {
-        const existing = nextAgents.get(agent.agent_id);
-        const position = existing?.position ?? createPosition(agent.agent_id, index, allIds.length);
+        const existing = previousAgents.get(agent.agent_id);
+        const position = existing?.position ?? createPosition(agent.agent_id, index, incomingIds.length);
         nextAgents.set(agent.agent_id, {
           id: agent.agent_id,
           status: mapOpinionToStatus(agent.opinion),
           position,
-          connections: connectionMap.get(agent.agent_id) ?? existing?.connections ?? [],
+          connections: connectionMap.get(agent.agent_id) ?? [],
           category: agent.category_id,
           lastUpdate: ts,
         });
       });
       return {
         ...state,
+        lastEventSeq: typeof action.payload.event_seq === 'number'
+          ? Math.max(state.lastEventSeq, action.payload.event_seq)
+          : state.lastEventSeq,
         agents: nextAgents,
       };
     }
-    
+
     case 'ADD_REASONING': {
       const event = action.payload;
       const ts = event.timestamp ?? Date.now();
+      const replyToShortId = event.reply_to_short_id ?? (event.reply_to_agent_id ? event.reply_to_agent_id.slice(0, 4) : undefined);
+      const messageId = buildReasoningId({
+        stepUid: event.step_uid,
+        agentId: event.agent_id,
+        iteration: event.iteration,
+        phase: event.phase,
+        replyToShortId,
+        opinion: event.opinion,
+        message: event.message,
+      });
+      if (state.reasoningFeed.some((item) => item.id === messageId)) {
+        return state;
+      }
       const newMessage: ReasoningMessage = {
-        id: `${event.agent_id}-${ts}`,
+        id: messageId,
+        stepUid: event.step_uid,
+        eventSeq: event.event_seq,
         agentId: event.agent_id,
         agentShortId: event.agent_short_id ?? event.agent_id.slice(0, 4),
+        agentLabel: event.agent_label,
         archetype: event.archetype,
         message: event.message,
         timestamp: ts,
         iteration: event.iteration,
         phase: event.phase,
         replyToAgentId: event.reply_to_agent_id,
-        replyToShortId: event.reply_to_agent_id ? event.reply_to_agent_id.slice(0, 4) : undefined,
+        replyToShortId,
         opinion: event.opinion,
-        opinionSource: event.opinion_source,
+        opinionSource: event.opinion_source ?? 'llm',
+        stanceBefore: event.stance_before,
+        stanceAfter: event.stance_after,
         stanceConfidence: event.stance_confidence,
         reasoningLength: event.reasoning_length,
+        fallbackReason: event.fallback_reason ?? null,
+        relevanceScore: typeof event.relevance_score === 'number' ? event.relevance_score : null,
+        policyGuard: Boolean(event.policy_guard),
+        policyReason: event.policy_reason ?? null,
+        stanceLocked: Boolean(event.stance_locked),
       };
       const nextAgents = new Map(state.agents);
       const existing = nextAgents.get(event.agent_id);
@@ -193,8 +324,9 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
       }));
       return {
         ...state,
+        lastEventSeq: typeof event.event_seq === 'number' ? Math.max(state.lastEventSeq, event.event_seq) : state.lastEventSeq,
         agents: nextAgents,
-        reasoningFeed: [...state.reasoningFeed.slice(-99), newMessage],
+        reasoningFeed: [...state.reasoningFeed, newMessage],
         activePulses: [...state.activePulses, ...newPulses],
       };
     }
@@ -214,14 +346,65 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
       };
       return {
         ...state,
-        reasoningDebug: [...state.reasoningDebug.slice(-199), debugItem],
+        reasoningDebug: [...state.reasoningDebug, debugItem],
       };
     }
 
     case 'SET_REASONING': {
       return {
         ...state,
-        reasoningFeed: action.payload.slice(-99),
+        reasoningFeed: action.payload,
+      };
+    }
+
+    case 'SET_CHAT_EVENTS': {
+      return {
+        ...state,
+        chatEvents: action.payload,
+      };
+    }
+
+    case 'ADD_CHAT_EVENT': {
+      const incoming = action.payload;
+      const existingIndex = state.chatEvents.findIndex(
+        (item) => item.eventSeq === incoming.eventSeq
+          || (incoming.messageId && item.messageId === incoming.messageId),
+      );
+      const next = [...state.chatEvents];
+      if (existingIndex >= 0) {
+        next[existingIndex] = incoming;
+      } else {
+        next.push(incoming);
+      }
+      next.sort((a, b) => (a.eventSeq || 0) - (b.eventSeq || 0));
+      const clipped = next.length > 600 ? next.slice(next.length - 600) : next;
+      return {
+        ...state,
+        chatEvents: clipped,
+        lastEventSeq: Math.max(state.lastEventSeq, incoming.eventSeq || 0),
+      };
+    }
+
+    case 'SET_RESEARCH_SOURCES':
+      return {
+        ...state,
+        researchSources: action.payload,
+      };
+
+    case 'ADD_RESEARCH_SOURCE': {
+      const item = action.payload;
+      const key = `${item.eventSeq ?? 'x'}|${item.url ?? ''}|${item.action ?? ''}|${item.status ?? ''}|${item.timestamp}`;
+      const exists = state.researchSources.some((entry) => {
+        const entryKey = `${entry.eventSeq ?? 'x'}|${entry.url ?? ''}|${entry.action ?? ''}|${entry.status ?? ''}|${entry.timestamp}`;
+        return entryKey === key;
+      });
+      if (exists) {
+        return state;
+      }
+      return {
+        ...state,
+        researchSources: [...state.researchSources, item].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)),
+        lastEventSeq: typeof item.eventSeq === 'number' ? Math.max(state.lastEventSeq, item.eventSeq) : state.lastEventSeq,
       };
     }
 
@@ -229,6 +412,22 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
       return {
         ...state,
         summary: action.payload,
+      };
+    }
+
+    case 'SET_RESUME_META': {
+      return {
+        ...state,
+        canResume: action.payload.canResume,
+        resumeReason: action.payload.resumeReason,
+      };
+    }
+
+    case 'SET_CLARIFICATION': {
+      return {
+        ...state,
+        pendingClarification: action.payload.pendingClarification,
+        canAnswerClarification: action.payload.canAnswerClarification,
       };
     }
 
@@ -245,25 +444,43 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
         activePulses: [...state.activePulses, ...action.payload],
       };
     }
-    
+
     case 'RESET':
       return initialState;
-    
+
     default:
       return state;
   }
 }
 
-export function useSimulation() {
+interface UseSimulationOptions {
+  suppressAutoRestore?: boolean;
+}
+
+export function useSimulation(options?: UseSimulationOptions) {
+  const suppressAutoRestore = Boolean(options?.suppressAutoRestore);
   const [state, dispatch] = useReducer(simulationReducer, initialState);
   const [error, setError] = useState<string | null>(null);
   const [pollTask, setPollTask] = useState<number | null>(null);
   const stateRef = useRef(state);
+  const requestEpochRef = useRef(0);
+  const pollInFlightRef = useRef(false);
+  const pollFailuresRef = useRef(0);
+  const pollCooldownUntilRef = useRef(0);
   const carryOverRef = useRef({ active: false, skipInitial: false, iterationOffset: 0 });
+  const restoreOnceRef = useRef(false);
+  const latestWsIterationRef = useRef(0);
 
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  const mapBackendStatus = useCallback((status?: SimulationStateResponse['status']): SimulationStatus => {
+    if (status === 'completed') return 'completed';
+    if (status === 'error') return 'error';
+    if (status === 'paused') return 'paused';
+    return 'running';
+  }, []);
 
   const shouldSkipInitial = useCallback((iteration?: number) => {
     return carryOverRef.current.active
@@ -301,12 +518,324 @@ export function useSimulation() {
     };
   }, []);
 
+  const mergeReasoning = useCallback((base: ReasoningMessage[], incoming: ReasoningMessage[]) => {
+    const map = new Map<string, ReasoningMessage>();
+    [...base, ...incoming].forEach((message) => {
+      map.set(message.id, message);
+    });
+    return Array.from(map.values()).sort((a, b) => a.timestamp - b.timestamp);
+  }, []);
+
+  const buildReasoningMessages = useCallback((steps: NonNullable<SimulationStateResponse['reasoning']>): ReasoningMessage[] => {
+    const fallbackTs = Date.now();
+    return steps.map((step, index) => {
+      const rawTimestamp = (step as unknown as { timestamp?: number }).timestamp;
+      const replyToShortId = step.reply_to_short_id ?? (step.reply_to_agent_id ? step.reply_to_agent_id.slice(0, 4) : undefined);
+      return {
+        id: buildReasoningId({
+          stepUid: step.step_uid,
+          agentId: step.agent_id,
+          iteration: step.iteration,
+          phase: step.phase,
+          replyToShortId,
+          opinion: step.opinion,
+          message: step.message,
+        }),
+        stepUid: step.step_uid,
+        eventSeq: step.event_seq,
+        agentId: step.agent_id,
+        agentShortId: step.agent_short_id ?? step.agent_id.slice(0, 4),
+        agentLabel: step.agent_label,
+        archetype: step.archetype,
+        message: step.message,
+        timestamp: typeof rawTimestamp === 'number' ? rawTimestamp : fallbackTs + index,
+        iteration: applyIterationOffset(step.iteration) ?? step.iteration,
+        phase: step.phase,
+        replyToAgentId: step.reply_to_agent_id,
+        replyToShortId,
+        opinion: step.opinion,
+        opinionSource: (step.opinion_source as ReasoningMessage['opinionSource']) ?? 'llm',
+        stanceBefore: step.stance_before,
+        stanceAfter: step.stance_after,
+        stanceConfidence: step.stance_confidence,
+        reasoningLength: step.reasoning_length,
+        fallbackReason: step.fallback_reason ?? null,
+        relevanceScore: typeof step.relevance_score === 'number' ? step.relevance_score : null,
+        policyGuard: Boolean(step.policy_guard),
+        policyReason: step.policy_reason ?? null,
+        stanceLocked: Boolean(step.stance_locked),
+      };
+    });
+  }, [applyIterationOffset]);
+
+  const clearPolling = useCallback(() => {
+    if (pollTask) {
+      window.clearInterval(pollTask);
+      setPollTask(null);
+    }
+  }, [pollTask]);
+
+  const ensureSocketConnection = useCallback(async () => {
+    const apiBase = (import.meta.env.VITE_API_URL || '') as string;
+    const wsBase = (import.meta.env.VITE_WS_URL as string | undefined)
+      || apiBase
+      || 'http://localhost:8000';
+    const token = getAuthToken();
+    const wsUrl = wsBase
+      .replace(/^http/, 'ws')
+      .replace(/\/$/, '') + `/ws/simulation${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+    if (!websocketService.isConnected()) {
+      await websocketService.connect(wsUrl);
+    }
+  }, []);
+
+  const applyStateResponse = useCallback((stateResponse: SimulationStateResponse, options?: { appendReasoning?: boolean }) => {
+    if (typeof stateResponse.event_seq === 'number' && stateResponse.event_seq < stateRef.current.lastEventSeq) {
+      return;
+    }
+    const rawIteration = stateResponse.metrics?.iteration ?? 0;
+    const mappedStatus = mapBackendStatus(stateResponse.status);
+    const adjustedIteration = applyIterationOffset(rawIteration) ?? rawIteration;
+    const currentIteration = stateRef.current.metrics.currentIteration ?? 0;
+    if (stateResponse.metrics && !shouldSkipInitial(rawIteration)) {
+      markCarryOverProgress(rawIteration);
+      const adjustedTotal = applyTotalIterationsOffset(stateResponse.metrics.total_iterations);
+      if (adjustedIteration >= currentIteration && adjustedIteration >= latestWsIterationRef.current) {
+        dispatch({
+          type: 'UPDATE_METRICS',
+          payload: {
+            type: 'metrics',
+            accepted: stateResponse.metrics.accepted,
+            rejected: stateResponse.metrics.rejected,
+            neutral: stateResponse.metrics.neutral,
+            acceptance_rate: stateResponse.metrics.acceptance_rate,
+            polarization: stateResponse.metrics.polarization,
+            total_agents: stateResponse.metrics.total_agents || stateRef.current.metrics.totalAgents,
+            iteration: adjustedIteration,
+            per_category: stateResponse.metrics.per_category || {},
+            total_iterations: adjustedTotal,
+          },
+        });
+      }
+    }
+    if (stateResponse.agents && stateResponse.agents.length > 0 && !shouldSkipInitial(rawIteration)) {
+      dispatch({
+        type: 'UPDATE_AGENTS',
+        payload: {
+          type: 'agents',
+          agents: stateResponse.agents,
+          iteration: adjustedIteration,
+          total_agents: stateResponse.metrics?.total_agents,
+        },
+      });
+    }
+    if (stateResponse.reasoning && stateResponse.reasoning.length > 0) {
+      const reasoningMessages = buildReasoningMessages(stateResponse.reasoning);
+      const shouldMerge = options?.appendReasoning || mappedStatus === 'running';
+      const nextReasoning = shouldMerge
+        ? mergeReasoning(stateRef.current.reasoningFeed, reasoningMessages)
+        : reasoningMessages;
+      dispatch({ type: 'SET_REASONING', payload: nextReasoning });
+    }
+    if (stateResponse.chat_events && stateResponse.chat_events.length > 0) {
+      const mappedChatEvents = stateResponse.chat_events
+        .map((item, index) => ({
+          eventSeq: item.event_seq ?? (index + 1),
+          messageId: item.message_id || `chat-${index + 1}`,
+          role: (item.role === 'user' || item.role === 'system' || item.role === 'research' || item.role === 'status')
+            ? item.role
+            : 'system',
+          content: item.content || '',
+          meta: item.meta || {},
+          timestamp: typeof item.timestamp === 'number' ? item.timestamp : Date.now() + index,
+        }))
+        .sort((a, b) => (a.eventSeq || 0) - (b.eventSeq || 0));
+      dispatch({ type: 'SET_CHAT_EVENTS', payload: mappedChatEvents });
+      const maxChatSeq = mappedChatEvents.reduce((max, item) => Math.max(max, item.eventSeq || 0), 0);
+      if (maxChatSeq > 0) {
+        dispatch({ type: 'SET_LAST_EVENT_SEQ', payload: maxChatSeq });
+      }
+    }
+    if (stateResponse.research_sources && stateResponse.research_sources.length > 0) {
+      const mappedResearch = stateResponse.research_sources.map((entry, index) => ({
+        eventSeq: entry.event_seq,
+        action: entry.action,
+        status: entry.status,
+        url: entry.url ?? null,
+        domain: entry.domain ?? null,
+        faviconUrl: entry.favicon_url ?? null,
+        title: entry.title ?? null,
+        httpStatus: typeof entry.http_status === 'number' ? entry.http_status : null,
+        contentChars: typeof entry.content_chars === 'number' ? entry.content_chars : null,
+        relevanceScore: typeof entry.relevance_score === 'number' ? entry.relevance_score : null,
+        progressPct: typeof entry.progress_pct === 'number' ? entry.progress_pct : null,
+        snippet: entry.snippet ?? null,
+        error: entry.error ?? null,
+        timestamp: typeof entry.timestamp === 'number' ? entry.timestamp : Date.now() + index,
+      }));
+      dispatch({ type: 'SET_RESEARCH_SOURCES', payload: mappedResearch });
+    }
+    if (stateResponse.current_phase_key || stateResponse.phase_progress_pct !== undefined) {
+      dispatch({
+        type: 'SET_PHASE',
+        payload: {
+          currentPhaseKey: stateResponse.current_phase_key ?? stateRef.current.currentPhaseKey,
+          phaseProgressPct: typeof stateResponse.phase_progress_pct === 'number'
+            ? stateResponse.phase_progress_pct
+            : stateRef.current.phaseProgressPct,
+        },
+      });
+    }
+    if (stateResponse.summary) {
+      dispatch({ type: 'SET_SUMMARY', payload: stateResponse.summary });
+    }
+    dispatch({
+      type: 'SET_RESUME_META',
+      payload: {
+        canResume: Boolean(stateResponse.can_resume),
+        resumeReason: stateResponse.resume_reason ?? null,
+      },
+    });
+    const pendingClarificationRaw = stateResponse.pending_clarification;
+    const mappedPendingClarification: PendingClarification | null =
+      pendingClarificationRaw && typeof pendingClarificationRaw === 'object'
+        ? {
+            questionId: String(pendingClarificationRaw.question_id || ''),
+            question: String(pendingClarificationRaw.question || ''),
+            options: Array.isArray(pendingClarificationRaw.options)
+              ? pendingClarificationRaw.options
+                  .map((item, index) => {
+                    if (!item || typeof item !== 'object') return null;
+                    const label = String(item.label || item.text || item.value || '').trim();
+                    if (!label) return null;
+                    const id = String(item.id || `opt_${index + 1}`).trim() || `opt_${index + 1}`;
+                    return { id, label };
+                  })
+                  .filter((item): item is { id: string; label: string } => Boolean(item))
+                  .slice(0, 3)
+              : [],
+            reasonTag: pendingClarificationRaw.reason_tag ?? null,
+            reasonSummary: pendingClarificationRaw.reason_summary ?? null,
+            createdAt: typeof pendingClarificationRaw.created_at === 'number' ? pendingClarificationRaw.created_at : null,
+            required: true,
+          }
+        : null;
+    dispatch({
+      type: 'SET_CLARIFICATION',
+      payload: {
+        pendingClarification: mappedPendingClarification && mappedPendingClarification.questionId
+          ? mappedPendingClarification
+          : null,
+        canAnswerClarification: Boolean(stateResponse.can_answer_clarification),
+      },
+    });
+    dispatch({
+      type: 'SET_STATUS_REASON',
+      payload: stateResponse.status_reason
+        ?? (stateResponse.status === 'running'
+          ? 'running'
+          : stateResponse.status === 'paused'
+            ? 'interrupted'
+            : stateResponse.status === 'error'
+              ? 'error'
+              : 'completed'),
+    });
+    if (typeof stateResponse.event_seq === 'number') {
+      dispatch({ type: 'SET_LAST_EVENT_SEQ', payload: stateResponse.event_seq });
+    }
+    dispatch({
+      type: 'SET_POLICY',
+      payload: {
+        policyMode: stateResponse.policy_mode ?? 'normal',
+        policyReason: stateResponse.policy_reason ?? null,
+        searchQuality: stateResponse.search_quality ?? null,
+      },
+    });
+    dispatch({ type: 'SET_STATUS', payload: mappedStatus });
+  }, [
+    applyIterationOffset,
+    applyTotalIterationsOffset,
+    buildReasoningMessages,
+    mapBackendStatus,
+    markCarryOverProgress,
+    mergeReasoning,
+    shouldSkipInitial,
+  ]);
+
+  const beginPolling = useCallback((simulationId: string, requestEpoch: number) => {
+    clearPolling();
+    pollInFlightRef.current = false;
+    pollFailuresRef.current = 0;
+    pollCooldownUntilRef.current = 0;
+    const configuredInterval = Number((import.meta.env.VITE_STATE_POLL_INTERVAL_MS as string | undefined) || 2000);
+    const pollIntervalMs = Number.isFinite(configuredInterval)
+      ? Math.max(1200, configuredInterval)
+      : 2000;
+    const intervalId = window.setInterval(async () => {
+      if (requestEpochRef.current !== requestEpoch) return;
+      if (stateRef.current.simulationId && stateRef.current.simulationId !== simulationId) return;
+      if (pollInFlightRef.current) return;
+      const now = Date.now();
+      if (now < pollCooldownUntilRef.current) return;
+      pollInFlightRef.current = true;
+      const stateResponse = await apiService.getSimulationState(simulationId).catch(() => null);
+      try {
+        if (requestEpochRef.current !== requestEpoch) return;
+        if (stateResponse?.simulation_id && stateResponse.simulation_id !== simulationId) return;
+        if (!stateResponse) {
+          pollFailuresRef.current += 1;
+          const backoffMs = Math.min(10000, 1000 * (2 ** Math.min(4, pollFailuresRef.current)));
+          pollCooldownUntilRef.current = Date.now() + backoffMs;
+          return;
+        }
+        pollFailuresRef.current = 0;
+        pollCooldownUntilRef.current = 0;
+        if (stateResponse.error) {
+          setError(stateResponse.error);
+          dispatch({ type: 'SET_STATUS', payload: 'error' });
+          dispatch({
+            type: 'SET_RESUME_META',
+            payload: { canResume: true, resumeReason: stateResponse.resume_reason ?? stateResponse.error },
+          });
+          dispatch({ type: 'SET_STATUS_REASON', payload: stateResponse.status_reason ?? 'error' });
+          clearPolling();
+          return;
+        }
+        applyStateResponse(stateResponse, { appendReasoning: carryOverRef.current.active });
+        const mapped = mapBackendStatus(stateResponse.status);
+        if (mapped !== 'running') {
+          clearPolling();
+        }
+      } finally {
+        pollInFlightRef.current = false;
+      }
+    }, pollIntervalMs);
+    setPollTask(intervalId);
+  }, [applyStateResponse, clearPolling, mapBackendStatus]);
+
   const handleWebSocketEvent = useCallback((event: WebSocketEvent) => {
+    const activeSimulationId = stateRef.current.simulationId;
+    if (event.simulation_id) {
+      if (!activeSimulationId) return;
+      if (event.simulation_id !== activeSimulationId) return;
+    }
+    const eventSeq = (event as { event_seq?: number }).event_seq;
+    if (typeof eventSeq === 'number' && eventSeq < stateRef.current.lastEventSeq) {
+      return;
+    }
+    if (typeof eventSeq === 'number') {
+      dispatch({ type: 'SET_LAST_EVENT_SEQ', payload: eventSeq });
+    }
     switch (event.type) {
       case 'metrics':
         if (shouldSkipInitial(event.iteration)) return;
+        const adjustedMetricsEvent = applyMetricsOffset(event);
+        if ((adjustedMetricsEvent.iteration ?? 0) < (stateRef.current.metrics.currentIteration ?? 0)) return;
         markCarryOverProgress(event.iteration);
-        dispatch({ type: 'UPDATE_METRICS', payload: applyMetricsOffset(event) });
+        latestWsIterationRef.current = Math.max(latestWsIterationRef.current, adjustedMetricsEvent.iteration ?? 0);
+        dispatch({ type: 'UPDATE_METRICS', payload: adjustedMetricsEvent });
+        dispatch({ type: 'SET_RESUME_META', payload: { canResume: false, resumeReason: null } });
+        dispatch({ type: 'SET_STATUS_REASON', payload: 'running' });
         break;
       case 'reasoning_step':
         dispatch({
@@ -316,339 +845,367 @@ export function useSimulation() {
             iteration: applyIterationOffset(event.iteration) ?? event.iteration,
           },
         });
+        dispatch({ type: 'SET_RESUME_META', payload: { canResume: false, resumeReason: null } });
+        dispatch({ type: 'SET_STATUS_REASON', payload: 'running' });
         break;
       case 'reasoning_debug':
         dispatch({ type: 'ADD_REASONING_DEBUG', payload: event });
         break;
       case 'agents':
         if (shouldSkipInitial(event.iteration)) return;
-        dispatch({ type: 'UPDATE_AGENTS', payload: event });
+        latestWsIterationRef.current = Math.max(
+          latestWsIterationRef.current,
+          applyIterationOffset(event.iteration) ?? event.iteration ?? 0,
+        );
+        dispatch({
+          type: 'UPDATE_AGENTS',
+          payload: {
+            ...event,
+            iteration: applyIterationOffset(event.iteration) ?? event.iteration,
+          },
+        });
+        dispatch({ type: 'SET_RESUME_META', payload: { canResume: false, resumeReason: null } });
+        dispatch({ type: 'SET_STATUS_REASON', payload: 'running' });
+        break;
+      case 'phase_update':
+        dispatch({
+          type: 'SET_PHASE',
+          payload: {
+            currentPhaseKey: event.phase_key ?? stateRef.current.currentPhaseKey,
+            phaseProgressPct: typeof event.progress_pct === 'number'
+              ? event.progress_pct
+              : stateRef.current.phaseProgressPct,
+          },
+        });
+        break;
+      case 'research_update':
+        dispatch({
+          type: 'ADD_RESEARCH_SOURCE',
+          payload: {
+            eventSeq: event.event_seq,
+            action: event.action ?? null,
+            status: event.status ?? null,
+            url: event.url ?? null,
+            domain: event.domain ?? null,
+            faviconUrl: event.favicon_url ?? null,
+            title: event.title ?? null,
+            httpStatus: typeof event.http_status === 'number' ? event.http_status : null,
+            contentChars: typeof event.content_chars === 'number' ? event.content_chars : null,
+            relevanceScore: typeof event.relevance_score === 'number' ? event.relevance_score : null,
+            progressPct: typeof event.progress_pct === 'number' ? event.progress_pct : null,
+            snippet: event.snippet ?? null,
+            error: event.error ?? null,
+            timestamp: Date.now(),
+          },
+        });
         break;
       case 'summary':
         dispatch({ type: 'SET_SUMMARY', payload: event.summary });
         break;
+      case 'clarification_request': {
+        const mappedOptions = Array.isArray(event.options)
+          ? event.options
+              .map((item, index) => {
+                if (!item || typeof item !== 'object') return null;
+                const label = String(item.label || item.text || item.value || '').trim();
+                if (!label) return null;
+                const id = String(item.id || `opt_${index + 1}`).trim() || `opt_${index + 1}`;
+                return { id, label };
+              })
+              .filter((item): item is { id: string; label: string } => Boolean(item))
+              .slice(0, 3)
+          : [];
+        dispatch({
+          type: 'SET_CLARIFICATION',
+          payload: {
+            pendingClarification: {
+              questionId: String(event.question_id || ''),
+              question: String(event.question || ''),
+              options: mappedOptions,
+              reasonTag: event.reason_tag ?? null,
+              reasonSummary: event.reason_summary ?? null,
+              createdAt: typeof event.created_at === 'number' ? event.created_at : null,
+              required: true,
+            },
+            canAnswerClarification: true,
+          },
+        });
+        dispatch({ type: 'SET_STATUS', payload: 'paused' });
+        dispatch({ type: 'SET_STATUS_REASON', payload: 'paused_clarification_needed' });
+        dispatch({ type: 'SET_RESUME_META', payload: { canResume: false, resumeReason: event.reason_summary ?? null } });
+        break;
+      }
+      case 'clarification_resolved':
+        dispatch({
+          type: 'SET_CLARIFICATION',
+          payload: {
+            pendingClarification: null,
+            canAnswerClarification: false,
+          },
+        });
+        dispatch({ type: 'SET_STATUS', payload: 'running' });
+        dispatch({ type: 'SET_STATUS_REASON', payload: 'running' });
+        break;
+      case 'chat_event':
+        dispatch({
+          type: 'ADD_CHAT_EVENT',
+          payload: {
+            eventSeq: typeof event.event_seq === 'number' ? event.event_seq : (stateRef.current.lastEventSeq + 1),
+            messageId: String(event.message_id || `chat-${Date.now()}`),
+            role: (event.role === 'user' || event.role === 'system' || event.role === 'research' || event.role === 'status')
+              ? event.role
+              : 'system',
+            content: String(event.content || ''),
+            meta: event.meta || {},
+            timestamp: typeof event.timestamp === 'number' ? event.timestamp : Date.now(),
+          },
+        });
+        break;
     }
-  }, [markCarryOverProgress, shouldSkipInitial]);
+  }, [applyIterationOffset, applyMetricsOffset, markCarryOverProgress, shouldSkipInitial]);
 
   useEffect(() => {
     const unsubscribe = websocketService.subscribe('all', handleWebSocketEvent);
     return () => unsubscribe();
   }, [handleWebSocketEvent]);
 
+  const loadSimulation = useCallback(async (simulationId: string) => {
+    if (!simulationId) return;
+    const opEpoch = requestEpochRef.current + 1;
+    requestEpochRef.current = opEpoch;
+    setError(null);
+    latestWsIterationRef.current = 0;
+    carryOverRef.current.active = false;
+    carryOverRef.current.skipInitial = false;
+    carryOverRef.current.iterationOffset = 0;
+    dispatch({ type: 'SET_STATUS', payload: 'configuring' });
+    dispatch({ type: 'SET_SIMULATION_ID', payload: simulationId });
+    dispatch({ type: 'SET_STATUS_REASON', payload: null });
+    await ensureSocketConnection();
+    if (requestEpochRef.current !== opEpoch) return;
+    websocketService.setSimulationSubscription(simulationId);
+    const stateResponse = await apiService.getSimulationState(simulationId);
+    if (requestEpochRef.current !== opEpoch) return;
+    if (stateResponse.simulation_id && stateResponse.simulation_id !== simulationId) return;
+    applyStateResponse(stateResponse);
+    const mapped = mapBackendStatus(stateResponse.status);
+    if (mapped === 'running') beginPolling(simulationId, opEpoch);
+    else clearPolling();
+  }, [applyStateResponse, beginPolling, clearPolling, ensureSocketConnection, mapBackendStatus]);
+
   const startSimulation = useCallback(async (config: SimulationConfig, options?: { carryOver?: boolean; throwOnError?: boolean }) => {
     try {
+      const opEpoch = requestEpochRef.current + 1;
+      requestEpochRef.current = opEpoch;
       setError(null);
+      latestWsIterationRef.current = 0;
       carryOverRef.current.active = Boolean(options?.carryOver);
       carryOverRef.current.skipInitial = Boolean(options?.carryOver);
       carryOverRef.current.iterationOffset = options?.carryOver
         ? stateRef.current.metrics.currentIteration
         : 0;
-      dispatch({ type: 'SET_STATUS', payload: 'configuring' });
-      dispatch({ type: 'SET_SUMMARY', payload: null });
-
-      const apiBase = (import.meta.env.VITE_API_URL || '') as string;
-      const wsBase = (import.meta.env.VITE_WS_URL as string | undefined)
-        || apiBase
-        || 'http://localhost:8000';
-      const token = getAuthToken();
-      const wsUrl = wsBase
-        .replace(/^http/, 'ws')
-        .replace(/\/$/, '') + `/ws/simulation${token ? `?token=${encodeURIComponent(token)}` : ''}`;
-      if (!websocketService.isConnected()) {
-        try {
-          await websocketService.connect(wsUrl);
-        } catch (wsError) {
-          console.error('WebSocket connection failed:', wsError);
-        }
+      if (!options?.carryOver) {
+        clearPolling();
+        websocketService.setSimulationSubscription(null);
+        dispatch({ type: 'RESET' });
       }
+      dispatch({ type: 'SET_STATUS', payload: 'configuring' });
+      dispatch({ type: 'SET_STATUS_REASON', payload: null });
+      dispatch({ type: 'SET_SUMMARY', payload: null });
+      dispatch({ type: 'SET_RESUME_META', payload: { canResume: false, resumeReason: null } });
 
+      await ensureSocketConnection();
+      if (requestEpochRef.current !== opEpoch) return;
       const response = await apiService.startSimulation(config);
+      if (requestEpochRef.current !== opEpoch) return;
       websocketService.setSimulationSubscription(response.simulation_id);
       dispatch({ type: 'SET_SIMULATION_ID', payload: response.simulation_id });
-      dispatch({ type: 'SET_STATUS', payload: 'running' });
-
-      // Prime state immediately after start
-      try {
-        const prime = await apiService.getSimulationState(response.simulation_id);
-        const primeIteration = prime.metrics?.iteration ?? 0;
-        if (prime.metrics && !shouldSkipInitial(primeIteration)) {
-          markCarryOverProgress(primeIteration);
-          const adjustedIteration = applyIterationOffset(primeIteration) ?? primeIteration;
-          const adjustedTotal = applyTotalIterationsOffset(prime.metrics.total_iterations);
-          dispatch({
-            type: 'UPDATE_METRICS',
-            payload: {
-              type: 'metrics',
-              accepted: prime.metrics.accepted,
-              rejected: prime.metrics.rejected,
-              neutral: prime.metrics.neutral,
-              acceptance_rate: prime.metrics.acceptance_rate,
-              polarization: prime.metrics.polarization,
-              total_agents: prime.metrics.total_agents || state.metrics.totalAgents,
-              iteration: adjustedIteration,
-              per_category: prime.metrics.per_category || {},
-              total_iterations: adjustedTotal,
-            },
-          });
-        }
-        if (prime.agents && prime.agents.length > 0 && !shouldSkipInitial(primeIteration)) {
-          dispatch({
-            type: 'UPDATE_AGENTS',
-            payload: {
-              type: 'agents',
-              agents: prime.agents,
-              iteration: applyIterationOffset(primeIteration) ?? primeIteration,
-              total_agents: prime.metrics?.total_agents,
-            },
-          });
-        }
-        if (prime.reasoning && prime.reasoning.length > 0) {
-          const reasoningMessages: ReasoningMessage[] = prime.reasoning.map((step, index) => ({
-            id: `${step.agent_id}-${step.iteration}-${index}`,
-            agentId: step.agent_id,
-            agentShortId: step.agent_short_id ?? step.agent_id.slice(0, 4),
-            archetype: step.archetype,
-            message: step.message,
-            timestamp: Date.now(),
-            iteration: applyIterationOffset(step.iteration) ?? step.iteration,
-            phase: step.phase,
-            replyToAgentId: step.reply_to_agent_id,
-            replyToShortId: step.reply_to_agent_id ? step.reply_to_agent_id.slice(0, 4) : undefined,
-            opinion: step.opinion,
-            opinionSource: step.opinion_source as ReasoningMessage['opinionSource'],
-            stanceConfidence: step.stance_confidence,
-            reasoningLength: step.reasoning_length,
-          }));
-          if (carryOverRef.current.active) {
-            dispatch({ type: 'SET_REASONING', payload: [...stateRef.current.reasoningFeed, ...reasoningMessages] });
-          } else {
-            dispatch({ type: 'SET_REASONING', payload: reasoningMessages });
-          }
-        }
-        if (prime.summary) {
-          dispatch({ type: 'SET_SUMMARY', payload: prime.summary });
-        }
-      } catch (primeErr) {
-        console.warn('Initial state prime failed', primeErr);
+      const mappedStartStatus: SimulationStatus =
+        response.status === 'paused'
+          ? 'paused'
+          : response.status === 'completed'
+            ? 'completed'
+            : response.status === 'error'
+              ? 'error'
+              : 'running';
+      dispatch({ type: 'SET_STATUS', payload: mappedStartStatus });
+      dispatch({
+        type: 'SET_STATUS_REASON',
+        payload: response.status_reason
+          ?? (mappedStartStatus === 'running'
+            ? 'running'
+            : mappedStartStatus === 'paused'
+              ? 'paused_search_failed'
+              : mappedStartStatus === 'error'
+                ? 'error'
+                : 'completed'),
+      });
+      if (mappedStartStatus !== 'running') {
+        dispatch({
+          type: 'SET_RESUME_META',
+          payload: {
+            canResume: mappedStartStatus === 'paused' || mappedStartStatus === 'error',
+            resumeReason: response.status_reason ?? null,
+          },
+        });
       }
 
-      // Poll REST endpoint for completion (backend broadcasts events but doesn't send completion status via WS).
-      if (pollTask) {
-        window.clearInterval(pollTask);
+      const prime = await apiService.getSimulationState(response.simulation_id).catch(() => null);
+      if (prime && requestEpochRef.current === opEpoch && (!prime.simulation_id || prime.simulation_id === response.simulation_id)) {
+        applyStateResponse(prime, { appendReasoning: carryOverRef.current.active });
       }
-      const intervalId = window.setInterval(async () => {
-        try {
-          const stateResponse: SimulationStateResponse | null = await apiService
-            .getSimulationState(response.simulation_id)
-            .catch(() => null);
-          if (stateResponse?.error) {
-            setError(stateResponse.error);
-            dispatch({ type: 'SET_STATUS', payload: 'error' });
-            window.clearInterval(intervalId);
-            setPollTask(null);
-            return;
-          }
-          if (stateResponse?.metrics) {
-            const rawIteration = stateResponse.metrics.iteration ?? 0;
-            if (!shouldSkipInitial(rawIteration)) {
-              markCarryOverProgress(rawIteration);
-              const adjustedIteration = applyIterationOffset(rawIteration) ?? state.metrics.currentIteration;
-              const adjustedTotal = applyTotalIterationsOffset(stateResponse.metrics.total_iterations);
-              dispatch({
-                type: 'UPDATE_METRICS',
-                payload: {
-                  type: 'metrics',
-                  accepted: stateResponse.metrics.accepted,
-                  rejected: stateResponse.metrics.rejected,
-                  neutral: stateResponse.metrics.neutral,
-                  acceptance_rate: stateResponse.metrics.acceptance_rate,
-                  polarization: stateResponse.metrics.polarization,
-                  total_agents: stateResponse.metrics.total_agents || state.metrics.totalAgents,
-                  iteration: adjustedIteration,
-                  per_category: stateResponse.metrics.per_category || {},
-                  total_iterations: adjustedTotal,
-                },
-              });
-            }
-          }
-          if (stateResponse?.agents && stateResponse.agents.length > 0) {
-            const rawIteration = stateResponse.metrics?.iteration ?? 0;
-            if (!shouldSkipInitial(rawIteration)) {
-              dispatch({
-                type: 'UPDATE_AGENTS',
-                payload: {
-                  type: 'agents',
-                  agents: stateResponse.agents,
-                  iteration: applyIterationOffset(rawIteration) ?? state.metrics.currentIteration,
-                  total_agents: stateResponse.metrics?.total_agents,
-                },
-              });
-            }
-          }
-          if (stateResponse?.reasoning && stateResponse.reasoning.length > 0) {
-          const reasoningMessages: ReasoningMessage[] = stateResponse.reasoning.map((step, index) => ({
-            id: `${step.agent_id}-${step.iteration}-${index}`,
-            agentId: step.agent_id,
-            agentShortId: step.agent_short_id ?? step.agent_id.slice(0, 4),
-            archetype: step.archetype,
-            message: step.message,
-            timestamp: Date.now(),
-            iteration: applyIterationOffset(step.iteration) ?? step.iteration,
-            phase: step.phase,
-            replyToAgentId: step.reply_to_agent_id,
-            replyToShortId: step.reply_to_agent_id ? step.reply_to_agent_id.slice(0, 4) : undefined,
-            opinion: step.opinion,
-            opinionSource: step.opinion_source as ReasoningMessage['opinionSource'],
-            stanceConfidence: step.stance_confidence,
-            reasoningLength: step.reasoning_length,
-          }));
-            if (carryOverRef.current.active) {
-              dispatch({ type: 'SET_REASONING', payload: [...stateRef.current.reasoningFeed, ...reasoningMessages] });
-            } else {
-              dispatch({ type: 'SET_REASONING', payload: reasoningMessages });
-            }
-          }
-          if (stateResponse?.summary) {
-            dispatch({ type: 'SET_SUMMARY', payload: stateResponse.summary });
-          }
-
-          const res = await apiService.getSimulationResult(response.simulation_id);
-          if (res.status === 'completed' && res.metrics) {
-            // Merge final metrics.
-            dispatch({
-              type: 'UPDATE_METRICS',
-              payload: {
-                type: 'metrics',
-                accepted: res.metrics.accepted,
-                rejected: res.metrics.rejected,
-                neutral: res.metrics.neutral,
-                acceptance_rate: res.metrics.acceptance_rate,
-                polarization: res.metrics.polarization,
-                total_agents: res.metrics.total_agents || state.metrics.totalAgents,
-                iteration: state.metrics.currentIteration,
-                per_category: res.metrics.per_category || {},
-                total_iterations: res.metrics.total_iterations,
-              },
-            });
-            if (stateResponse?.summary || stateResponse?.summary_ready) {
-              dispatch({ type: 'SET_STATUS', payload: 'completed' });
-              window.clearInterval(intervalId);
-              setPollTask(null);
-            }
-          }
-        } catch {
-          // Ignore polling errors.
-        }
-      }, 1000);
-      // faster polling for short simulations
-      window.clearInterval(intervalId);
-      const fastId = window.setInterval(async () => {
-        try {
-          const stateResponse: SimulationStateResponse | null = await apiService
-            .getSimulationState(response.simulation_id)
-            .catch(() => null);
-          if (!stateResponse) return;
-          if (stateResponse.error) {
-            setError(stateResponse.error);
-            dispatch({ type: 'SET_STATUS', payload: 'error' });
-            window.clearInterval(fastId);
-            setPollTask(null);
-            return;
-          }
-          if (stateResponse.metrics) {
-            const rawIteration = stateResponse.metrics.iteration ?? 0;
-            if (!shouldSkipInitial(rawIteration)) {
-              markCarryOverProgress(rawIteration);
-              const adjustedIteration = applyIterationOffset(rawIteration) ?? state.metrics.currentIteration;
-              const adjustedTotal = applyTotalIterationsOffset(stateResponse.metrics.total_iterations);
-              dispatch({
-                type: 'UPDATE_METRICS',
-                payload: {
-                  type: 'metrics',
-                  accepted: stateResponse.metrics.accepted,
-                  rejected: stateResponse.metrics.rejected,
-                  neutral: stateResponse.metrics.neutral,
-                  acceptance_rate: stateResponse.metrics.acceptance_rate,
-                  polarization: stateResponse.metrics.polarization,
-                  total_agents: stateResponse.metrics.total_agents || state.metrics.totalAgents,
-                  iteration: adjustedIteration,
-                  per_category: stateResponse.metrics.per_category || {},
-                  total_iterations: adjustedTotal,
-                },
-              });
-            }
-          }
-          if (stateResponse.agents && stateResponse.agents.length > 0) {
-            const rawIteration = stateResponse.metrics?.iteration ?? 0;
-            if (!shouldSkipInitial(rawIteration)) {
-              dispatch({
-                type: 'UPDATE_AGENTS',
-                payload: {
-                  type: 'agents',
-                  agents: stateResponse.agents,
-                  iteration: applyIterationOffset(rawIteration) ?? state.metrics.currentIteration,
-                  total_agents: stateResponse.metrics?.total_agents,
-                },
-              });
-            }
-          }
-          if (stateResponse.reasoning && stateResponse.reasoning.length > 0) {
-            const reasoningMessages: ReasoningMessage[] = stateResponse.reasoning.map((step, index) => ({
-              id: `${step.agent_id}-${step.iteration}-${index}`,
-              agentId: step.agent_id,
-              agentShortId: step.agent_short_id ?? step.agent_id.slice(0, 4),
-              archetype: step.archetype,
-              message: step.message,
-              timestamp: Date.now(),
-              iteration: applyIterationOffset(step.iteration) ?? step.iteration,
-              phase: step.phase,
-              replyToAgentId: step.reply_to_agent_id,
-              replyToShortId: step.reply_to_agent_id ? step.reply_to_agent_id.slice(0, 4) : undefined,
-              opinion: step.opinion,
-              opinionSource: step.opinion_source as ReasoningMessage['opinionSource'],
-              stanceConfidence: step.stance_confidence,
-              reasoningLength: step.reasoning_length,
-            }));
-            if (carryOverRef.current.active) {
-              dispatch({ type: 'SET_REASONING', payload: [...stateRef.current.reasoningFeed, ...reasoningMessages] });
-            } else {
-              dispatch({ type: 'SET_REASONING', payload: reasoningMessages });
-            }
-          }
-          if (stateResponse.summary) {
-            dispatch({ type: 'SET_SUMMARY', payload: stateResponse.summary });
-          }
-
-          if (stateResponse.status === 'completed') {
-            if (stateResponse.summary || stateResponse.summary_ready) {
-              dispatch({ type: 'SET_STATUS', payload: 'completed' });
-              window.clearInterval(fastId);
-              setPollTask(null);
-            }
-          }
-        } catch (e) {
-          // ignore polling errors
-        }
-      }, 500);
-      setPollTask(fastId);
+      if (mappedStartStatus === 'running') {
+        beginPolling(response.simulation_id, opEpoch);
+      } else {
+        clearPolling();
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to start simulation';
       setError(message);
       dispatch({ type: 'SET_STATUS', payload: 'error' });
+      dispatch({ type: 'SET_STATUS_REASON', payload: 'error' });
+      dispatch({ type: 'SET_RESUME_META', payload: { canResume: false, resumeReason: null } });
       if (options?.throwOnError) {
         throw err;
       }
     }
-  }, [markCarryOverProgress, pollTask, shouldSkipInitial, state.metrics.currentIteration, state.metrics.totalAgents]);
+  }, [applyStateResponse, beginPolling, clearPolling, ensureSocketConnection]);
+
+  const resumeSimulation = useCallback(async (simulationId: string) => {
+    if (!simulationId) return null;
+    const opEpoch = requestEpochRef.current + 1;
+    requestEpochRef.current = opEpoch;
+    setError(null);
+    latestWsIterationRef.current = 0;
+    dispatch({ type: 'SET_STATUS', payload: 'configuring' });
+    dispatch({ type: 'SET_SIMULATION_ID', payload: simulationId });
+    dispatch({ type: 'SET_STATUS_REASON', payload: null });
+    await ensureSocketConnection();
+    if (requestEpochRef.current !== opEpoch) return null;
+    websocketService.setSimulationSubscription(simulationId);
+    const response = await apiService.resumeSimulation(simulationId);
+    if (requestEpochRef.current !== opEpoch) return response;
+    const snapshot = await apiService.getSimulationState(simulationId).catch(() => null);
+    if (snapshot && (!snapshot.simulation_id || snapshot.simulation_id === simulationId)) {
+      applyStateResponse(snapshot);
+    } else {
+      dispatch({ type: 'SET_STATUS', payload: mapBackendStatus(response.status) });
+      dispatch({ type: 'SET_STATUS_REASON', payload: response.status === 'running' ? 'running' : null });
+    }
+    if (response.status === 'running') {
+      beginPolling(simulationId, opEpoch);
+    } else {
+      clearPolling();
+    }
+    return response;
+  }, [applyStateResponse, beginPolling, clearPolling, ensureSocketConnection, mapBackendStatus]);
+
+  const pauseSimulation = useCallback(async (simulationId: string, reason?: string) => {
+    if (!simulationId) return null;
+    const response = await apiService.pauseSimulation(simulationId, reason);
+    const snapshot = await apiService.getSimulationState(simulationId).catch(() => null);
+    if (snapshot && (!snapshot.simulation_id || snapshot.simulation_id === simulationId)) {
+      applyStateResponse(snapshot);
+    } else {
+      dispatch({ type: 'SET_STATUS', payload: response.status === 'paused' ? 'paused' : mapBackendStatus(response.status) });
+      dispatch({ type: 'SET_STATUS_REASON', payload: response.status === 'paused' ? 'paused_manual' : null });
+    }
+    clearPolling();
+    return response;
+  }, [applyStateResponse, clearPolling, mapBackendStatus]);
+
+  const submitClarificationAnswer = useCallback(async (payload: {
+    simulationId: string;
+    questionId: string;
+    selectedOptionId?: string;
+    customText?: string;
+  }) => {
+    const simulationId = payload.simulationId?.trim();
+    if (!simulationId) return null;
+    const opEpoch = requestEpochRef.current + 1;
+    requestEpochRef.current = opEpoch;
+    setError(null);
+    dispatch({ type: 'SET_STATUS', payload: 'configuring' });
+    const response = await apiService.submitClarificationAnswer({
+      simulation_id: simulationId,
+      question_id: payload.questionId,
+      selected_option_id: payload.selectedOptionId,
+      custom_text: payload.customText,
+    });
+    if (requestEpochRef.current !== opEpoch) return response;
+    dispatch({
+      type: 'SET_CLARIFICATION',
+      payload: {
+        pendingClarification: null,
+        canAnswerClarification: false,
+      },
+    });
+    dispatch({ type: 'SET_STATUS', payload: 'running' });
+    dispatch({ type: 'SET_STATUS_REASON', payload: 'running' });
+    await ensureSocketConnection();
+    if (requestEpochRef.current !== opEpoch) return response;
+    websocketService.setSimulationSubscription(simulationId);
+    const snapshot = await apiService.getSimulationState(simulationId).catch(() => null);
+    if (snapshot && (!snapshot.simulation_id || snapshot.simulation_id === simulationId)) {
+      applyStateResponse(snapshot);
+    }
+    beginPolling(simulationId, opEpoch);
+    return response;
+  }, [applyStateResponse, beginPolling, ensureSocketConnection]);
 
   const stopSimulation = useCallback(() => {
+    requestEpochRef.current += 1;
+    clearPolling();
+    websocketService.setSimulationSubscription(null);
     websocketService.disconnect();
-    if (pollTask) {
-      window.clearInterval(pollTask);
-      setPollTask(null);
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem(ACTIVE_SIMULATION_KEY);
     }
+    carryOverRef.current.active = false;
+    carryOverRef.current.skipInitial = false;
+    carryOverRef.current.iterationOffset = 0;
     dispatch({ type: 'RESET' });
-  }, [pollTask]);
+  }, [clearPolling]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (state.simulationId) {
+      window.localStorage.setItem(ACTIVE_SIMULATION_KEY, state.simulationId);
+    }
+  }, [state.simulationId]);
+
+  useEffect(() => {
+    if (restoreOnceRef.current) return;
+    restoreOnceRef.current = true;
+    if (typeof window === 'undefined') return;
+    if (suppressAutoRestore) {
+      window.localStorage.removeItem(ACTIVE_SIMULATION_KEY);
+      return;
+    }
+    const params = new URLSearchParams(window.location.search);
+    const requestedSimulationId = params.get('simulation_id')?.trim();
+    if (requestedSimulationId) {
+      return;
+    }
+    const pendingAutoStart = window.localStorage.getItem('pendingAutoStart') === 'true';
+    const pendingIdea = (window.localStorage.getItem('pendingIdea') || '').trim();
+    // If the user is clearly starting a new run (idea form flow), don't resurrect the old active session.
+    if (!requestedSimulationId && (pendingAutoStart || pendingIdea)) {
+      window.localStorage.removeItem(ACTIVE_SIMULATION_KEY);
+      return;
+    }
+    const savedSimulationId = window.localStorage.getItem(ACTIVE_SIMULATION_KEY);
+    if (!savedSimulationId) return;
+    loadSimulation(savedSimulationId).catch(() => {
+      window.localStorage.removeItem(ACTIVE_SIMULATION_KEY);
+    });
+  }, [loadSimulation, suppressAutoRestore]);
+
+  useEffect(() => {
+    return () => {
+      clearPolling();
+    };
+  }, [clearPolling]);
 
   const pulsesRef = useRef(state.activePulses);
   useEffect(() => {
@@ -670,6 +1227,10 @@ export function useSimulation() {
     ...state,
     error,
     startSimulation,
+    loadSimulation,
+    resumeSimulation,
+    pauseSimulation,
+    submitClarificationAnswer,
     stopSimulation,
     activePulses: state.activePulses,
   };

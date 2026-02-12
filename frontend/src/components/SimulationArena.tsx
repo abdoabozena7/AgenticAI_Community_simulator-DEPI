@@ -186,9 +186,15 @@ export const SimulationArena = ({ agents, activePulses }: SimulationArenaProps) 
       </div>
       
       {/* Stats overlay */}
-      <div className="absolute top-4 right-4 z-10 p-3 rounded-lg bg-card/80 backdrop-blur-sm border border-border">
-        <div className="text-xs text-muted-foreground">
-          {agents.length} Nodes | {agents.reduce((acc, a) => acc + a.connections.length, 0)} Connections
+      <div
+        className="absolute top-4 right-4 z-10 flex items-center gap-2 p-2 rounded-lg bg-card/80 backdrop-blur-sm border border-border"
+        dir="ltr"
+      >
+        <div className="px-2 py-1 rounded-md bg-secondary/60 text-xs text-muted-foreground">
+          Agents: {agents.length}
+        </div>
+        <div className="px-2 py-1 rounded-md bg-secondary/60 text-xs text-muted-foreground">
+          Connections: {agents.reduce((acc, a) => acc + a.connections.length, 0)}
         </div>
       </div>
       

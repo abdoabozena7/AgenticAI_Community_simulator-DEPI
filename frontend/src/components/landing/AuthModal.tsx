@@ -243,7 +243,7 @@ export function AuthModal({ isOpen, onClose, initialMode = 'register' }: AuthMod
   const handleResendVerification = async () => {
     const emailValue = normalizeAuthValue(email, true);
     if (!emailValue) {
-      setError(t('Please enter your email.', 'ظٹط±ط¬ظ‰ ط¥ط¯ط®ط§ظ„ ط¨ط±ظٹط¯ظƒ.'));
+      setError(t('Please enter your email.', 'يرجى إدخال بريدك.'));
       return;
     }
     setResendBusy(true);

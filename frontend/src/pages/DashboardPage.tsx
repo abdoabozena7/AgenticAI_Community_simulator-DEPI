@@ -33,7 +33,7 @@ import { getIdeaLog, type IdeaLogEntry } from '@/lib/ideaLog';
 interface Simulation {
   id: string;
   name: string;
-  status: 'running' | 'completed' | 'draft' | 'failed';
+  status: 'running' | 'paused' | 'completed' | 'draft' | 'error';
   progress: number;
   agents: number;
   successRate: number;
@@ -41,6 +41,8 @@ interface Simulation {
   createdAtRaw?: string;
   category: string;
   summary?: string;
+  canResume?: boolean;
+  resumeReason?: string | null;
 }
 
 interface ResearchResult {
@@ -72,8 +74,8 @@ const normalizeRate = (value?: number): number => {
 };
 
 const mapLogToSimulation = (entry: IdeaLogEntry, rtl = false): Simulation => {
-  const status = entry.status === 'error' ? 'failed' : entry.status || 'draft';
-  const progress = status === 'completed' ? 100 : status === 'running' ? 60 : 0;
+  const status = (entry.status || 'draft') as Simulation['status'];
+  const progress = status === 'completed' ? 100 : status === 'running' || status === 'paused' ? 60 : 0;
   return {
     id: entry.simulationId || entry.id,
     name: entry.idea,
@@ -85,12 +87,14 @@ const mapLogToSimulation = (entry: IdeaLogEntry, rtl = false): Simulation => {
     createdAtRaw: entry.createdAt,
     category: entry.category || 'Idea',
     summary: entry.summary,
+    canResume: status === 'paused' || status === 'error',
+    resumeReason: null,
   };
 };
 
 const mapApiSimulation = (item: SimulationListItem, rtl = false): Simulation => {
-  const status = item.status === 'error' ? 'failed' : item.status;
-  const progress = status === 'completed' ? 100 : status === 'running' ? 60 : 0;
+  const status = item.status as Simulation['status'];
+  const progress = status === 'completed' ? 100 : status === 'running' || status === 'paused' ? 60 : 0;
   return {
     id: item.simulation_id,
     name: item.idea || 'Untitled idea',
@@ -102,19 +106,25 @@ const mapApiSimulation = (item: SimulationListItem, rtl = false): Simulation => 
     createdAtRaw: item.created_at,
     category: item.category || 'Idea',
     summary: item.summary,
+    canResume: Boolean(item.can_resume),
+    resumeReason: item.resume_reason ?? null,
   };
 };
 
-const mapSimulationToDetails = (sim: Simulation): SimulationData => ({
-  id: sim.id,
-  name: sim.name,
-  status: sim.status,
-  category: sim.category,
-  createdAt: sim.createdAtRaw || sim.createdAt,
-  acceptanceRate: sim.successRate,
-  totalAgents: sim.agents,
-  summary: sim.summary,
-});
+const mapSimulationToDetails = (sim: Simulation): SimulationData => {
+  const detailStatus: SimulationData['status'] =
+    sim.status === 'error' ? 'failed' : sim.status === 'paused' ? 'running' : sim.status;
+  return {
+    id: sim.id,
+    name: sim.name,
+    status: detailStatus,
+    category: sim.category,
+    createdAt: sim.createdAtRaw || sim.createdAt,
+    acceptanceRate: sim.successRate,
+    totalAgents: sim.agents,
+    summary: sim.summary,
+  };
+};
 
 const READ_NOTIFICATIONS_KEY = 'notificationReadIds';
 
@@ -262,9 +272,9 @@ export default function DashboardPage() {
     ? `${latestDay.agents} today`
     : '--';
   const successChangeLabel = '7-day avg';
-  const usageLabel = user?.daily_limit
-    ? `${user.daily_usage ?? 0}/${user.daily_limit} today`
-    : '--';
+  const usageLabel = typeof user?.daily_tokens_limit === 'number'
+    ? `${user.daily_tokens_used ?? 0}/${user.daily_tokens_limit} tokens today`
+    : (user?.daily_limit ? `${user.daily_usage ?? 0}/${user.daily_limit} today` : '--');
 
   const stats = [
     { label: isRTL ? 'Total Simulations' : 'Total Simulations', value: String(totalSimulations), change: simChangeLabel, trend: latestDay && latestDay.simulations > 0 ? 'up' : 'neutral', icon: Brain, color: 'text-cyan-400' },
@@ -286,23 +296,32 @@ export default function DashboardPage() {
   const getStatusColor = (status: Simulation['status']) => {
     switch (status) {
       case 'running': return 'text-cyan-400 bg-cyan-400/10';
+      case 'paused': return 'text-amber-400 bg-amber-400/10';
       case 'completed': return 'text-green-400 bg-green-400/10';
       case 'draft': return 'text-muted-foreground bg-muted';
-      case 'failed': return 'text-red-400 bg-red-400/10';
+      case 'error': return 'text-red-400 bg-red-400/10';
     }
   };
 
   const getStatusIcon = (status: Simulation['status']) => {
     switch (status) {
       case 'running': return <Clock className="w-3 h-3 animate-pulse" />;
+      case 'paused': return <Clock className="w-3 h-3" />;
       case 'completed': return <CheckCircle2 className="w-3 h-3" />;
       case 'draft': return <Target className="w-3 h-3" />;
-      case 'failed': return <AlertTriangle className="w-3 h-3" />;
+      case 'error': return <AlertTriangle className="w-3 h-3" />;
     }
   };
 
+  const isContinuableStatus = (status: Simulation['status']) =>
+    status === 'running' || status === 'paused' || status === 'error';
+
   const handleViewDetails = (sim: Simulation) => {
     setSelectedSimulation(mapSimulationToDetails(sim));
+  };
+
+  const handleContinueSimulation = (simulationId: string) => {
+    navigate(`/simulate?simulation_id=${encodeURIComponent(simulationId)}`);
   };
 
   const handleStartResearch = async (payload: { idea: string; location?: string; category?: string }) => {
@@ -318,14 +337,21 @@ export default function DashboardPage() {
 
   const handleStartSimulation = (idea: string) => {
     if (!idea.trim()) return;
+    const trimmedIdea = idea.trim();
     try {
-      localStorage.setItem('pendingIdea', idea.trim());
+      localStorage.setItem('pendingIdea', trimmedIdea);
       localStorage.setItem('pendingAutoStart', 'true');
-      localStorage.setItem('dashboardIdea', idea.trim());
+      localStorage.setItem('dashboardIdea', trimmedIdea);
     } catch {
       // ignore
     }
-    navigate('/simulate');
+    navigate('/simulate', {
+      state: {
+        idea: trimmedIdea,
+        autoStart: true,
+        source: 'dashboard',
+      },
+    });
   };
 
   const mapAuditToNotification = (log: NotificationLogItem): NotificationItem => {
@@ -520,10 +546,18 @@ export default function DashboardPage() {
             {simulations.slice(0, 4).map((sim) => (
               <div
                 key={sim.id}
-                onClick={() => sim.status === 'completed' && handleViewDetails(sim)}
+                onClick={() => {
+                  if (sim.status === 'completed') {
+                    handleViewDetails(sim);
+                  } else if (isContinuableStatus(sim.status)) {
+                    handleContinueSimulation(sim.id);
+                  }
+                }}
                 className={cn(
                   "flex items-center gap-4 p-4 rounded-xl bg-white/5 transition-all group",
-                  sim.status === 'completed' ? "hover:bg-white/10 cursor-pointer" : "cursor-default"
+                  sim.status === 'completed' || isContinuableStatus(sim.status)
+                    ? "hover:bg-white/10 cursor-pointer"
+                    : "cursor-default"
                 )}
               >
                 <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500/20 to-purple-500/20 flex items-center justify-center">
@@ -593,14 +627,26 @@ export default function DashboardPage() {
                         {sim.status === 'completed' && <span className="text-green-400">{sim.successRate}%</span>}
                         <span>{sim.createdAt}</span>
                       </div>
-                      {sim.status === 'running' && <Progress value={sim.progress} className="mt-2 h-1.5" />}
+                      {(sim.status === 'running' || sim.status === 'paused') && <Progress value={sim.progress} className="mt-2 h-1.5" />}
                     </div>
                     <RippleButton
                       variant="outline"
                       size="sm"
-                      onClick={() => sim.status === 'completed' ? handleViewDetails(sim) : setActiveNav('home')}
+                      onClick={() => {
+                        if (sim.status === 'completed') {
+                          handleViewDetails(sim);
+                          return;
+                        }
+                        if (isContinuableStatus(sim.status)) {
+                          handleContinueSimulation(sim.id);
+                          return;
+                        }
+                        setActiveNav('home');
+                      }}
                     >
-                      {sim.status === 'draft' ? (isRTL ? 'متابعة' : 'Continue') : (isRTL ? 'عرض التفاصيل' : 'View Details')}
+                      {sim.status === 'completed'
+                        ? (isRTL ? 'عرض التفاصيل' : 'View Details')
+                        : (isRTL ? 'متابعة' : 'Continue')}
                     </RippleButton>
                   </div>
                 </CardContent>
@@ -610,10 +656,10 @@ export default function DashboardPage() {
         </TabsContent>
         <TabsContent value="running" className="mt-4">
           <div className="grid gap-3">
-            {filteredSimulations.filter((sim) => sim.status === 'running').length === 0 && (
-              <p className="text-sm text-muted-foreground">No running simulations.</p>
+            {filteredSimulations.filter((sim) => sim.status === 'running' || sim.status === 'paused' || sim.status === 'error').length === 0 && (
+              <p className="text-sm text-muted-foreground">No active simulations.</p>
             )}
-            {filteredSimulations.filter((sim) => sim.status === 'running').map((sim) => (
+            {filteredSimulations.filter((sim) => sim.status === 'running' || sim.status === 'paused' || sim.status === 'error').map((sim) => (
               <Card key={sim.id} className="liquid-glass border-border/50 hover:bg-white/5 transition-all">
                 <CardContent className="p-5">
                   <div className="flex items-center gap-4">
@@ -632,12 +678,12 @@ export default function DashboardPage() {
                         <span>{sim.agents} agents</span>
                         <span>{sim.createdAt}</span>
                       </div>
-                      <Progress value={sim.progress} className="mt-2 h-1.5" />
+                      {(sim.status === 'running' || sim.status === 'paused') && <Progress value={sim.progress} className="mt-2 h-1.5" />}
                     </div>
                     <RippleButton
                       variant="outline"
                       size="sm"
-                      onClick={() => setActiveNav('home')}
+                      onClick={() => handleContinueSimulation(sim.id)}
                     >
                       {isRTL ? 'متابعة' : 'Continue'}
                     </RippleButton>

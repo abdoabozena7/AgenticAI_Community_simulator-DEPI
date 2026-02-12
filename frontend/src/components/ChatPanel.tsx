@@ -1,23 +1,24 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+﻿import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
   Send,
   Bot,
   User,
   Sparkles,
   ChevronDown,
-  Clock,
-  RotateCcw,
-  Check,
+  Play,
+  Pause,
+  RefreshCcw,
   Loader2,
+  Globe,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { ChatMessage, ReasoningMessage } from '@/types/simulation';
+import { ChatMessage, PendingClarification, ReasoningMessage, SimulationStatus } from '@/types/simulation';
 import { cn } from '@/lib/utils';
 import { SearchResult } from '@/services/api';
 
 /* ------------------------------------------------------------------
-   PROP‑TYPES
+   PROP-TYPES
 ------------------------------------------------------------------- */
 interface ChatPanelProps {
   /** chat messages (user & bot) */
@@ -28,7 +29,7 @@ interface ChatPanelProps {
   reasoningDebug?: { id: string; agentShortId?: string; reason: string; stage?: string; attempt?: number; phase?: string; timestamp: number }[];
   /** send a new chat message */
   onSendMessage: (msg: string) => void;
-  /** user selected an option in a poll / multi‑select */
+  /** user selected an option in a poll / multi-select */
   onSelectOption?: (field: string, value: string) => void;
   /** waiting for a city name */
   isWaitingForCity?: boolean;
@@ -38,21 +39,21 @@ interface ChatPanelProps {
   isWaitingForLocationChoice?: boolean;
   /** agents are thinking (typing indicator) */
   isThinking?: boolean;
-  /** LLM generation error – show retry button */
+  /** LLM generation error - show retry button */
   showRetry?: boolean;
   onRetryLlm?: () => void;
-  /** Searching timed‑out – allow “retry” */
+  /** Searching timed-out - allow "retry" */
   onSearchRetry?: () => void;
   /** Use LLM instead of web search */
   onSearchUseLlm?: () => void;
-  /** “Start” button should appear even if no text typed */
+  /** "Start" button should appear even if no text typed */
   canConfirmStart?: boolean;
   onConfirmStart?: () => void;
-  /** Pre‑defined quick‑reply chips */
+  /** Pre-defined quick-reply chips */
   quickReplies?: { label: string; value: string }[];
   onQuickReply?: (value: string) => void;
   /** overall simulation state */
-  simulationStatus?: 'idle' | 'running' | 'finished';
+  simulationStatus?: SimulationStatus;
   /** backend error message surfaced via polling */
   simulationError?: string | null;
   /** agents are currently reasoning */
@@ -61,7 +62,7 @@ interface ChatPanelProps {
   isSummarizing?: boolean;
   /** how many agents rejected */
   rejectedCount?: number;
-  /** market‑research data */
+  /** market-research data */
   research?: {
     summary?: string;
     signals?: string[];
@@ -73,10 +74,10 @@ interface ChatPanelProps {
     notableLocations?: string[];
     sourcesCount?: number;
   };
-  /** “download report” button state */
+  /** "download report" button state */
   reportBusy?: boolean;
   onDownloadReport?: () => void;
-  /** top‑level insights shown in the “Insights” tab */
+  /** top-level insights shown in the "Insights" tab */
   insights?: {
     idea?: string;
     location?: string;
@@ -88,11 +89,68 @@ interface ChatPanelProps {
     rejectReasons?: string[];
     summary?: string;
   };
-  /** current status of the web‑search routine */
+  /** current status of the web-search routine */
   searchState?: {
     status: 'idle' | 'searching' | 'timeout' | 'error' | 'complete';
   };
-  /** user settings (language, auto‑focus, …) */
+  phaseState?: {
+    currentPhaseKey?: string | null;
+    progressPct?: number;
+  };
+  researchSourcesLive?: {
+    eventSeq?: number;
+    action?: string | null;
+    status?: string | null;
+    url?: string | null;
+    domain?: string | null;
+    faviconUrl?: string | null;
+    title?: string | null;
+    httpStatus?: number | null;
+    contentChars?: number | null;
+    relevanceScore?: number | null;
+    progressPct?: number | null;
+    snippet?: string | null;
+    error?: string | null;
+    timestamp?: number | null;
+  }[];
+  primaryControl?: {
+    key: string;
+    label: string;
+    description?: string;
+    disabled?: boolean;
+    busy?: boolean;
+    tone?: 'primary' | 'secondary' | 'warning' | 'success';
+    icon?: 'play' | 'pause' | 'retry' | 'sparkles' | 'reasoning';
+    onClick?: () => void;
+    secondary?: {
+      label: string;
+      disabled?: boolean;
+      onClick?: () => void;
+    };
+  } | null;
+  onOpenReasoning?: () => void;
+  pendingClarification?: PendingClarification | null;
+  canAnswerClarification?: boolean;
+  clarificationBusy?: boolean;
+  onSubmitClarification?: (payload: {
+    questionId: string;
+    selectedOptionId?: string;
+    customText?: string;
+  }) => void;
+  postActionsEnabled?: boolean;
+  postActionBusy?: 'make_acceptable' | 'bring_to_world' | null;
+  postActionResult?: {
+    action: 'make_acceptable' | 'bring_to_world';
+    title: string;
+    summary: string;
+    steps: string[];
+    risks: string[];
+    kpis: string[];
+    revised_idea?: string;
+  } | null;
+  onRunPostAction?: (action: 'make_acceptable' | 'bring_to_world') => void;
+  onStartFollowupFromPostAction?: () => void;
+  /** user settings (language, auto-focus, ...) */
   settings: {
     language: 'ar' | 'en';
     autoFocusInput?: boolean;
@@ -100,28 +158,41 @@ interface ChatPanelProps {
 }
 
 /* ------------------------------------------------------------------
-   READ‑MORE COMPONENT (unchanged)
+   READ-MORE COMPONENT (unchanged)
 ------------------------------------------------------------------- */
 function ReadMoreText({
   text,
   collapsedLines = 6,
+  language,
   className,
 }: {
   text: string;
   collapsedLines?: number;
+  language: 'ar' | 'en';
   className?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const shouldClamp = text.length > 260;
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const apply = () => setIsMobile(window.innerWidth < 768);
+    apply();
+    window.addEventListener('resize', apply);
+    return () => window.removeEventListener('resize', apply);
+  }, []);
+  const words = useMemo(() => text.trim().split(/\s+/).filter(Boolean).length, [text]);
+  const shouldClamp = words > (isMobile ? 70 : 100);
+  const clampStyle = shouldClamp && !expanded
+    ? ({
+        display: '-webkit-box',
+        WebkitLineClamp: collapsedLines,
+        WebkitBoxOrient: 'vertical',
+        overflow: 'hidden',
+      } as const)
+    : undefined;
 
   return (
     <div className={cn('min-w-0', className)}>
-      <div
-        className={cn(
-          'whitespace-pre-wrap break-words',
-          shouldClamp && !expanded && `line-clamp-${collapsedLines}`
-        )}
-      >
+      <div className="whitespace-pre-wrap break-words overflow-visible" style={clampStyle}>
         {text}
       </div>
 
@@ -135,7 +206,9 @@ function ReadMoreText({
           <ChevronDown
             className={cn('w-4 h-4 transition-transform', expanded && 'rotate-180')}
           />
-          {expanded ? 'Read less' : 'Read more'}
+          {expanded
+            ? (language === 'ar' ? 'عرض أقل' : 'Read less')
+            : (language === 'ar' ? 'اقرأ المزيد' : 'Read more')}
         </span>
       )}
     </div>
@@ -170,7 +243,7 @@ function InlineDisclosure({
         />
       </div>
 
-      {/* No borders‑/boxes – expandable area */}
+      {/* No borders-/boxes - expandable area */}
       <div className="inline-disclosure-content">
         <div className="inline-steps">
           {steps.map((s, i) => (
@@ -179,7 +252,7 @@ function InlineDisclosure({
               className="inline-step"
               style={{ animationDelay: `${i * 60}ms` }}
             >
-              → {s}
+              &rarr; {s}
             </div>
           ))}
         </div>
@@ -203,10 +276,6 @@ export function ChatPanel({
   isThinking = false,
   showRetry = false,
   onRetryLlm,
-  onSearchRetry,
-  onSearchUseLlm,
-  canConfirmStart = false,
-  onConfirmStart,
   quickReplies,
   onQuickReply,
   simulationStatus = 'idle',
@@ -219,6 +288,19 @@ export function ChatPanel({
   onDownloadReport,
   insights,
   searchState,
+  phaseState,
+  researchSourcesLive = [],
+  primaryControl = null,
+  onOpenReasoning,
+  pendingClarification = null,
+  canAnswerClarification = false,
+  clarificationBusy = false,
+  onSubmitClarification,
+  postActionsEnabled = false,
+  postActionBusy = null,
+  postActionResult = null,
+  onRunPostAction,
+  onStartFollowupFromPostAction,
   settings,
 }: ChatPanelProps) {
   const [inputValue, setInputValue] = useState('');
@@ -230,13 +312,12 @@ export function ChatPanel({
   const [isNearBottom, setIsNearBottom] = useState(true);
   const [thinkingStepIndex, setThinkingStepIndex] = useState(0);
   const [showDebug, setShowDebug] = useState(false);
+  const [selectedClarificationOption, setSelectedClarificationOption] = useState<string | null>(null);
+  const [clarificationInput, setClarificationInput] = useState('');
 
-  const isSearchTimeout = searchState?.status === 'timeout';
-  const isActionMode = showRetry || isSearchTimeout;
   const isSimulationDone =
     simulationStatus === 'completed' ||
-    simulationStatus === 'error' ||
-    simulationStatus === 'finished';
+    simulationStatus === 'error';
   const hasInsights =
     Boolean(insights?.summary) ||
     Boolean(insights?.idea) ||
@@ -247,22 +328,91 @@ export function ChatPanel({
     typeof insights?.risk === 'number' ||
     Boolean(research?.summary) ||
     Boolean(research?.signals?.length);
-  const reasoningUnavailable = reasoningFeed.length === 0 && !reasoningActive && isSimulationDone;
-  const canOpenReasoning = reasoningFeed.length > 0 || reasoningActive;
+  const hasReasoningContent = reasoningFeed.length > 0;
+  const reasoningUnavailable = !hasReasoningContent && !reasoningActive && isSimulationDone;
+  const canOpenReasoning = hasReasoningContent;
+  const hasPendingClarification = Boolean(
+    canAnswerClarification
+    && pendingClarification
+    && pendingClarification.questionId
+  );
+  const recentResearchSources = useMemo(
+    () => [...researchSourcesLive]
+      .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+      .slice(-6)
+      .reverse(),
+    [researchSourcesLive]
+  );
+  const phaseLabel = useMemo(() => {
+    const key = phaseState?.currentPhaseKey?.trim();
+    if (!key) return null;
+    const labelsAr: Record<string, string> = {
+      intake: 'التهيئة',
+      search_bootstrap: 'البحث الأولي',
+      evidence_map: 'جمع الأدلة',
+      debate: 'النقاش',
+      resolution: 'الحسم',
+      completed: 'مكتمل',
+    };
+    const labelsEn: Record<string, string> = {
+      intake: 'Intake',
+      search_bootstrap: 'Search Bootstrap',
+      evidence_map: 'Evidence Mapping',
+      debate: 'Debate',
+      resolution: 'Resolution',
+      completed: 'Completed',
+    };
+    return settings.language === 'ar'
+      ? (labelsAr[key] || key)
+      : (labelsEn[key] || key);
+  }, [phaseState?.currentPhaseKey, settings.language]);
 
-  const [searchActionsOpen, setSearchActionsOpen] = useState(false);
-  const [actionsClosing, setActionsClosing] = useState(false);
+
+  const formatResearchError = useCallback((errorText?: string | null) => {
+    const raw = String(errorText || '').trim();
+    if (!raw) return '';
+    if (!/search quality below threshold/i.test(raw)) return raw;
+
+    const readPair = (key: string) => {
+      const match = raw.match(new RegExp(`${key}=([0-9.]+)/([0-9.]+)`, 'i'));
+      if (!match) return null;
+      return { current: Number(match[1]), required: Number(match[2]) };
+    };
+
+    const usable = readPair('usable_sources');
+    const domains = readPair('domains');
+    const chars = readPair('max_content_chars');
+    const extractionMatch = raw.match(/extraction_success_rate=([0-9.]+)/i);
+    const extractionRate = extractionMatch ? Number(extractionMatch[1]) : 0;
+
+    const usableCurrent = usable?.current ?? 0;
+    const usableRequired = usable?.required ?? 2;
+    const domainsCurrent = domains?.current ?? 0;
+    const domainsRequired = domains?.required ?? 2;
+    const charsCurrent = chars?.current ?? 0;
+    const charsRequired = chars?.required ?? 80;
+
+    if (settings.language === 'ar') {
+      return `جودة البحث أقل من الحد المطلوب. المصادر الصالحة: ${usableCurrent}/${usableRequired}، النطاقات المختلفة: ${domainsCurrent}/${domainsRequired}، أكبر محتوى مستخرج: ${charsCurrent}/${charsRequired} حرف، ونسبة نجاح الاستخراج: ${(extractionRate * 100).toFixed(0)}%.`;
+    }
+
+    return `Search quality is below the required threshold. Usable sources: ${usableCurrent}/${usableRequired}, domains: ${domainsCurrent}/${domainsRequired}, max extracted content: ${charsCurrent}/${charsRequired} chars, extraction success: ${(extractionRate * 100).toFixed(0)}%.`;
+  }, [settings.language]);
+
+  const getFavicon = useCallback((item: NonNullable<ChatPanelProps['researchSourcesLive']>[number]) => {
+    if (item.faviconUrl) return item.faviconUrl;
+    const host = (item.domain || '').trim();
+    if (!host) return null;
+    return `https://www.google.com/s2/favicons?domain=${host}&sz=64`;
+  }, []);
+
   const [hiddenOptionIds, setHiddenOptionIds] = useState<Set<string>>(new Set());
   const hideTimersRef = useRef<Record<string, number>>({});
 
-  // Auto‑switch to reasoning **once** when it first becomes active
-  const autoSwitchedRef = useRef(false);
   useEffect(() => {
-    if (reasoningActive && !autoSwitchedRef.current) {
-      autoSwitchedRef.current = true;
-      setActiveTab('reasoning');
-    }
-  }, [reasoningActive]);
+    setSelectedClarificationOption(null);
+    setClarificationInput('');
+  }, [pendingClarification?.questionId]);
 
   useEffect(() => {
     if (activeTab === 'reasoning' && reasoningUnavailable) {
@@ -307,28 +457,8 @@ export function ChatPanel({
     }, 3000);
   };
 
-  // Open the “search actions” pop‑over automatically when a timeout occurs
-  useEffect(() => {
-    if (isSearchTimeout) {
-      setSearchActionsOpen(true);
-      setActionsClosing(false);
-    } else {
-      setSearchActionsOpen(false);
-      setActionsClosing(false);
-    }
-  }, [isSearchTimeout]);
-
-  const closeActions = () => {
-    setActionsClosing(true);
-    window.setTimeout(() => {
-      setSearchActionsOpen(false);
-      setActionsClosing(false);
-    }, 140);
-  };
-
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (isActionMode) return;
     if (!inputValue.trim()) return;
 
     onSendMessage(inputValue);
@@ -412,10 +542,10 @@ export function ChatPanel({
     : [];
 
   const phaseLabelMap = useMemo(() => ({
-    'Information Shock': 'التصادم المعرفي (Information Shock)',
+    'Information Shock': 'الصدمة المعلوماتية (Information Shock)',
     'Polarization Phase': 'الاستقطاب (Polarization Phase)',
-    'Clash of Values': 'محاولات الإقناع والجمود (Clash of Values)',
-    'Resolution Pressure': 'النتيجة النهائية (Resolution Pressure)',
+    'Clash of Values': 'صدام القيم (Clash of Values)',
+    'Resolution Pressure': 'ضغط الحسم (Resolution Pressure)',
   }), []);
 
   const phaseGroups = useMemo(() => {
@@ -437,12 +567,30 @@ export function ChatPanel({
   }, [reasoningFeed]);
 
   const handleThinkingClick = () => {
-    if (reasoningActive) {
-      setActiveTab('reasoning');
-      return;
-    }
     setThinkingOpen((p) => !p);
   };
+
+  const canSubmitClarification = useMemo(() => {
+    if (!hasPendingClarification || !pendingClarification) return false;
+    const hasCustomText = clarificationInput.trim().length > 0;
+    return hasCustomText || Boolean(selectedClarificationOption);
+  }, [clarificationInput, hasPendingClarification, pendingClarification, selectedClarificationOption]);
+
+  const handleSubmitClarification = useCallback(() => {
+    if (!hasPendingClarification || !pendingClarification || !onSubmitClarification) return;
+    const customText = clarificationInput.trim();
+    onSubmitClarification({
+      questionId: pendingClarification.questionId,
+      selectedOptionId: customText ? undefined : (selectedClarificationOption || undefined),
+      customText: customText || undefined,
+    });
+  }, [
+    clarificationInput,
+    hasPendingClarification,
+    onSubmitClarification,
+    pendingClarification,
+    selectedClarificationOption,
+  ]);
 
   return (
     <div className="glass-panel h-full flex flex-col min-h-0">
@@ -487,7 +635,7 @@ export function ChatPanel({
           <span className="flex items-center justify-center gap-2">
             <Bot className="w-4 h-4" />
             {settings.language === 'ar' ? 'تفكير الوكلاء' : 'Agent Reasoning'}
-            {(reasoningFeed.length > 0 || reasoningActive) && (
+            {hasReasoningContent && (
               <span className="w-2 h-2 rounded-full bg-primary animate-pulse" />
             )}
           </span>
@@ -519,8 +667,8 @@ export function ChatPanel({
 
       {/* -------------------- MESSAGE LIST -------------------- */}
       <div
-        // **IMPORTANT change** – added bottom padding (pb‑24) so the last message
-        // never gets hidden behind the pop‑over that appears on timeout.
+        // **IMPORTANT change** - added bottom padding (pb-24) so the last message
+        // never gets hidden behind the pop-over that appears on timeout.
         className="messages-container scrollbar-thin pb-6"
         ref={scrollRef}
         data-testid={activeTab === 'chat' ? 'chat-messages' : 'reasoning-messages'}
@@ -542,7 +690,7 @@ export function ChatPanel({
                 </h3>
                 <p className="text-sm text-muted-foreground max-w-[260px] mx-auto">
                   {settings.language === 'ar'
-                    ? 'صف فكرتك وسيقودك النظام لإكمال الإعدادات'
+                    ? 'اكتب فكرتك وسيقودك النظام لإكمال الإعدادات'
                     : 'Describe your idea and the system will guide you through the configuration'}
                 </p>
               </div>
@@ -559,11 +707,11 @@ export function ChatPanel({
                   {/* Simple text bubbles */}
                   {!msg.options && (
                     <div className="bubble bubble-compact">
-                      <ReadMoreText text={msg.content} collapsedLines={6} />
+                      <ReadMoreText text={msg.content} collapsedLines={6} language={settings.language} />
                     </div>
                   )}
 
-                  {/* Poll / multi‑select messages */}
+                  {/* Poll / multi-select messages */}
                   {msg.options && msg.options.items.length > 0 && !hiddenOptionIds.has(msg.id) && (
                     <div
                       className={
@@ -611,7 +759,255 @@ export function ChatPanel({
               />
             )}
 
+            {(phaseState?.currentPhaseKey || recentResearchSources.length > 0) && (
+              <div className="rounded-lg border border-border/50 bg-card/70 p-3 space-y-2">
+                {phaseState?.currentPhaseKey && (
+                  <div className="text-xs text-muted-foreground">
+                    {settings.language === 'ar' ? 'المرحلة الحالية:' : 'Current phase:'}{' '}
+                    <span className="text-foreground font-medium">{phaseLabel || phaseState.currentPhaseKey}</span>
+                    {typeof phaseState.progressPct === 'number' && (
+                      <span className="ml-2 text-primary">{Math.round(phaseState.progressPct)}%</span>
+                    )}
+                  </div>
+                )}
+                {recentResearchSources.length > 0 && (
+                  <div className="space-y-1.5">
+                    <div className="text-xs text-muted-foreground">
+                      {settings.language === 'ar' ? 'مصادر البحث المباشرة' : 'Live research sources'}
+                    </div>
+                    {(() => {
+                      const actionAr: Record<string, string> = {
+                        query_started: 'بدء الاستعلام',
+                        query_result: 'نتيجة الاستعلام',
+                        url_opened: 'فتح الرابط',
+                        url_extracted: 'استخراج المحتوى',
+                        url_failed: 'فشل الاستخراج',
+                        search_completed: 'اكتمل البحث',
+                        search_failed: 'فشل البحث',
+                      };
+                      const actionEn: Record<string, string> = {
+                        query_started: 'Query started',
+                        query_result: 'Query result',
+                        url_opened: 'URL opened',
+                        url_extracted: 'Content extracted',
+                        url_failed: 'Extraction failed',
+                        search_completed: 'Search completed',
+                        search_failed: 'Search failed',
+                      };
+                      const statusAr: Record<string, string> = {
+                        running: 'جاري',
+                        completed: 'مكتمل',
+                        failed: 'فشل',
+                      };
+                      const statusEn: Record<string, string> = {
+                        running: 'Running',
+                        completed: 'Completed',
+                        failed: 'Failed',
+                      };
+                      return recentResearchSources.map((item, idx) => (
+                        <div
+                          key={`${item.eventSeq ?? 'x'}-${item.timestamp ?? 0}-${item.url ?? ''}-${item.action ?? ''}`}
+                          className={cn(
+                            'search-trace-card rounded-lg border border-border/40 px-2.5 py-2 text-xs space-y-1.5 transition-all',
+                            item.status === 'running' && 'bg-primary/5 border-primary/30 animate-pulse'
+                          )}
+                          style={{ animationDelay: `${Math.min(idx * 70, 350)}ms` }}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex items-start gap-2">
+                              {getFavicon(item) ? (
+                                <img
+                                  src={getFavicon(item) || undefined}
+                                  alt=""
+                                  className="w-5 h-5 rounded-sm mt-0.5 border border-border/40 bg-card"
+                                  loading="lazy"
+                                />
+                              ) : (
+                                <span className="w-5 h-5 rounded-sm border border-border/40 bg-card flex items-center justify-center mt-0.5">
+                                  <Globe className="w-3 h-3 text-muted-foreground" />
+                                </span>
+                              )}
+                              <div className="min-w-0">
+                                <div className="text-foreground truncate font-medium">
+                                  {settings.language === 'ar'
+                                    ? (actionAr[item.action || ''] || item.action || 'حدث بحث')
+                                    : (actionEn[item.action || ''] || item.action || 'Research event')}
+                                </div>
+                                {(item.domain || item.url) && (
+                                  <div className="text-muted-foreground truncate">
+                                    {item.domain || item.url}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                            <span className="text-[10px] px-2 py-0.5 rounded-full border border-border/50 text-muted-foreground whitespace-nowrap">
+                              {settings.language === 'ar'
+                                ? (statusAr[item.status || ''] || item.status || '')
+                                : (statusEn[item.status || ''] || item.status || '')}
+                            </span>
+                          </div>
+                          {item.title && (
+                            <div className="text-foreground/90 line-clamp-1">{item.title}</div>
+                          )}
+                          {(item.snippet || item.error) && (
+                            <div className="text-muted-foreground line-clamp-2">
+                              {item.error ? formatResearchError(item.error) : item.snippet}
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+                            {typeof item.httpStatus === 'number' && <span>HTTP {item.httpStatus}</span>}
+                            {typeof item.contentChars === 'number' && <span>{item.contentChars} ch</span>}
+                            {typeof item.relevanceScore === 'number' && <span>rel {item.relevanceScore.toFixed(2)}</span>}
+                          </div>
+                          {typeof item.progressPct === 'number' && (
+                            <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
+                              <div
+                                className="h-full bg-primary transition-all duration-500"
+                                style={{ width: `${Math.max(0, Math.min(100, item.progressPct))}%` }}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      ));
+                    })()}
+                  </div>
+                )}
+              </div>
+            )}
+
             {statusLabel && <div className="status-chip">{statusLabel}</div>}
+
+            {hasPendingClarification && pendingClarification && (
+              <div className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 p-3 space-y-3">
+                <div className="text-sm font-semibold text-cyan-100">
+                  {settings.language === 'ar'
+                    ? 'الوكلاء محتاجين توضيح قبل استكمال التفكير'
+                    : 'Agents need clarification before reasoning can continue'}
+                </div>
+                <div className="text-sm text-foreground whitespace-pre-wrap">
+                  {pendingClarification.question}
+                </div>
+                {pendingClarification.reasonSummary && (
+                  <div className="text-xs text-cyan-100/80">
+                    {pendingClarification.reasonSummary}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 gap-2">
+                  {pendingClarification.options.slice(0, 3).map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={cn(
+                        'rounded-lg border px-3 py-2 text-sm text-start transition-all',
+                        selectedClarificationOption === option.id
+                          ? 'border-primary bg-primary/10 text-primary'
+                          : 'border-border/60 bg-card/70 text-foreground hover:border-primary/40'
+                      )}
+                      onClick={() => setSelectedClarificationOption(option.id)}
+                      disabled={clarificationBusy}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+
+                <Input
+                  value={clarificationInput}
+                  onChange={(event) => setClarificationInput(event.target.value)}
+                  dir={settings.language === 'ar' ? 'rtl' : 'ltr'}
+                  placeholder={
+                    settings.language === 'ar'
+                      ? 'أو اكتب توضيحك الخاص (له أولوية على الاختيارات)'
+                      : 'Or type your own clarification (overrides selected option)'
+                  }
+                  disabled={clarificationBusy}
+                />
+
+                <Button
+                  type="button"
+                  className="w-full"
+                  onClick={handleSubmitClarification}
+                  disabled={!canSubmitClarification || clarificationBusy}
+                >
+                  {clarificationBusy
+                    ? (settings.language === 'ar' ? 'جاري الإرسال والاستكمال...' : 'Submitting and resuming...')
+                    : (settings.language === 'ar' ? 'إرسال التوضيح واستكمال المحاكاة' : 'Submit clarification & resume')}
+                </Button>
+              </div>
+            )}
+
+            {postActionsEnabled && (
+              <div className="rounded-xl border border-border/50 bg-card/70 p-3 space-y-3">
+                <div className="text-sm font-semibold text-foreground">
+                  {settings.language === 'ar'
+                    ? 'الخطوات التالية بعد انتهاء المحاكاة'
+                    : 'Next actions after simulation completion'}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="w-full justify-center"
+                    disabled={Boolean(postActionBusy)}
+                    onClick={() => onRunPostAction?.('make_acceptable')}
+                  >
+                    {postActionBusy === 'make_acceptable'
+                      ? (settings.language === 'ar' ? 'جاري التحضير...' : 'Preparing...')
+                      : (settings.language === 'ar' ? 'اجعل فكرتك مقبولة' : 'Make your idea acceptable')}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="w-full justify-center"
+                    disabled={Boolean(postActionBusy)}
+                    onClick={() => onRunPostAction?.('bring_to_world')}
+                  >
+                    {postActionBusy === 'bring_to_world'
+                      ? (settings.language === 'ar' ? 'جاري التحضير...' : 'Preparing...')
+                      : (settings.language === 'ar' ? 'انطلق بالفكرة للسوق' : 'Bring your idea to world')}
+                  </Button>
+                </div>
+
+                {postActionResult && (
+                  <div className="rounded-lg border border-border/50 bg-background/40 p-3 space-y-2">
+                    <div className="text-sm font-semibold text-foreground">{postActionResult.title}</div>
+                    <ReadMoreText text={postActionResult.summary} collapsedLines={4} language={settings.language} />
+                    {postActionResult.steps?.length > 0 && (
+                      <div className="space-y-1">
+                        {postActionResult.steps.slice(0, 4).map((step) => (
+                          <div key={step} className="text-xs text-muted-foreground">
+                            • {step}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <Button
+                      type="button"
+                      className="w-full"
+                      onClick={onStartFollowupFromPostAction}
+                    >
+                      {settings.language === 'ar' ? 'جرّب هذا الآن' : 'Try this now'}
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {hasReasoningContent && (
+              <Button
+                type="button"
+                variant="secondary"
+                className="w-full justify-center gap-2"
+                onClick={() => {
+                  onOpenReasoning?.();
+                  setActiveTab('reasoning');
+                }}
+              >
+                <Bot className="w-4 h-4" />
+                {settings.language === 'ar' ? 'فتح شاشة التفكير' : 'Open reasoning'}
+              </Button>
+            )}
 
             {/* Typing indicator */}
             {isThinking && (
@@ -689,12 +1085,6 @@ export function ChatPanel({
                     const idx = reasoningIndex.get(msg.id) ?? 0;
                     const side = idx % 2 === 0 ? 'user' : 'bot';
                     const opinion = msg.opinion ?? 'neutral';
-                    const tone =
-                      opinion === 'accept'
-                        ? 'text-success'
-                        : opinion === 'reject'
-                        ? 'text-destructive'
-                        : 'text-primary';
                     const statusLabel =
                       opinion === 'accept'
                         ? settings.language === 'ar'
@@ -715,17 +1105,17 @@ export function ChatPanel({
                         : 'bg-primary/10 text-primary border-primary/20';
                     const bubbleBg = side === 'user' ? 'bg-secondary' : 'bg-card';
                     const shortId = msg.agentShortId ?? msg.agentId.slice(0, 4);
+                    const agentLabel = msg.agentLabel
+                      || (settings.language === 'ar' ? `الوكيل ${shortId}` : `Agent ${shortId}`);
                     const replyShort =
                       msg.replyToShortId ?? (msg.replyToAgentId ? msg.replyToAgentId.slice(0, 4) : undefined);
-                    const opinionSource = msg.opinionSource ?? 'default';
+                    const opinionSource = msg.opinionSource ?? 'llm';
                     const sourceLabel =
                       opinionSource === 'llm'
-                        ? settings.language === 'ar'
-                          ? 'تصنيف LLM'
-                          : 'LLM'
-                        : settings.language === 'ar'
-                        ? 'افتراضي'
-                        : 'Default';
+                        ? 'LLM'
+                        : opinionSource === 'llm_classified'
+                        ? 'LLM+Classifier'
+                        : 'Fallback';
 
                     return (
                       <div
@@ -739,46 +1129,49 @@ export function ChatPanel({
                             'text-foreground'
                           )}
                         >
-                          <div className="flex items-center gap-2 mb-2">
-                            <div className="w-6 h-6 rounded-full bg-primary/15 flex items-center justify-center">
-                              <Bot className="w-3 h-3 text-primary" />
+                          <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <div className="w-6 h-6 rounded-full bg-primary/15 flex items-center justify-center">
+                                <Bot className="w-3 h-3 text-primary" />
+                              </div>
+                              <span className="text-xs font-semibold text-foreground truncate">
+                                {agentLabel}
+                              </span>
                             </div>
-                            <span className={cn('text-xs font-mono', tone)}>
-                              {shortId}
-                            </span>
-                            {msg.archetype && (
-                              <span className="text-xs text-muted-foreground">
-                                {msg.archetype}
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className={cn('text-[11px] px-2 py-0.5 rounded-full border', statusBadge)}>
+                                {statusLabel}
                               </span>
-                            )}
-                            <span className="text-xs text-muted-foreground">
-                              Iter {msg.iteration}
-                            </span>
-                            <span className={cn('text-[11px] px-2 py-0.5 rounded-full border', statusBadge)}>
-                              {statusLabel}
-                            </span>
-                            <span className="text-[11px] text-muted-foreground">
-                              {sourceLabel}
-                            </span>
-                            {replyShort && (
+                              <span className="text-[11px] px-2 py-0.5 rounded-full border border-border/60 text-muted-foreground">
+                                {sourceLabel}
+                              </span>
                               <span className="text-[11px] text-muted-foreground">
-                                ? {replyShort}
+                                Iter {msg.iteration}
                               </span>
-                            )}
+                              {replyShort && (
+                                <span className="text-[11px] px-2 py-0.5 rounded-full border border-border/60 text-muted-foreground">
+                                  {settings.language === 'ar' ? `رد على ${replyShort}` : `Reply to ${replyShort}`}
+                                </span>
+                              )}
+                              {opinionSource === 'fallback' && msg.fallbackReason && (
+                                <span className="text-[10px] px-2 py-0.5 rounded-full border border-amber-400/40 text-amber-300">
+                                  {msg.fallbackReason}
+                                </span>
+                              )}
+                            </div>
                           </div>
 
                           <ReadMoreText
                             text={msg.message}
                             collapsedLines={7}
-                            className={cn(
-                              'text-sm',
-                              opinion === 'accept'
-                                ? 'text-success'
-                                : opinion === 'reject'
-                                ? 'text-destructive'
-                                : 'text-foreground/90'
-                            )}
+                            language={settings.language}
+                            className="text-sm text-foreground/95"
                           />
+                          {msg.archetype && (
+                            <div className="text-[11px] text-muted-foreground mt-2">
+                              {msg.archetype}
+                            </div>
+                          )}
                         </div>
                       </div>
                     );
@@ -859,7 +1252,7 @@ export function ChatPanel({
                 </div>
                 <div>
                   {settings.language === 'ar'
-                    ? 'رينج الأسعار/الحساسية:'
+                    ? 'حساسية السعر:'
                     : 'Price sensitivity:'}{' '}
                   <span className="text-foreground">{formatLevel(research?.priceSensitivity)}</span>
                 </div>
@@ -955,7 +1348,7 @@ export function ChatPanel({
         )}
       </div>
 
-      {/* -------------------- JUMP‑TO‑LATEST BUTTON -------------------- */}
+      {/* -------------------- JUMP-TO-LATEST BUTTON -------------------- */}
       {activeTab === 'chat' && !isNearBottom && (
         <button
           type="button"
@@ -972,37 +1365,62 @@ export function ChatPanel({
       {/* -------------------- INPUT AREA (CHAT TAB) -------------------- */}
       {activeTab === 'chat' ? (
         <div className="chat-input-container">
-          {/* Inline actions under the latest message when search times out */}
-          {isSearchTimeout && (
-            <div className="mb-2 rounded-xl border border-border/40 bg-secondary/40 p-2">
-              <div className="text-xs text-muted-foreground mb-2">
-                {settings.language === 'ar'
-                  ? 'قعدت ادور كتير وملقيتش بيانات كفاية. تحب اعيد البحث بوقت أطول ولا استخدم LLM علشان أكمّل؟'
-                  : 'I searched a lot but couldn\'t find enough data. Retry with a longer timeout or use the LLM fallback?'}
-              </div>
-              <div className="flex gap-2">
-                <button
+          {primaryControl && (
+            <div className="mb-3 space-y-2">
+              <Button
+                type="button"
+                onClick={() => {
+                  primaryControl.onClick?.();
+                  if (primaryControl.key === 'open_reasoning' && canOpenReasoning) {
+                    setActiveTab('reasoning');
+                  }
+                }}
+                disabled={primaryControl.disabled}
+                className={cn(
+                  'w-full h-12 justify-between rounded-xl border transition-all duration-300',
+                  primaryControl.tone === 'success' && 'bg-success/15 border-success/30 text-success hover:bg-success/20',
+                  primaryControl.tone === 'warning' && 'bg-warning/10 border-warning/30 text-warning hover:bg-warning/15',
+                  primaryControl.tone === 'secondary' && 'bg-secondary/70 border-border text-foreground hover:bg-secondary',
+                  (!primaryControl.tone || primaryControl.tone === 'primary') && 'bg-primary text-primary-foreground hover:bg-primary/90',
+                )}
+              >
+                <span className="flex items-center gap-2 min-w-0">
+                  {primaryControl.busy ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : primaryControl.icon === 'pause' ? (
+                    <Pause className="w-4 h-4" />
+                  ) : primaryControl.icon === 'retry' ? (
+                    <RefreshCcw className="w-4 h-4" />
+                  ) : primaryControl.icon === 'sparkles' ? (
+                    <Sparkles className="w-4 h-4" />
+                  ) : primaryControl.icon === 'reasoning' ? (
+                    <Bot className="w-4 h-4" />
+                  ) : (
+                    <Play className="w-4 h-4" />
+                  )}
+                  <span className="truncate">{primaryControl.label}</span>
+                </span>
+                {primaryControl.description && (
+                  <span className="text-xs opacity-80 truncate max-w-[50%] text-right">
+                    {primaryControl.description}
+                  </span>
+                )}
+              </Button>
+
+              {primaryControl.secondary && (
+                <Button
                   type="button"
-                  className="action-item inline"
-                  onClick={() => onSearchRetry?.()}
-                  disabled={!onSearchRetry}
+                  variant="secondary"
+                  className="w-full h-10 rounded-xl"
+                  onClick={primaryControl.secondary.onClick}
+                  disabled={primaryControl.secondary.disabled}
                 >
-                  <span className="action-ico"><Clock className="w-4 h-4" /></span>
-                  <span className="action-title">{settings.language === 'ar' ? 'عيد البحث' : 'Retry Search'}</span>
-                </button>
-                <button
-                  type="button"
-                  className="action-item inline primary"
-                  onClick={() => onSearchUseLlm?.()}
-                  disabled={!onSearchUseLlm}
-                >
-                  <span className="action-ico"><Sparkles className="w-4 h-4" /></span>
-                  <span className="action-title">{settings.language === 'ar' ? 'استخدم LLM' : 'Use LLM'}</span>
-                </button>
-              </div>
+                  {primaryControl.secondary.label}
+                </Button>
+              )}
             </div>
           )}
-          {/* Quick‑reply chips */}
+          {/* Quick-reply chips */}
           {quickReplies && quickReplies.length > 0 && (
             <div className="quick-replies">
               {quickReplies.map((reply) => (
@@ -1024,7 +1442,7 @@ export function ChatPanel({
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               dir={settings.language === 'ar' ? 'rtl' : 'ltr'}
-              disabled={isActionMode}
+              disabled={showRetry}
               placeholder={
                 isWaitingForLocationChoice
                   ? settings.language === 'ar'
@@ -1046,89 +1464,16 @@ export function ChatPanel({
               data-testid="chat-input"
             />
 
-            {/* --------- SEND / RETRY / SEARCH ACTIONS --------- */}
-            <div className="relative">
-              {/* Pop‑over that appears when the search timed‑out */}
-              {isSearchTimeout && searchActionsOpen && (
-                <div className={cn('action-pop', actionsClosing && 'closing')}>
-
-
-                  <button
-                    type="button"
-                    className="action-item"
-                    onClick={() => {
-                      onSearchRetry?.();
-                      closeActions();
-                    }}
-                    disabled={!onSearchRetry}
-                  >
-                    <span className="action-ico">
-                      <Clock className="w-4 h-4" />
-                    </span>
-                    <span className="min-w-0">
-                      <div className="action-title">
-                        {settings.language === 'ar' ? 'عيد البحث' : 'Retry Search'}
-                      </div>
-                      <div className="action-sub">
-                        {settings.language === 'ar' ? 'مهلة أطول' : 'Use a longer timeout'}
-                      </div>
-                    </span>
-                  </button>
-                </div>
-              )}
-
-              {/* ---- RETRY LLM (when a generation error occurs) ---- */}
-              {showRetry ? (
-                <Button
-                  type="button"
-                  variant="destructive"
-                  size="icon"
-                  className={cn('retry-llm-btn', 'send-glow')}
-                  onClick={onRetryLlm}
-                  disabled={!onRetryLlm}
-                  data-testid="chat-retry-llm"
-                >
-                  <RotateCcw className="w-4 h-4" />
-                </Button>
-              ) : isSearchTimeout ? (
-                /* ---- SEARCH‑TIMEOUT toggle button (opens the pop‑over) ---- */
-                <Button
-                  type="button"
-                  size="icon"
-                  className={cn('send-btn', 'send-glow')}
-                  onClick={() => {
-                    if (searchActionsOpen) closeActions();
-                    else setSearchActionsOpen(true);
-                  }}
-                  data-testid="search-action-toggle"
-                >
-                  <Send className="w-4 h-4" />
-                </Button>
-              ) : canConfirmStart && !inputValue.trim() ? (
-                /* ---- CONFIRM START (no text entered) ---- */
-                <Button
-                  type="button"
-                  size="icon"
-                  className={cn('confirm-start-btn', 'send-glow')}
-                  onClick={onConfirmStart}
-                  disabled={!onConfirmStart}
-                  data-testid="confirm-start"
-                >
-                  <Check className="w-4 h-4" />
-                </Button>
-              ) : (
-                /* ---- NORMAL SEND BUTTON ---- */
-                <Button
-                  type="submit"
-                  size="icon"
-                  disabled={!inputValue.trim()}
-                  className={cn('send-btn', inputValue.trim() ? '' : '')}
-                  data-testid="chat-send"
-                >
-                  <Send className="w-4 h-4" />
-                </Button>
-              )}
-            </div>
+            <Button
+              type={showRetry ? 'button' : 'submit'}
+              size="icon"
+              disabled={showRetry ? !onRetryLlm : !inputValue.trim()}
+              className={cn('send-btn', inputValue.trim() ? '' : '')}
+              data-testid={showRetry ? 'chat-retry-llm' : 'chat-send'}
+              onClick={showRetry ? onRetryLlm : undefined}
+            >
+              {showRetry ? <RefreshCcw className="w-4 h-4" /> : <Send className="w-4 h-4" />}
+            </Button>
           </form>
         </div>
       ) : (
@@ -1146,3 +1491,4 @@ export function ChatPanel({
     </div>
   );
 }
+
