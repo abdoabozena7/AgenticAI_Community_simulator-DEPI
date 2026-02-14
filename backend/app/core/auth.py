@@ -139,6 +139,8 @@ async def authenticate_user(username: str, password: str) -> Optional[int]:
         admin_password = os.getenv("ADMIN_PASSWORD") or os.getenv("BOOTSTRAP_ADMIN_PASSWORD") or "Admin@1234"
         default_username = os.getenv("DEFAULT_USER_USERNAME") or "user"
         default_password = os.getenv("DEFAULT_USER_PASSWORD") or "User@1234"
+        developer_username = os.getenv("DEVELOPER_USERNAME")
+        developer_password = os.getenv("DEVELOPER_PASSWORD")
 
         if username == admin_username and password == admin_password:
             await _ensure_bootstrap_user(
@@ -157,6 +159,16 @@ async def authenticate_user(username: str, password: str) -> Optional[int]:
                 role="user",
                 email=(os.getenv("DEFAULT_USER_EMAIL") or None),
                 credits_target=_parse_int(os.getenv("DEFAULT_USER_CREDITS"), default=0),
+                reset_password=True,
+                ensure_verified=True,
+            )
+        elif developer_username and developer_password and username == developer_username and password == developer_password:
+            await _ensure_bootstrap_user(
+                username=developer_username,
+                password=developer_password,
+                role="developer",
+                email=(os.getenv("DEVELOPER_EMAIL") or None),
+                credits_target=_parse_int(os.getenv("DEVELOPER_CREDITS"), default=0),
                 reset_password=True,
                 ensure_verified=True,
             )
@@ -194,6 +206,15 @@ async def authenticate_user(username: str, password: str) -> Optional[int]:
             await db_core.execute(
                 "UPDATE users SET password_hash=%s, role=%s WHERE id=%s",
                 (hash_password(default_password), "user", row[0]["id"]),
+            )
+            return int(row[0]["id"])
+    developer_username = os.getenv("DEVELOPER_USERNAME")
+    developer_password = os.getenv("DEVELOPER_PASSWORD")
+    if developer_username and developer_password and username == developer_username and password == developer_password:
+        if _env_truthy(os.getenv("DEVELOPER_RESET_PASSWORD")):
+            await db_core.execute(
+                "UPDATE users SET password_hash=%s, role=%s WHERE id=%s",
+                (hash_password(developer_password), "developer", row[0]["id"]),
             )
             return int(row[0]["id"])
     return None
@@ -826,6 +847,16 @@ ROLE_PERMISSIONS: Dict[str, set[str]] = {
         "search:use",
         "account:view",
     },
+    "developer": {
+        "simulation:run",
+        "simulation:view",
+        "research:run",
+        "court:run",
+        "llm:use",
+        "search:use",
+        "account:view",
+        "developer:lab",
+    },
     "admin": {
         "simulation:run",
         "simulation:view",
@@ -999,6 +1030,28 @@ async def ensure_default_user() -> Optional[Dict[str, Any]]:
         username=username,
         password=password,
         role="user",
+        email=email or None,
+        credits_target=credits_target,
+        reset_password=reset_password,
+        ensure_verified=True,
+    )
+
+
+async def ensure_developer_user() -> Optional[Dict[str, Any]]:
+    """Ensure a developer bootstrap account exists when env credentials are provided."""
+    username = os.getenv("DEVELOPER_USERNAME")
+    password = os.getenv("DEVELOPER_PASSWORD")
+    if not username or not password:
+        return None
+
+    email = os.getenv("DEVELOPER_EMAIL") or ""
+    credits_target = _parse_int(os.getenv("DEVELOPER_CREDITS"), default=0)
+    reset_password = _env_truthy(os.getenv("DEVELOPER_RESET_PASSWORD"))
+
+    return await _ensure_bootstrap_user(
+        username=username,
+        password=password,
+        role="developer",
         email=email or None,
         credits_target=credits_target,
         reset_password=reset_password,

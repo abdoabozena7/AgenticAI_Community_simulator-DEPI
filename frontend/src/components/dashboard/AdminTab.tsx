@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Shield, Users, Activity, CreditCard, TrendingUp } from 'lucide-react';
+import { Activity, CreditCard, Shield, TrendingUp, Users } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { apiService } from '@/services/api';
-import { useNavigate } from 'react-router-dom';
 
 export default function AdminTab() {
   const { language } = useLanguage();
@@ -18,10 +18,7 @@ export default function AdminTab() {
   useEffect(() => {
     const load = async () => {
       try {
-        const [usersRes, statsRes] = await Promise.all([
-          apiService.listUsers(),
-          apiService.getStats(),
-        ]);
+        const [usersRes, statsRes] = await Promise.all([apiService.listUsers(), apiService.getStats()]);
         setUsers(usersRes || []);
         setStats(statsRes || null);
       } catch (err: any) {
@@ -31,16 +28,13 @@ export default function AdminTab() {
     load();
   }, [language]);
 
-  const totalCredits = useMemo(
-    () => users.reduce((sum, u) => sum + (u?.credits || 0), 0),
-    [users]
-  );
+  const totalCredits = useMemo(() => users.reduce((sum, u) => sum + (u?.credits || 0), 0), [users]);
 
   const statCards = [
     { label: t('Total Users', 'إجمالي المستخدمين'), value: users.length.toString(), icon: Users, color: 'text-cyan-400' },
     { label: t('Total Simulations', 'إجمالي المحاكاة'), value: String(stats?.total_simulations ?? 0), icon: Activity, color: 'text-green-400' },
-    { label: t('Today Usage', 'الاستخدام اليوم'), value: String(stats?.used_today ?? 0), icon: TrendingUp, color: 'text-yellow-400' },
-    { label: t('Credits Issued', 'الرصيد الصادر'), value: String(totalCredits), icon: CreditCard, color: 'text-purple-400' },
+    { label: t('Today Usage', 'استخدام اليوم'), value: String(stats?.used_today ?? 0), icon: TrendingUp, color: 'text-yellow-400' },
+    { label: t('Credits Issued', 'إجمالي الرصيد'), value: String(totalCredits), icon: CreditCard, color: 'text-purple-400' },
   ];
 
   return (
@@ -50,7 +44,9 @@ export default function AdminTab() {
           <Shield className="w-6 h-6 text-cyan-400" />
           {t('Admin Dashboard', 'لوحة الإدارة')}
         </h1>
-        <p className="text-muted-foreground text-sm">{t('Manage users and credits quickly', 'إدارة المستخدمين والرصيد بسرعة')}</p>
+        <p className="text-muted-foreground text-sm">
+          {t('Manage users and credits quickly', 'إدارة المستخدمين والأرصدة بسرعة')}
+        </p>
       </div>
 
       {error && (
@@ -79,7 +75,10 @@ export default function AdminTab() {
         <div>
           <h2 className="font-bold">{t('Control Center', 'مركز التحكم')}</h2>
           <p className="text-sm text-muted-foreground">
-            {t('Open the full admin panel to manage users, credits, and promo codes.', 'افتح لوحة الإدارة الكاملة لإدارة المستخدمين والرصيد وأكواد الخصم.')}
+            {t(
+              'Open the full admin panel to manage users, credits, and promo codes.',
+              'افتح لوحة التحكم الكاملة لإدارة المستخدمين والأرصدة وأكواد الخصم.'
+            )}
           </p>
         </div>
         <Button onClick={() => navigate('/control-center')} className="liquid-glass-button">

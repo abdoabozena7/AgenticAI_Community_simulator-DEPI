@@ -102,6 +102,31 @@ export interface PendingClarification {
   required: true;
 }
 
+export interface PendingResearchReviewCandidateUrl {
+  id: string;
+  url: string;
+  domain?: string;
+  title?: string;
+  snippet?: string;
+  faviconUrl?: string | null;
+  score?: number;
+}
+
+export interface PendingResearchReview {
+  cycleId: string;
+  queryPlan: string[];
+  candidateUrls: PendingResearchReviewCandidateUrl[];
+  qualitySnapshot?: {
+    usable_sources: number;
+    domains: number;
+    extraction_success_rate: number;
+    max_content_chars?: number;
+  } | null;
+  gapSummary?: string | null;
+  suggestedQueries?: string[];
+  required: boolean;
+}
+
 export interface UserInput {
   idea: string;
   category: string;

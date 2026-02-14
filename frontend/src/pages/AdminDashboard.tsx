@@ -401,6 +401,7 @@ export default function AdminDashboard() {
                   className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm"
                 >
                   <option value="admin">admin</option>
+                  <option value="developer">developer</option>
                   <option value="user">user</option>
                 </select>
                 <button

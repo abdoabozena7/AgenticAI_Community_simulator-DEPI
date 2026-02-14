@@ -1,4 +1,4 @@
-"""
+﻿"""
 REST API routes for the social simulation backend.
 
 This module defines endpoints to start a simulation and retrieve final
@@ -16,6 +16,7 @@ import json
 from datetime import datetime
 import uuid
 from typing import Any, Dict, Optional, List
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, status, Header
 
@@ -25,6 +26,7 @@ from ..simulation.engine import SimulationEngine, ClarificationNeeded
 from ..core.ollama_client import generate_ollama
 from ..core.context_store import save_context
 from ..core.web_search import search_web
+from ..core.page_fetch import fetch_page
 from ..core import db as db_core
 from ..api.websocket import manager
 from pathlib import Path
@@ -42,6 +44,7 @@ _PAUSE_STATUS_REASONS = {
     "paused_manual",
     "interrupted",
     "paused_search_failed",
+    "paused_research_review",
     "paused_credits_exhausted",
     "paused_clarification_needed",
 }
@@ -101,8 +104,12 @@ def _init_state(simulation_id: str, user_id: Optional[int] = None) -> None:
         "policy_mode": "normal",
         "policy_reason": None,
         "search_quality": None,
+        "neutral_cap_pct": 0.30,
+        "neutral_enforcement": "clarification_before_complete",
+        "clarification_count": 0,
         "pending_clarification": None,
         "can_answer_clarification": False,
+        "pending_research_review": None,
     }
 
 
@@ -134,8 +141,12 @@ def _store_event(simulation_id: str, event_type: str, data: Dict[str, Any]) -> N
             "policy_mode": "normal",
             "policy_reason": None,
             "search_quality": None,
+            "neutral_cap_pct": 0.30,
+            "neutral_enforcement": "clarification_before_complete",
+            "clarification_count": 0,
             "pending_clarification": None,
             "can_answer_clarification": False,
+            "pending_research_review": None,
         },
     )
     incoming_event_seq = data.get("event_seq")
@@ -168,7 +179,42 @@ def _store_event(simulation_id: str, event_type: str, data: Dict[str, Any]) -> N
         research = state.setdefault("research_sources", [])
         if isinstance(research, list):
             research.append(data)
+        action = str(data.get("action") or "").strip().lower()
+        if action == "review_required":
+            pending = data.get("meta_json") if isinstance(data.get("meta_json"), dict) else {}
+            state["pending_research_review"] = pending if isinstance(pending, dict) else None
+            state["status_reason"] = "paused_research_review"
+            state["can_resume"] = False
+            state["resume_reason"] = str(data.get("error") or data.get("snippet") or "").strip() or None
+        elif action in {
+            "research_started",
+            "query_planned",
+            "search_results_ready",
+            "fetch_started",
+            "fetch_done",
+            "summary_ready",
+            "evidence_cards_ready",
+            "gaps_ready",
+            "research_done",
+            # Backward compatibility with older action names.
+            "query_started",
+            "query_result",
+            "url_opened",
+            "url_extracted",
+            "url_failed",
+            "search_completed",
+        }:
+            state["status_reason"] = "running"
+            state["pending_research_review"] = None
+            if action == "research_done":
+                meta = data.get("meta_json") if isinstance(data.get("meta_json"), dict) else {}
+                quality = meta.get("quality_snapshot") if isinstance(meta.get("quality_snapshot"), dict) else None
+                if isinstance(quality, dict):
+                    state["search_quality"] = quality
+                state["can_resume"] = False
+                state["resume_reason"] = None
     elif event_type == "clarification_request":
+        state["clarification_count"] = int(state.get("clarification_count") or 0) + 1
         state["pending_clarification"] = {
             "question_id": data.get("question_id"),
             "question": data.get("question"),
@@ -263,8 +309,12 @@ def _apply_snapshot_to_state(simulation_id: str, snapshot: Dict[str, Any], user_
         "policy_mode": str(snapshot.get("policy_mode") or "normal"),
         "policy_reason": snapshot.get("policy_reason"),
         "search_quality": snapshot.get("search_quality") if isinstance(snapshot.get("search_quality"), dict) else None,
+        "neutral_cap_pct": float(snapshot.get("neutral_cap_pct") or 0.30),
+        "neutral_enforcement": str(snapshot.get("neutral_enforcement") or "clarification_before_complete"),
+        "clarification_count": int(snapshot.get("clarification_count") or 0),
         "pending_clarification": snapshot.get("pending_clarification") if isinstance(snapshot.get("pending_clarification"), dict) else None,
         "can_answer_clarification": bool(snapshot.get("can_answer_clarification")),
+        "pending_research_review": snapshot.get("pending_research_review") if isinstance(snapshot.get("pending_research_review"), dict) else None,
     }
     _simulation_state[simulation_id] = state
     return state
@@ -821,6 +871,726 @@ async def _run_search_bootstrap(
     return {"ok": True, "context": context, "status_reason": "running"}
 
 
+def _candidate_url_id(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return uuid.uuid4().hex[:8]
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()[:8]
+
+
+def _prepare_candidate_urls(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen: set[str] = set()
+    candidates: List[Dict[str, Any]] = []
+    for item in results or []:
+        if not isinstance(item, dict):
+            continue
+        raw_url = str(item.get("url") or "").strip()
+        if not raw_url or raw_url in seen:
+            continue
+        seen.add(raw_url)
+        domain = str(item.get("domain") or "").strip()
+        if not domain:
+            try:
+                domain = (urlparse(raw_url).hostname or "").strip()
+            except Exception:
+                domain = ""
+        score_raw = item.get("score")
+        try:
+            score = float(score_raw) if score_raw is not None else 0.0
+        except Exception:
+            score = 0.0
+        title = str(item.get("title") or "").strip()
+        snippet = str(item.get("snippet") or "").strip()
+        # Lightweight ranking bias: keep informative titles/snippets above thin results.
+        score += min(len(title) / 200.0, 0.2)
+        score += min(len(snippet) / 600.0, 0.2)
+        candidates.append(
+            {
+                "id": _candidate_url_id(raw_url),
+                "url": raw_url,
+                "domain": domain,
+                "title": title or raw_url,
+                "snippet": snippet[:360],
+                "favicon_url": item.get("favicon_url") or _build_favicon_url(domain, raw_url),
+                "score": round(score, 4),
+            }
+        )
+    candidates.sort(key=lambda entry: (float(entry.get("score") or 0.0), len(str(entry.get("snippet") or ""))), reverse=True)
+    return candidates[:10]
+
+
+def _pick_diverse_urls(candidates: List[Dict[str, Any]], limit: int = 4) -> List[Dict[str, Any]]:
+    picked: List[Dict[str, Any]] = []
+    used_domains: set[str] = set()
+    for entry in candidates:
+        domain = str(entry.get("domain") or "").lower()
+        if domain and domain in used_domains:
+            continue
+        picked.append(entry)
+        if domain:
+            used_domains.add(domain)
+        if len(picked) >= limit:
+            return picked
+    for entry in candidates:
+        if len(picked) >= limit:
+            break
+        if entry in picked:
+            continue
+        picked.append(entry)
+    return picked
+
+
+def _compute_extraction_quality(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    attempted = len(rows)
+    usable = 0
+    domains: set[str] = set()
+    max_chars = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "").lower()
+        chars = int(row.get("content_chars") or 0)
+        max_chars = max(max_chars, chars)
+        if status == "completed" and chars >= 80:
+            usable += 1
+            domain = str(row.get("domain") or "").strip().lower()
+            if domain:
+                domains.add(domain)
+    return {
+        "usable_sources": usable,
+        "domains": len(domains),
+        "extraction_success_rate": (usable / attempted) if attempted > 0 else 0.0,
+        "max_content_chars": max_chars,
+    }
+
+
+def _build_gap_summary(
+    quality: Dict[str, Any],
+    *,
+    min_usable_sources: int,
+    min_domains: int,
+    min_content_chars: int,
+    language: str,
+) -> str:
+    usable = int(quality.get("usable_sources") or 0)
+    domains = int(quality.get("domains") or 0)
+    max_chars = int(quality.get("max_content_chars") or 0)
+    extraction = float(quality.get("extraction_success_rate") or 0.0)
+    if str(language or "en").lower().startswith("ar"):
+        return (
+            "جودة البحث أقل من الحد المطلوب. "
+            f"المصادر الصالحة: {usable}/{min_usable_sources}، "
+            f"النطاقات المختلفة: {domains}/{min_domains}، "
+            f"أكبر محتوى مستخرج: {max_chars}/{min_content_chars} حرف، "
+            f"ونسبة نجاح الاستخراج: {int(round(extraction * 100))}%."
+        )
+    return (
+        "Search quality is below the required threshold. "
+        f"usable_sources={usable}/{min_usable_sources}, "
+        f"domains={domains}/{min_domains}, "
+        f"max_content_chars={max_chars}/{min_content_chars}, "
+        f"extraction_success_rate={extraction:.2f}"
+    )
+
+
+def _extractive_summary_from_rows(rows: List[Dict[str, Any]], fallback: str) -> str:
+    snippets: List[str] = []
+    for row in rows:
+        if str(row.get("status") or "").lower() != "completed":
+            continue
+        title = str(row.get("title") or "").strip()
+        preview = str(row.get("snippet") or "").strip()
+        if not preview:
+            continue
+        if title:
+            snippets.append(f"{title}: {preview}")
+        else:
+            snippets.append(preview)
+        if len(snippets) >= 4:
+            break
+    combined = " | ".join(snippets).strip()
+    if combined:
+        return combined[:1800]
+    return str(fallback or "").strip()[:1800]
+
+
+def _build_evidence_cards_from_rows(rows: List[Dict[str, Any]], fallback_cards: List[str]) -> List[str]:
+    cards: List[str] = []
+    for row in rows:
+        if str(row.get("status") or "").lower() != "completed":
+            continue
+        preview = str(row.get("snippet") or "").strip()
+        if not preview:
+            continue
+        cards.append(preview[:180])
+        if len(cards) >= 4:
+            break
+    for card in fallback_cards or []:
+        text = str(card or "").strip()
+        if not text:
+            continue
+        cards.append(text[:180])
+        if len(cards) >= 6:
+            break
+    dedup: List[str] = []
+    seen: set[str] = set()
+    for card in cards:
+        norm = " ".join(card.split()).lower()
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        dedup.append(card)
+    return dedup[:6]
+
+
+async def _persist_research_pause_checkpoint(
+    simulation_id: str,
+    *,
+    checkpoint: Dict[str, Any],
+    meta: Dict[str, Any],
+    reason: str,
+    status_reason: str,
+) -> None:
+    meta["status"] = "paused"
+    meta["status_reason"] = status_reason
+    meta["last_error"] = reason
+    checkpoint["meta"] = meta
+    await db_core.update_simulation(simulation_id=simulation_id, status="paused")
+    await db_core.upsert_simulation_checkpoint(
+        simulation_id=simulation_id,
+        checkpoint=checkpoint,
+        status="paused",
+        last_error=reason,
+        status_reason=status_reason,
+        current_phase_key="search_bootstrap",
+        phase_progress_pct=float(meta.get("phase_progress_pct") or 100.0),
+        event_seq=int(meta.get("event_seq") or 0),
+    )
+
+
+async def _run_research_loop(
+    simulation_id: str,
+    user_context: Dict[str, Any],
+    *,
+    resume_checkpoint: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    context = dict(user_context or {})
+    existing_summary = str(context.get("research_summary") or "").strip()
+    existing_structured = context.get("research_structured") if isinstance(context.get("research_structured"), dict) else None
+    existing_sources = context.get("research_sources") if isinstance(context.get("research_sources"), list) else []
+    if existing_summary and (existing_structured or existing_sources):
+        await _emit_live_event(
+            simulation_id,
+            "research_update",
+            {
+                "action": "research_done",
+                "status": "completed",
+                "cycle_id": "existing",
+                "snippet": existing_summary[:280],
+                "meta_json": {
+                    "quality_snapshot": context.get("search_quality") if isinstance(context.get("search_quality"), dict) else {},
+                },
+            },
+        )
+        return {"ok": True, "context": context, "status_reason": "running"}
+
+    checkpoint_row = await db_core.fetch_simulation_checkpoint(simulation_id)
+    checkpoint = resume_checkpoint if isinstance(resume_checkpoint, dict) else ((checkpoint_row or {}).get("checkpoint") or {})
+    meta = checkpoint.get("meta") if isinstance(checkpoint.get("meta"), dict) else {}
+
+    research_loop_state = meta.get("research_loop_state") if isinstance(meta.get("research_loop_state"), dict) else {}
+    pending_review = meta.get("pending_research_review") if isinstance(meta.get("pending_research_review"), dict) else None
+    cycle_index = int(meta.get("research_cycle_index") or 0)
+    max_cycles = max(1, min(6, int(os.getenv("RESEARCH_MAX_CYCLES", "4") or 4)))
+
+    configured_min_usable_sources = max(1, int(os.getenv("SEARCH_MIN_USABLE_SOURCES", "2") or 2))
+    configured_min_domains = max(1, int(os.getenv("SEARCH_MIN_DOMAINS", "2") or 2))
+    configured_min_content_chars = max(40, int(os.getenv("SEARCH_MIN_CONTENT_CHARS", "80") or 80))
+    balanced_gate_enabled = str(os.getenv("SEARCH_GATE_BALANCED", "1")).strip().lower() in {"1", "true", "yes", "on"}
+    min_usable_sources = min(configured_min_usable_sources, 2) if balanced_gate_enabled else configured_min_usable_sources
+    min_domains = min(configured_min_domains, 2) if balanced_gate_enabled else configured_min_domains
+    min_content_chars = min(configured_min_content_chars, 80) if balanced_gate_enabled else configured_min_content_chars
+
+    language = str(context.get("language") or "en").strip().lower() or "en"
+    await _emit_live_event(
+        simulation_id,
+        "phase_update",
+        {
+            "phase_key": "search_bootstrap",
+            "phase_label": "Search Bootstrap",
+            "progress_pct": 2.0,
+            "status": "running",
+        },
+    )
+    await _emit_live_event(
+        simulation_id,
+        "research_update",
+        {
+            "action": "research_started",
+            "status": "running",
+            "cycle_id": None,
+            "snippet": str(context.get("idea") or "").strip()[:280],
+        },
+    )
+
+    while cycle_index < max_cycles:
+        cycle_index += 1
+        cycle_id = f"cycle_{cycle_index}_{uuid.uuid4().hex[:6]}"
+        query_plan = _build_search_query_variants(context)
+        if not query_plan:
+            break
+
+        refinement = str(research_loop_state.get("query_refinement") or "").strip()
+        mode = str(research_loop_state.get("mode") or "").strip().lower()
+        if refinement:
+            query_plan = [refinement, *[q for q in query_plan if q != refinement]]
+
+        await _emit_live_event(
+            simulation_id,
+            "research_update",
+            {
+                "action": "query_planned",
+                "status": "running",
+                "cycle_id": cycle_id,
+                "snippet": query_plan[0][:280],
+                "meta_json": {
+                    "query_plan": query_plan[:5],
+                    "query_refinement": refinement or None,
+                },
+            },
+        )
+
+        candidate_urls: List[Dict[str, Any]] = []
+        structured: Dict[str, Any] = {}
+        base_answer = ""
+        search_quality: Dict[str, Any] = {}
+        if mode == "scrape_selected" and pending_review and str(pending_review.get("cycle_id") or "").strip():
+            candidate_urls = pending_review.get("candidate_urls") if isinstance(pending_review.get("candidate_urls"), list) else []
+            cycle_id = str(pending_review.get("cycle_id") or cycle_id)
+            query_plan = pending_review.get("query_plan") if isinstance(pending_review.get("query_plan"), list) else query_plan
+        else:
+            search_result: Dict[str, Any] = {}
+            for query in query_plan[:4]:
+                try:
+                    search_result = await search_web(query=query, max_results=8, language=language, strict_web_only=True)
+                except Exception:
+                    continue
+                candidate_urls = _prepare_candidate_urls(search_result.get("results") or [])
+                if candidate_urls:
+                    break
+            structured = search_result.get("structured") if isinstance(search_result.get("structured"), dict) else {}
+            base_answer = str(search_result.get("answer") or "").strip()
+            search_quality = search_result.get("quality") if isinstance(search_result.get("quality"), dict) else {}
+
+        await _emit_live_event(
+            simulation_id,
+            "research_update",
+            {
+                "action": "search_results_ready",
+                "status": "completed" if candidate_urls else "failed",
+                "cycle_id": cycle_id,
+                "snippet": query_plan[0][:280],
+                "meta_json": {
+                    "query_plan": query_plan[:5],
+                    "candidate_urls": candidate_urls,
+                    "quality_snapshot": {
+                        "usable_sources": int(search_quality.get("usable_sources") or 0),
+                        "domains": int(search_quality.get("domains") or 0),
+                        "extraction_success_rate": float(search_quality.get("extraction_success_rate") or 0.0),
+                        "max_content_chars": max([len(str(item.get("snippet") or "")) for item in candidate_urls] + [0]),
+                    },
+                },
+            },
+        )
+
+        if not candidate_urls:
+            gap_summary = (
+                "No live candidate URLs were found. Try refining the query."
+                if language != "ar"
+                else "لم يتم العثور على روابط بحث مباشرة كافية. حاول تعديل الاستعلام."
+            )
+            suggested_queries = [q for q in query_plan[:3] if q]
+            pending_payload = {
+                "cycle_id": cycle_id,
+                "query_plan": query_plan[:5],
+                "candidate_urls": [],
+                "quality_snapshot": {
+                    "usable_sources": 0,
+                    "domains": 0,
+                    "extraction_success_rate": 0.0,
+                    "max_content_chars": 0,
+                },
+                "gap_summary": gap_summary,
+                "suggested_queries": suggested_queries,
+                "required": True,
+            }
+            review_event = await _emit_live_event(
+                simulation_id,
+                "research_update",
+                {
+                    "action": "review_required",
+                    "status": "paused",
+                    "cycle_id": cycle_id,
+                    "error": gap_summary,
+                    "snippet": gap_summary,
+                    "meta_json": pending_payload,
+                },
+            )
+            meta["pending_research_review"] = pending_payload
+            meta["research_cycle_index"] = cycle_index
+            meta["last_research_quality"] = pending_payload["quality_snapshot"]
+            meta["last_research_gaps"] = [gap_summary]
+            meta["research_loop_state"] = {}
+            meta["event_seq"] = max(int(meta.get("event_seq") or 0), int(review_event.get("event_seq") or 0))
+            meta["phase_progress_pct"] = 100.0
+            checkpoint["meta"] = meta
+            await _persist_research_pause_checkpoint(
+                simulation_id,
+                checkpoint=checkpoint,
+                meta=meta,
+                reason=gap_summary,
+                status_reason="paused_research_review",
+            )
+            return {"ok": False, "status_reason": "paused_research_review", "reason": gap_summary}
+
+        selected_url_ids = research_loop_state.get("selected_url_ids") if isinstance(research_loop_state.get("selected_url_ids"), list) else []
+        added_urls = research_loop_state.get("added_urls") if isinstance(research_loop_state.get("added_urls"), list) else []
+        selected: List[Dict[str, Any]]
+        if mode == "scrape_selected":
+            selected_lookup = {str(item.get("id") or "").strip() for item in selected_url_ids if str(item or "").strip()}
+            selected = [item for item in candidate_urls if str(item.get("id") or "").strip() in selected_lookup]
+            for raw_url in added_urls:
+                url = str(raw_url or "").strip()
+                if not url:
+                    continue
+                domain = ""
+                try:
+                    domain = (urlparse(url).hostname or "").strip()
+                except Exception:
+                    domain = ""
+                selected.append(
+                    {
+                        "id": _candidate_url_id(url),
+                        "url": url,
+                        "domain": domain,
+                        "title": url,
+                        "snippet": "",
+                        "favicon_url": _build_favicon_url(domain, url),
+                        "score": 0.0,
+                    }
+                )
+        else:
+            selected = _pick_diverse_urls(candidate_urls, limit=4)
+
+        if not selected:
+            selected = _pick_diverse_urls(candidate_urls, limit=2)
+
+        extraction_rows: List[Dict[str, Any]] = []
+        for index, item in enumerate(selected, start=1):
+            url = str(item.get("url") or "").strip()
+            domain = str(item.get("domain") or "").strip()
+            title = str(item.get("title") or "").strip()
+            await _emit_live_event(
+                simulation_id,
+                "research_update",
+                {
+                    "action": "fetch_started",
+                    "status": "running",
+                    "cycle_id": cycle_id,
+                    "url": url,
+                    "domain": domain,
+                    "favicon_url": item.get("favicon_url"),
+                    "title": title,
+                    "relevance_score": float(item.get("score") or 0.0),
+                    "progress_pct": min(95.0, 20.0 + (index * 60.0 / max(1, len(selected)))),
+                },
+            )
+            fetched = await fetch_page(url)
+            if fetched.get("ok"):
+                preview = str(fetched.get("preview") or "").strip()
+                event = await _emit_live_event(
+                    simulation_id,
+                    "research_update",
+                    {
+                        "action": "fetch_done",
+                        "status": "completed",
+                        "cycle_id": cycle_id,
+                        "url": url,
+                        "domain": domain,
+                        "favicon_url": item.get("favicon_url"),
+                        "title": str(fetched.get("title") or title),
+                        "http_status": int(fetched.get("http_status") or 200),
+                        "content_chars": int(fetched.get("content_chars") or 0),
+                        "relevance_score": float(item.get("score") or 0.0),
+                        "snippet": preview[:280],
+                    },
+                )
+                extraction_rows.append(
+                    {
+                        "status": "completed",
+                        "cycle_id": cycle_id,
+                        "url": url,
+                        "domain": domain,
+                        "title": str(fetched.get("title") or title),
+                        "content_chars": int(fetched.get("content_chars") or 0),
+                        "snippet": preview,
+                        "event_seq": event.get("event_seq"),
+                    }
+                )
+                await _emit_live_event(
+                    simulation_id,
+                    "research_update",
+                    {
+                        "action": "summary_ready",
+                        "status": "completed",
+                        "cycle_id": cycle_id,
+                        "url": url,
+                        "domain": domain,
+                        "title": str(fetched.get("title") or title),
+                        "snippet": preview[:280],
+                    },
+                )
+            else:
+                error_text = str(fetched.get("error") or "fetch_failed")
+                await _emit_live_event(
+                    simulation_id,
+                    "research_update",
+                    {
+                        "action": "fetch_done",
+                        "status": "failed",
+                        "cycle_id": cycle_id,
+                        "url": url,
+                        "domain": domain,
+                        "favicon_url": item.get("favicon_url"),
+                        "title": title,
+                        "error": error_text,
+                        "snippet": None,
+                    },
+                )
+                extraction_rows.append(
+                    {
+                        "status": "failed",
+                        "cycle_id": cycle_id,
+                        "url": url,
+                        "domain": domain,
+                        "title": title,
+                        "content_chars": 0,
+                        "snippet": "",
+                        "error": error_text,
+                    }
+                )
+
+        quality_snapshot = _compute_extraction_quality(extraction_rows)
+        fallback_cards = structured.get("evidence_cards") if isinstance(structured.get("evidence_cards"), list) else []
+        evidence_cards = _build_evidence_cards_from_rows(extraction_rows, fallback_cards)
+        await _emit_live_event(
+            simulation_id,
+            "research_update",
+            {
+                "action": "evidence_cards_ready",
+                "status": "completed",
+                "cycle_id": cycle_id,
+                "snippet": (evidence_cards[0] if evidence_cards else None),
+                "meta_json": {
+                    "evidence_cards": evidence_cards,
+                },
+            },
+        )
+
+        quality_ok = (
+            int(quality_snapshot.get("usable_sources") or 0) >= min_usable_sources
+            and int(quality_snapshot.get("domains") or 0) >= min_domains
+            and int(quality_snapshot.get("max_content_chars") or 0) >= min_content_chars
+            and float(quality_snapshot.get("extraction_success_rate") or 0.0) > 0.0
+        )
+        gap_summary = _build_gap_summary(
+            quality_snapshot,
+            min_usable_sources=min_usable_sources,
+            min_domains=min_domains,
+            min_content_chars=min_content_chars,
+            language=language,
+        )
+        suggested_queries = query_plan[:3]
+        await _emit_live_event(
+            simulation_id,
+            "research_update",
+            {
+                "action": "gaps_ready",
+                "status": "completed",
+                "cycle_id": cycle_id,
+                "snippet": gap_summary[:280],
+                "meta_json": {
+                    "gap_summary": gap_summary,
+                    "suggested_queries": suggested_queries,
+                    "quality_snapshot": quality_snapshot,
+                },
+            },
+        )
+
+        if not quality_ok:
+            pending_payload = {
+                "cycle_id": cycle_id,
+                "query_plan": query_plan[:5],
+                "candidate_urls": candidate_urls,
+                "quality_snapshot": quality_snapshot,
+                "gap_summary": gap_summary,
+                "suggested_queries": suggested_queries,
+                "required": True,
+            }
+            review_event = await _emit_live_event(
+                simulation_id,
+                "research_update",
+                {
+                    "action": "review_required",
+                    "status": "paused",
+                    "cycle_id": cycle_id,
+                    "error": gap_summary,
+                    "snippet": gap_summary[:280],
+                    "meta_json": pending_payload,
+                },
+            )
+            meta["pending_research_review"] = pending_payload
+            meta["research_cycle_index"] = cycle_index
+            meta["last_research_quality"] = quality_snapshot
+            meta["last_research_gaps"] = [gap_summary]
+            meta["research_loop_state"] = {}
+            meta["event_seq"] = max(int(meta.get("event_seq") or 0), int(review_event.get("event_seq") or 0))
+            meta["phase_progress_pct"] = 100.0
+            checkpoint["meta"] = meta
+            await _persist_research_pause_checkpoint(
+                simulation_id,
+                checkpoint=checkpoint,
+                meta=meta,
+                reason=gap_summary,
+                status_reason="paused_research_review",
+            )
+            return {"ok": False, "status_reason": "paused_research_review", "reason": gap_summary}
+
+        summary_text = _extractive_summary_from_rows(extraction_rows, structured.get("summary") if isinstance(structured, dict) else base_answer)
+        sources = []
+        for row in extraction_rows:
+            if str(row.get("status") or "").lower() != "completed":
+                continue
+            sources.append(
+                {
+                    "title": row.get("title"),
+                    "url": row.get("url"),
+                    "domain": row.get("domain"),
+                    "snippet": str(row.get("snippet") or "")[:280],
+                    "score": None,
+                    "reason": "Fetched and extracted",
+                }
+            )
+        context["research_summary"] = summary_text
+        context["research_sources"] = sources
+        structured_payload = structured if isinstance(structured, dict) else {}
+        structured_payload = {**structured_payload}
+        structured_payload["summary"] = structured_payload.get("summary") or summary_text
+        structured_payload["evidence_cards"] = evidence_cards
+        structured_payload["gaps"] = structured_payload.get("gaps") if isinstance(structured_payload.get("gaps"), list) else []
+        context["research_structured"] = structured_payload
+        context["search_quality"] = {
+            "usable_sources": int(quality_snapshot.get("usable_sources") or 0),
+            "domains": int(quality_snapshot.get("domains") or 0),
+            "extraction_success_rate": float(quality_snapshot.get("extraction_success_rate") or 0.0),
+        }
+        context["evidence_cards"] = evidence_cards
+
+        done_event = await _emit_live_event(
+            simulation_id,
+            "research_update",
+            {
+                "action": "research_done",
+                "status": "completed",
+                "cycle_id": cycle_id,
+                "snippet": summary_text[:280],
+                "meta_json": {
+                    "quality_snapshot": quality_snapshot,
+                    "cycle_id": cycle_id,
+                    "evidence_cards": evidence_cards,
+                },
+            },
+        )
+        await _emit_live_event(
+            simulation_id,
+            "phase_update",
+            {
+                "phase_key": "search_bootstrap",
+                "phase_label": "Search Bootstrap",
+                "progress_pct": 100.0,
+                "status": "completed",
+            },
+        )
+        meta["pending_research_review"] = None
+        meta["research_cycle_index"] = cycle_index
+        meta["last_research_quality"] = quality_snapshot
+        meta["last_research_gaps"] = []
+        meta["research_loop_state"] = {}
+        meta["status"] = "running"
+        meta["status_reason"] = "running"
+        meta["last_error"] = None
+        meta["search_quality"] = context.get("search_quality")
+        meta["current_phase_key"] = "evidence_map"
+        meta["phase_progress_pct"] = 0.0
+        meta["event_seq"] = max(int(meta.get("event_seq") or 0), int(done_event.get("event_seq") or 0))
+        checkpoint["meta"] = meta
+        await db_core.upsert_simulation_checkpoint(
+            simulation_id=simulation_id,
+            checkpoint=checkpoint,
+            status="running",
+            last_error=None,
+            status_reason="running",
+            current_phase_key="evidence_map",
+            phase_progress_pct=0.0,
+            event_seq=int(meta.get("event_seq") or 0),
+        )
+        return {"ok": True, "context": context, "status_reason": "running"}
+
+    message = (
+        "Search loop reached maximum cycles without enough live evidence."
+        if language != "ar"
+        else "انتهت دورات البحث دون الوصول إلى أدلة مباشرة كافية."
+    )
+    failed_event = await _emit_live_event(
+        simulation_id,
+        "research_update",
+        {
+            "action": "research_failed",
+            "status": "failed",
+            "cycle_id": None,
+            "error": message,
+            "snippet": message,
+        },
+    )
+    await _emit_live_event(
+        simulation_id,
+        "phase_update",
+        {
+            "phase_key": "search_bootstrap",
+            "phase_label": "Search Bootstrap",
+            "progress_pct": 100.0,
+            "status": "failed",
+            "reason": message,
+        },
+    )
+    meta["pending_research_review"] = None
+    meta["research_loop_state"] = {}
+    meta["research_cycle_index"] = cycle_index
+    meta["status"] = "paused"
+    meta["status_reason"] = "paused_search_failed"
+    meta["last_error"] = message
+    meta["event_seq"] = max(int(meta.get("event_seq") or 0), int(failed_event.get("event_seq") or 0))
+    checkpoint["meta"] = meta
+    await _persist_research_pause_checkpoint(
+        simulation_id,
+        checkpoint=checkpoint,
+        meta=meta,
+        reason=message,
+        status_reason="paused_search_failed",
+    )
+    return {"ok": False, "status_reason": "paused_search_failed", "reason": message}
+
+
 def _analyze_rejectors(reasoning: list[Dict[str, Any]], language: str) -> str:
     reject_messages = [step.get("message", "") for step in reasoning if step.get("opinion") == "reject"]
     if not reject_messages:
@@ -1012,13 +1782,45 @@ async def _start_background_simulation(
                 raise _CreditsExhaustedPause(_billing_exhausted_message(missing), missing)
 
     async def run_and_store() -> None:
+        nonlocal user_context
         try:
             checkpoint_row = await db_core.fetch_simulation_checkpoint(simulation_id)
             checkpoint = (checkpoint_row or {}).get("checkpoint") or {}
             checkpoint_meta = checkpoint.get("meta") if isinstance(checkpoint.get("meta"), dict) else {}
+            current_phase_key = str(
+                (checkpoint_row or {}).get("current_phase_key")
+                or checkpoint_meta.get("current_phase_key")
+                or ""
+            ).strip().lower()
+            # Research loop is mandatory before reasoning unless we are resuming mid-reasoning.
+            if current_phase_key in {"", "search_bootstrap"} or not (
+                str(user_context.get("research_summary") or "").strip()
+                and isinstance(user_context.get("research_structured"), dict)
+            ):
+                research_result = await _run_research_loop(
+                    simulation_id=simulation_id,
+                    user_context=user_context,
+                    resume_checkpoint=resume_checkpoint or checkpoint,
+                )
+                if not research_result.get("ok"):
+                    reason = str(research_result.get("reason") or "Research loop paused")
+                    status_reason = str(research_result.get("status_reason") or "paused_search_failed")
+                    state = _simulation_state.setdefault(simulation_id, {})
+                    state["error"] = None
+                    state["can_resume"] = status_reason not in {"paused_research_review"}
+                    state["resume_reason"] = reason
+                    state["status_reason"] = status_reason
+                    return
+                user_context = research_result.get("context") if isinstance(research_result.get("context"), dict) else user_context
+                try:
+                    await db_core.update_simulation_context(simulation_id, user_context)
+                    save_context(simulation_id, user_context)
+                except Exception:
+                    pass
+
             if not bool(checkpoint_meta.get("clarification_notice_sent")):
                 notice_text = (
-                    "تنبيه: أثناء التفكير، ممكن الوكلاء يطلبوا توضيح منك. خلي جهازك قريب."
+                    "طھظ†ط¨ظٹظ‡: ط£ط«ظ†ط§ط، ط§ظ„طھظپظƒظٹط±طŒ ظ…ظ…ظƒظ† ط§ظ„ظˆظƒظ„ط§ط، ظٹط·ظ„ط¨ظˆط§ طھظˆط¶ظٹط­ ظ…ظ†ظƒ. ط®ظ„ظٹ ط¬ظ‡ط§ط²ظƒ ظ‚ط±ظٹط¨."
                     if str(user_context.get("language") or "en").lower() == "ar"
                     else "Heads-up: during reasoning, agents may pause and ask for clarification. Stay near your device."
                 )
@@ -1129,7 +1931,7 @@ async def _start_background_simulation(
                 "question": question_text or (
                     "Please clarify the key ambiguity before we continue."
                     if str(user_context.get("language") or "en").lower() != "ar"
-                    else "ظ…ظ† ظپط¶ظ„ظƒ ظˆط¶ظ‘ط­ ط§ظ„ظ†ظ‚ط·ط© ط§ظ„ط£ط³ط§ط³ظٹط© ظ‚ط¨ظ„ ظ…ط§ ظ†ظƒظ…ظ„."
+                    else "نحتاج توضيح نقطة غامضة أساسية قبل المتابعة."
                 ),
                 "options": options,
                 "reason_tag": reason_tag,
@@ -1145,6 +1947,7 @@ async def _start_background_simulation(
             state["can_resume"] = False
             state["resume_reason"] = reason_summary
             state["status_reason"] = "paused_clarification_needed"
+            state["clarification_count"] = int(state.get("clarification_count") or 0) + 1
             state["pending_clarification"] = {
                 "question_id": question_id,
                 "question": clarification_data["question"],
@@ -1169,6 +1972,7 @@ async def _start_background_simulation(
                 }
             )
             meta["clarification_history"] = clarification_history[-40:]
+            meta["clarification_count"] = int(meta.get("clarification_count") or 0) + 1
             meta["pending_clarification"] = state["pending_clarification"]
             meta["last_clarification_reason_tag"] = reason_tag
             meta["last_clarification_step"] = int(meta.get("total_reasoning_steps") or 0)
@@ -1332,6 +2136,16 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
             pass
     # Generate a unique ID for this simulation
     simulation_id = str(uuid.uuid4())
+    run_mode = str(user_context.get("run_mode") or "normal").strip().lower() or "normal"
+    try:
+        neutral_cap_pct = float(user_context.get("neutral_cap_pct") if user_context.get("neutral_cap_pct") is not None else 0.30)
+    except Exception:
+        neutral_cap_pct = 0.30
+    neutral_cap_pct = max(0.05, min(0.70, neutral_cap_pct))
+    neutral_enforcement = str(user_context.get("neutral_enforcement") or "clarification_before_complete").strip() or "clarification_before_complete"
+    user_context["run_mode"] = run_mode
+    user_context["neutral_cap_pct"] = neutral_cap_pct
+    user_context["neutral_enforcement"] = neutral_enforcement
     _init_state(simulation_id, user_id=user_id)
     _simulation_state[simulation_id]["current_phase_key"] = "search_bootstrap"
     _simulation_state[simulation_id]["phase_progress_pct"] = 0.0
@@ -1339,6 +2153,9 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
     _simulation_state[simulation_id]["policy_mode"] = "normal"
     _simulation_state[simulation_id]["policy_reason"] = None
     _simulation_state[simulation_id]["search_quality"] = None
+    _simulation_state[simulation_id]["neutral_cap_pct"] = neutral_cap_pct
+    _simulation_state[simulation_id]["neutral_enforcement"] = neutral_enforcement
+    _simulation_state[simulation_id]["clarification_count"] = 0
     try:
         save_context(simulation_id, user_context)
     except Exception:
@@ -1362,6 +2179,10 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
                     "policy_mode": "normal",
                     "policy_reason": None,
                     "search_quality": None,
+                    "run_mode": run_mode,
+                    "neutral_cap_pct": neutral_cap_pct,
+                    "neutral_enforcement": neutral_enforcement,
+                    "clarification_count": 0,
                     "last_error": None,
                     "next_iteration": 1,
                     "current_iteration": 0,
@@ -1371,6 +2192,11 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
                     "event_seq": 0,
                     "next_task_index": 0,
                     "current_tasks": [],
+                    "pending_research_review": None,
+                    "research_loop_state": {},
+                    "research_cycle_index": 0,
+                    "last_research_quality": None,
+                    "last_research_gaps": [],
                 },
             },
             status="running",
@@ -1380,68 +2206,9 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
             phase_progress_pct=0.0,
             event_seq=0,
         )
-
-    search_bootstrap = await _run_search_bootstrap(simulation_id=simulation_id, user_context=user_context)
-    if not search_bootstrap.get("ok"):
-        reason = str(search_bootstrap.get("reason") or "Search bootstrap failed")
-        state = _simulation_state.setdefault(simulation_id, {})
-        state["can_resume"] = True
-        state["resume_reason"] = reason
-        state["error"] = None
-        state["status_reason"] = "paused_search_failed"
-        state["current_phase_key"] = "search_bootstrap"
-        state["phase_progress_pct"] = 100.0
-        await db_core.update_simulation(simulation_id=simulation_id, status="paused")
-        checkpoint_row = await db_core.fetch_simulation_checkpoint(simulation_id)
-        checkpoint = (checkpoint_row or {}).get("checkpoint") or {}
-        meta = checkpoint.get("meta") if isinstance(checkpoint.get("meta"), dict) else {}
-        meta["status"] = "paused"
-        meta["status_reason"] = "paused_search_failed"
-        meta["last_error"] = reason
-        meta["current_phase_key"] = "search_bootstrap"
-        meta["phase_progress_pct"] = 100.0
-        meta["event_seq"] = int(state.get("event_seq") or 0)
-        checkpoint["meta"] = meta
-        await db_core.upsert_simulation_checkpoint(
-            simulation_id=simulation_id,
-            checkpoint=checkpoint,
-            status="paused",
-            last_error=reason,
-            status_reason="paused_search_failed",
-            current_phase_key="search_bootstrap",
-            phase_progress_pct=100.0,
-            event_seq=int(state.get("event_seq") or 0),
-        )
-        if user_id is not None:
-            await auth_core.log_audit(
-                user_id,
-                "simulation.search_bootstrap_failed",
-                {"simulation_id": simulation_id, "reason": reason},
-            )
-        return {"simulation_id": simulation_id, "status": "paused", "status_reason": "paused_search_failed"}
-
-    enriched_context = search_bootstrap.get("context") if isinstance(search_bootstrap.get("context"), dict) else dict(user_context)
-    state = _simulation_state.setdefault(simulation_id, {})
-    if isinstance(enriched_context.get("search_quality"), dict):
-        state["search_quality"] = enriched_context.get("search_quality")
-    await db_core.update_simulation_context(simulation_id, enriched_context)
-    try:
-        save_context(simulation_id, enriched_context)
-    except Exception:
-        pass
-    await db_core.upsert_simulation_checkpoint(
-        simulation_id=simulation_id,
-        checkpoint=(await db_core.fetch_simulation_checkpoint(simulation_id) or {}).get("checkpoint") or {},
-        status="running",
-        last_error=None,
-        status_reason="running",
-        current_phase_key="evidence_map",
-        phase_progress_pct=0.0,
-        event_seq=int(_simulation_state.get(simulation_id, {}).get("event_seq") or 0),
-    )
     await _start_background_simulation(
         simulation_id=simulation_id,
-        user_context=enriched_context,
+        user_context=user_context,
         user_id=user_id,
         resume_checkpoint=None,
     )
@@ -1477,6 +2244,9 @@ async def resume_simulation(payload: Dict[str, Any], authorization: str = Header
             status_code=status.HTTP_409_CONFLICT,
             detail="Clarification answer is required before resume.",
         )
+    pending_research_review = checkpoint_meta.get("pending_research_review") if isinstance(checkpoint_meta.get("pending_research_review"), dict) else None
+    if pending_research_review:
+        return {"simulation_id": simulation_id, "status": "paused", "resumed": False, "resume_from_phase": "search_bootstrap"}
     resume_from_phase = (
         str((checkpoint_row or {}).get("current_phase_key") or "").strip()
         or str(checkpoint_meta.get("current_phase_key") or checkpoint_meta.get("phase_label") or "").strip()
@@ -1535,37 +2305,8 @@ async def resume_simulation(payload: Dict[str, Any], authorization: str = Header
     meta = checkpoint.get("meta") if isinstance(checkpoint.get("meta"), dict) else {}
     checkpoint_status_reason = str((checkpoint_row or {}).get("status_reason") or meta.get("status_reason") or "").strip().lower()
     user_context = await _fetch_simulation_context(simulation_id)
-    if checkpoint_status_reason == "paused_search_failed":
-        search_bootstrap = await _run_search_bootstrap(simulation_id=simulation_id, user_context=user_context)
-        if not search_bootstrap.get("ok"):
-            reason = str(search_bootstrap.get("reason") or "Search bootstrap failed")
-            meta["status"] = "paused"
-            meta["status_reason"] = "paused_search_failed"
-            meta["last_error"] = reason
-            meta["current_phase_key"] = "search_bootstrap"
-            meta["phase_progress_pct"] = 100.0
-            checkpoint["meta"] = meta
-            await db_core.update_simulation(simulation_id=simulation_id, status="paused")
-            await db_core.upsert_simulation_checkpoint(
-                simulation_id=simulation_id,
-                checkpoint=checkpoint,
-                status="paused",
-                last_error=reason,
-                status_reason="paused_search_failed",
-                current_phase_key="search_bootstrap",
-                phase_progress_pct=100.0,
-                event_seq=int(meta.get("event_seq") or 0),
-            )
-            return {"simulation_id": simulation_id, "status": "paused", "resumed": False, "resume_from_phase": "search_bootstrap"}
-        enriched_context = search_bootstrap.get("context") if isinstance(search_bootstrap.get("context"), dict) else user_context
-        user_context = enriched_context
-        await db_core.update_simulation_context(simulation_id, enriched_context)
-        try:
-            save_context(simulation_id, enriched_context)
-        except Exception:
-            pass
-        meta["current_phase_key"] = "evidence_map"
-        meta["phase_progress_pct"] = 0.0
+    if checkpoint_status_reason == "paused_research_review":
+        return {"simulation_id": simulation_id, "status": "paused", "resumed": False, "resume_from_phase": "search_bootstrap"}
 
     meta["status"] = "running"
     meta["status_reason"] = "running"
@@ -1637,6 +2378,156 @@ async def pause_simulation(payload: Dict[str, Any], authorization: str = Header(
     if task and not task.done():
         task.cancel()
     return {"simulation_id": simulation_id, "status": "paused", "paused": True}
+
+
+@router.post("/research/action")
+async def submit_research_action(payload: Dict[str, Any], authorization: str = Header(None)) -> Dict[str, Any]:
+    simulation_id = str(payload.get("simulation_id") or "").strip()
+    cycle_id = str(payload.get("cycle_id") or "").strip()
+    action = str(payload.get("action") or "").strip().lower()
+    if not simulation_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="simulation_id is required")
+    if not cycle_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="cycle_id is required")
+    if action not in {"scrape_selected", "continue_search", "cancel_review"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="action must be scrape_selected|continue_search|cancel_review",
+        )
+
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if user:
+        if not auth_core.has_permission(user, "simulation:run"):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+        await _ensure_simulation_access(simulation_id, user)
+
+    if _task_is_running(simulation_id):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Simulation is already running")
+
+    snapshot = await db_core.fetch_simulation_snapshot(simulation_id)
+    if not snapshot:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Simulation not found")
+
+    checkpoint_row = await db_core.fetch_simulation_checkpoint(simulation_id)
+    checkpoint = (checkpoint_row or {}).get("checkpoint") or {}
+    meta = checkpoint.get("meta") if isinstance(checkpoint.get("meta"), dict) else {}
+    status_reason = str((checkpoint_row or {}).get("status_reason") or meta.get("status_reason") or "").strip().lower()
+    pending = meta.get("pending_research_review") if isinstance(meta.get("pending_research_review"), dict) else None
+    if status_reason != "paused_research_review" or not pending:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No pending research review to handle")
+
+    pending_cycle_id = str(pending.get("cycle_id") or "").strip()
+    if pending_cycle_id and pending_cycle_id != cycle_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="cycle_id does not match pending review")
+
+    selected_url_ids = payload.get("selected_url_ids") if isinstance(payload.get("selected_url_ids"), list) else []
+    selected_url_ids = [str(item).strip() for item in selected_url_ids if str(item or "").strip()]
+    added_urls = payload.get("added_urls") if isinstance(payload.get("added_urls"), list) else []
+    normalized_added_urls: List[str] = []
+    for raw in added_urls:
+        url = str(raw or "").strip()
+        if not url:
+            continue
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            continue
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        normalized_added_urls.append(url)
+    query_refinement = str(payload.get("query_refinement") or "").strip()
+
+    if action == "cancel_review":
+        reason = (
+            str(payload.get("reason") or "").strip()
+            or ("Research review is still pending user confirmation.")
+        )
+        state = _simulation_state.setdefault(simulation_id, {})
+        state["status_reason"] = "paused_research_review"
+        state["can_resume"] = False
+        state["resume_reason"] = reason
+        state["pending_research_review"] = pending
+        meta["status"] = "paused"
+        meta["status_reason"] = "paused_research_review"
+        meta["last_error"] = reason
+        checkpoint["meta"] = meta
+        await db_core.update_simulation(simulation_id=simulation_id, status="paused")
+        await db_core.upsert_simulation_checkpoint(
+            simulation_id=simulation_id,
+            checkpoint=checkpoint,
+            status="paused",
+            last_error=reason,
+            status_reason="paused_research_review",
+            current_phase_key="search_bootstrap",
+            phase_progress_pct=100.0,
+            event_seq=int(meta.get("event_seq") or 0),
+        )
+        return {"ok": True, "simulation_id": simulation_id, "status": "paused", "status_reason": "paused_research_review"}
+
+    if action == "scrape_selected" and not selected_url_ids:
+        candidate_urls = pending.get("candidate_urls") if isinstance(pending.get("candidate_urls"), list) else []
+        selected_url_ids = [str(item.get("id") or "").strip() for item in candidate_urls[:2] if isinstance(item, dict)]
+        selected_url_ids = [item for item in selected_url_ids if item]
+
+    research_loop_state = {
+        "mode": action,
+        "cycle_id": cycle_id,
+        "selected_url_ids": selected_url_ids,
+        "added_urls": normalized_added_urls[:8],
+        "query_refinement": query_refinement,
+    }
+
+    meta["research_loop_state"] = research_loop_state
+    meta["pending_research_review"] = pending
+    meta["status"] = "running"
+    meta["status_reason"] = "running"
+    meta["last_error"] = None
+    meta["current_phase_key"] = "search_bootstrap"
+    meta["phase_progress_pct"] = 0.0
+    checkpoint["meta"] = meta
+    await db_core.update_simulation(simulation_id=simulation_id, status="running")
+    await db_core.upsert_simulation_checkpoint(
+        simulation_id=simulation_id,
+        checkpoint=checkpoint,
+        status="running",
+        last_error=None,
+        status_reason="running",
+        current_phase_key="search_bootstrap",
+        phase_progress_pct=0.0,
+        event_seq=int(meta.get("event_seq") or 0),
+    )
+
+    owner_id = await db_core.get_simulation_owner(simulation_id)
+    if simulation_id not in _simulation_state:
+        _apply_snapshot_to_state(simulation_id, snapshot, user_id=owner_id)
+    state = _simulation_state.setdefault(simulation_id, {})
+    state["status_reason"] = "running"
+    state["can_resume"] = False
+    state["resume_reason"] = None
+    state["pending_research_review"] = None
+    state["error"] = None
+    state["current_phase_key"] = "search_bootstrap"
+    state["phase_progress_pct"] = 0.0
+
+    user_context = await _fetch_simulation_context(simulation_id)
+    await _start_background_simulation(
+        simulation_id=simulation_id,
+        user_context=user_context,
+        user_id=owner_id,
+        resume_checkpoint=checkpoint,
+    )
+    if owner_id is not None:
+        await auth_core.log_audit(
+            owner_id,
+            "simulation.research_action",
+            {
+                "simulation_id": simulation_id,
+                "cycle_id": cycle_id,
+                "action": action,
+            },
+        )
+    return {"ok": True, "simulation_id": simulation_id, "status": "running", "status_reason": "running"}
 
 
 @router.post("/clarification/answer")
@@ -2144,7 +3035,7 @@ async def get_state(simulation_id: str, authorization: str = Header(None)) -> Di
         elif persisted_status == "paused":
             status_value = "paused"
             status_reason = persisted_reason if persisted_reason in _PAUSE_STATUS_REASONS else "paused_manual"
-            state["can_resume"] = status_reason != "paused_clarification_needed"
+            state["can_resume"] = status_reason not in {"paused_clarification_needed", "paused_research_review"}
             state["resume_reason"] = (snapshot or {}).get("resume_reason") or state.get("error") or state.get("resume_reason")
             state["can_answer_clarification"] = bool(status_reason == "paused_clarification_needed")
         elif persisted_status == "running":
@@ -2189,8 +3080,25 @@ async def get_state(simulation_id: str, authorization: str = Header(None)) -> Di
             state["policy_reason"] = snapshot.get("policy_reason")
         if not state.get("search_quality") and isinstance(snapshot.get("search_quality"), dict):
             state["search_quality"] = snapshot.get("search_quality")
+        if snapshot.get("neutral_cap_pct") is not None:
+            try:
+                state["neutral_cap_pct"] = float(snapshot.get("neutral_cap_pct"))
+            except Exception:
+                pass
+        if snapshot.get("neutral_enforcement"):
+            state["neutral_enforcement"] = str(snapshot.get("neutral_enforcement"))
+        if snapshot.get("clarification_count") is not None:
+            try:
+                state["clarification_count"] = max(
+                    int(state.get("clarification_count") or 0),
+                    int(snapshot.get("clarification_count") or 0),
+                )
+            except Exception:
+                pass
         if state.get("pending_clarification") is None and isinstance(snapshot.get("pending_clarification"), dict):
             state["pending_clarification"] = snapshot.get("pending_clarification")
+        if state.get("pending_research_review") is None and isinstance(snapshot.get("pending_research_review"), dict):
+            state["pending_research_review"] = snapshot.get("pending_research_review")
         if snapshot.get("can_answer_clarification") is not None:
             state["can_answer_clarification"] = bool(snapshot.get("can_answer_clarification"))
         if not state.get("current_phase_key"):
@@ -2229,10 +3137,10 @@ async def get_transcript(simulation_id: str, authorization: str = Header(None)) 
     if not transcript:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcript not found")
     phase_labels = {
-        "Information Shock": "ط§ظ„طھطµط§ط¯ظ… ط§ظ„ظ…ط¹ط±ظپظٹ (Information Shock)",
-        "Polarization Phase": "ط§ظ„ط§ط³طھظ‚ط·ط§ط¨ (Polarization Phase)",
-        "Clash of Values": "ظ…ط­ط§ظˆظ„ط§طھ ط§ظ„ط¥ظ‚ظ†ط§ط¹ ظˆط§ظ„ط¬ظ…ظˆط¯ (Clash of Values)",
-        "Resolution Pressure": "ط§ظ„ظ†طھظٹط¬ط© ط§ظ„ظ†ظ‡ط§ط¦ظٹط© (Resolution Pressure)",
+        "Information Shock": "ط·آ§ط¸â€‍ط·ع¾ط·آµط·آ§ط·آ¯ط¸â€¦ ط·آ§ط¸â€‍ط¸â€¦ط·آ¹ط·آ±ط¸ظ¾ط¸ظ¹ (Information Shock)",
+        "Polarization Phase": "ط·آ§ط¸â€‍ط·آ§ط·آ³ط·ع¾ط¸â€ڑط·آ·ط·آ§ط·آ¨ (Polarization Phase)",
+        "Clash of Values": "ط¸â€¦ط·آ­ط·آ§ط¸ث†ط¸â€‍ط·آ§ط·ع¾ ط·آ§ط¸â€‍ط·آ¥ط¸â€ڑط¸â€ ط·آ§ط·آ¹ ط¸ث†ط·آ§ط¸â€‍ط·آ¬ط¸â€¦ط¸ث†ط·آ¯ (Clash of Values)",
+        "Resolution Pressure": "ط·آ§ط¸â€‍ط¸â€ ط·ع¾ط¸ظ¹ط·آ¬ط·آ© ط·آ§ط¸â€‍ط¸â€ ط¸â€،ط·آ§ط·آ¦ط¸ظ¹ط·آ© (Resolution Pressure)",
     }
     for group in transcript:
         label = phase_labels.get(group.get("phase"))
@@ -2350,6 +3258,7 @@ async def list_simulations(
             resume_reason = checkpoint_reason if can_resume else None
             if effective_status == "paused":
                 effective_status_reason = checkpoint_status_reason if checkpoint_status_reason in _PAUSE_STATUS_REASONS else "paused_manual"
+                can_resume = effective_status_reason not in {"paused_clarification_needed", "paused_research_review"}
             elif effective_status == "error":
                 effective_status_reason = "error"
             elif effective_status == "completed":
@@ -2473,4 +3382,5 @@ async def debug_version() -> Dict[str, Any]:
         return {"engine_sha": digest, "engine_path": str(engine_path)}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Failed to read engine.py: {exc}")
+
 

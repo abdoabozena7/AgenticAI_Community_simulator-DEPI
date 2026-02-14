@@ -163,6 +163,20 @@ export function LandingSimulationNetwork({ isInView = false }: LandingSimulation
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(renderer.domElement);
 
+    const handleWebglContextLost = (event: Event) => {
+      event.preventDefault();
+      stopSimulation();
+      stopRandomPopups();
+    };
+    const handleWebglContextRestored = () => {
+      if (!mounted) return;
+      resetSimulation(false);
+      applyTheme('dark');
+      startSimulation();
+    };
+    renderer.domElement.addEventListener('webglcontextlost', handleWebglContextLost, false);
+    renderer.domElement.addEventListener('webglcontextrestored', handleWebglContextRestored, false);
+
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enablePan = false;
     controls.minDistance = 5;
@@ -696,6 +710,8 @@ export function LandingSimulationNetwork({ isInView = false }: LandingSimulation
       if (rafId) window.cancelAnimationFrame(rafId);
       window.removeEventListener('resize', resize);
       document.removeEventListener('visibilitychange', onVisibilityChange);
+      renderer.domElement.removeEventListener('webglcontextlost', handleWebglContextLost, false);
+      renderer.domElement.removeEventListener('webglcontextrestored', handleWebglContextRestored, false);
       controls.dispose();
       clearNetworkObjects();
       disposeObject(bgSphere);

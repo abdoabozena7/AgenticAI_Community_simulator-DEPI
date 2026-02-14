@@ -279,6 +279,7 @@ CREATE TABLE IF NOT EXISTS research_events (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   simulation_id VARCHAR(36) NOT NULL,
   event_seq BIGINT NULL,
+  cycle_id VARCHAR(64) NULL,
   url TEXT NULL,
   domain VARCHAR(255) NULL,
   favicon_url VARCHAR(1024) NULL,
@@ -290,6 +291,7 @@ CREATE TABLE IF NOT EXISTS research_events (
   relevance_score FLOAT NULL,
   snippet TEXT NULL,
   error TEXT NULL,
+  meta_json JSON NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_research_events_sim (simulation_id),
   INDEX idx_research_events_seq (simulation_id, event_seq),
@@ -310,6 +312,38 @@ CREATE TABLE IF NOT EXISTS simulation_chat_events (
   UNIQUE KEY uq_chat_events_sim_msg (simulation_id, message_id),
   CONSTRAINT fk_chat_events_sim FOREIGN KEY (simulation_id)
     REFERENCES simulations(simulation_id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS developer_suite_runs (
+  id VARCHAR(36) PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'running',
+  config_json JSON NULL,
+  result_json JSON NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  ended_at TIMESTAMP NULL,
+  INDEX idx_dev_suite_runs_user_created (user_id, created_at),
+  CONSTRAINT fk_dev_suite_runs_user FOREIGN KEY (user_id)
+    REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS developer_suite_cases (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  suite_id VARCHAR(36) NOT NULL,
+  case_key VARCHAR(32) NOT NULL,
+  simulation_id VARCHAR(36) NULL,
+  expected_json JSON NULL,
+  actual_json JSON NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'pending',
+  pass TINYINT(1) NULL,
+  failure_reason TEXT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_dev_suite_case (suite_id, case_key),
+  INDEX idx_dev_suite_cases_suite (suite_id),
+  CONSTRAINT fk_dev_suite_cases_run FOREIGN KEY (suite_id)
+    REFERENCES developer_suite_runs(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -------------------------

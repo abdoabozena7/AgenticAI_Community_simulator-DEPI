@@ -1,14 +1,10 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import {
-  Zap, MapPin, Tag, ArrowRight, CheckCircle, XCircle, Play
-} from 'lucide-react';
+import { ArrowRight, CheckCircle, MapPin, Play, Tag, XCircle, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useLanguage } from '@/contexts/LanguageContext';
 
 const categories = [
@@ -108,11 +104,9 @@ export default function HomeTab({ onStartResearch, onStartSimulation, onRedeemPr
 
         <div className="space-y-5">
           <div>
-            <label className="text-sm text-muted-foreground mb-2 block">
-              {t('Your Idea', 'الفكرة')}
-            </label>
+            <label className="text-sm text-muted-foreground mb-2 block">{t('Your Idea', 'الفكرة')}</label>
             <Textarea
-              placeholder={t('Example: Quick coffee kiosk near a university', 'مثال: كشك قهوة سريع جنب جامعة في مدينة نصر')}
+              placeholder={t('Example: Quick coffee kiosk near a university', 'مثال: كشك قهوة سريع بجانب جامعة')}
               value={idea}
               onChange={(e) => setIdea(e.target.value)}
               className="bg-secondary/50 border-border min-h-[100px] text-base"
@@ -120,9 +114,7 @@ export default function HomeTab({ onStartResearch, onStartSimulation, onRedeemPr
           </div>
 
           <div>
-            <label className="text-sm text-muted-foreground mb-2 block">
-              {t('Place / Area (optional)', 'المكان / المنطقة (اختياري)')}
-            </label>
+            <label className="text-sm text-muted-foreground mb-2 block">{t('Place / Area (optional)', 'المكان / المنطقة (اختياري)')}</label>
             <div className="relative">
               <MapPin className={`absolute ${isRTL ? 'right-3' : 'left-3'} top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground`} />
               <Input
@@ -135,9 +127,7 @@ export default function HomeTab({ onStartResearch, onStartSimulation, onRedeemPr
           </div>
 
           <div>
-            <label className="text-sm text-muted-foreground mb-2 block">
-              {t('Category', 'التصنيف')}
-            </label>
+            <label className="text-sm text-muted-foreground mb-2 block">{t('Category', 'التصنيف')}</label>
             <Select value={category} onValueChange={setCategory}>
               <SelectTrigger className="bg-secondary/50 border-border">
                 <SelectValue />
@@ -186,9 +176,13 @@ export default function HomeTab({ onStartResearch, onStartSimulation, onRedeemPr
         </h3>
         <div className="flex gap-3">
           <Input
-            placeholder={t('Enter promo code', 'ادخل كود الخصم')}
+            placeholder={t('Enter promo code', 'أدخل كود الخصم')}
             value={promoCode}
-            onChange={(e) => { setPromoCode(e.target.value); setPromoStatus('idle'); setPromoMessage(null); }}
+            onChange={(e) => {
+              setPromoCode(e.target.value);
+              setPromoStatus('idle');
+              setPromoMessage(null);
+            }}
             className="flex-1 bg-secondary/50 border-border"
           />
           <Button onClick={handleRedeemPromo} variant="secondary">

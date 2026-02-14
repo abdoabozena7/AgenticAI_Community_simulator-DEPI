@@ -22,6 +22,7 @@ from .agent import Agent
 from .influence import compute_pairwise_influences, decide_opinion_change
 from .aggregator import compute_metrics
 from ..core.ollama_client import generate_ollama
+from ..core.text_encoding_guard import attempt_repair, detect_mojibake
 try:
     from .llm_output_validator import LLMOutputValidator, build_default_forbidden_phrases
 except Exception:  # validator is optional
@@ -792,6 +793,26 @@ class SimulationEngine:
         research_structured = user_context.get("research_structured") or {}
         search_quality = user_context.get("search_quality") if isinstance(user_context.get("search_quality"), dict) else None
         language = str(user_context.get("language") or "ar").lower()
+        run_mode = str(user_context.get("run_mode") or checkpoint_meta.get("run_mode") or "normal").strip().lower() or "normal"
+        try:
+            neutral_cap_pct = float(
+                user_context.get("neutral_cap_pct")
+                if user_context.get("neutral_cap_pct") is not None
+                else checkpoint_meta.get("neutral_cap_pct", os.getenv("SIM_NEUTRAL_CAP_PCT", "0.30"))
+            )
+        except Exception:
+            neutral_cap_pct = 0.30
+        neutral_cap_pct = max(0.05, min(0.70, neutral_cap_pct))
+        neutral_enforcement = str(
+            user_context.get("neutral_enforcement")
+            or checkpoint_meta.get("neutral_enforcement")
+            or ("clarification_before_complete" if run_mode == "dev_suite" else "clarification_before_complete")
+        ).strip() or "clarification_before_complete"
+        try:
+            max_neutral_clarifications = int(os.getenv("MAX_NEUTRAL_CLARIFICATIONS", "6"))
+        except Exception:
+            max_neutral_clarifications = 6
+        max_neutral_clarifications = max(1, min(24, max_neutral_clarifications))
         idea_risk = _idea_risk_score(idea_text)
         regulatory_seed = ""
         if isinstance(research_structured, dict):
@@ -1896,18 +1917,24 @@ class SimulationEngine:
             if demand in {"high", "strong"} and agent.current_opinion == "reject":
                 agent.confidence = max(0.2, agent.confidence - (0.04 * positive_scale))
 
-        # Dialogue orchestration (4 phases)
+        # Dialogue orchestration (formal state machine)
         phase_order = [
-            "Information Shock",
-            "Polarization Phase",
-            "Clash of Values",
-            "Resolution Pressure",
+            "Intake",
+            "Research Digest",
+            "Agent Init",
+            "Deliberation",
+            "Convergence",
+            "Verdict",
+            "Summary",
         ]
         phase_key_map = {
-            "Information Shock": "intake",
-            "Polarization Phase": "evidence_map",
-            "Clash of Values": "debate",
-            "Resolution Pressure": "resolution",
+            "Intake": "intake",
+            "Research Digest": "research_digest",
+            "Agent Init": "agent_init",
+            "Deliberation": "deliberation",
+            "Convergence": "convergence",
+            "Verdict": "verdict",
+            "Summary": "summary",
         }
 
         def _build_evidence_cards() -> List[str]:
@@ -2240,6 +2267,10 @@ class SimulationEngine:
             last_clarification_step = 0
         last_clarification_reason_tag = str(checkpoint_meta.get("last_clarification_reason_tag") or "").strip()
         last_clarification_phase = str(checkpoint_meta.get("last_clarification_phase") or "").strip()
+        try:
+            clarification_count = int(checkpoint_meta.get("clarification_count") or 0)
+        except Exception:
+            clarification_count = 0
         clarification_notice_sent = bool(checkpoint_meta.get("clarification_notice_sent"))
         telemetry_seed = resume_state.get("reasoning_telemetry") if isinstance(resume_state.get("reasoning_telemetry"), dict) else {}
         try:
@@ -2637,6 +2668,25 @@ class SimulationEngine:
                 base += f" Signal: {evidence_hint}"
             return _clip_text(base, full_limit)
 
+        def _sanitize_reasoning_text(
+            raw_text: str,
+            role_label: str,
+            stance: str,
+            evidence_hint: str,
+        ) -> Tuple[str, Optional[str]]:
+            text = str(raw_text or "").strip()
+            if not text:
+                return "", None
+            guard = detect_mojibake(text)
+            if not bool(guard.get("flag")):
+                return text, None
+            repaired = str(attempt_repair(text) or "").strip()
+            repaired = _clip_text(repaired, full_limit)
+            repaired_guard = detect_mojibake(repaired) if repaired else {"flag": True}
+            if repaired and not bool(repaired_guard.get("flag")):
+                return repaired, "repaired"
+            return _fallback_message(role_label, stance, evidence_hint), "fallback"
+
         async def _infer_stance_from_llm(text: str) -> str | None:
             if stance_classifier is None:
                 return None
@@ -2672,6 +2722,52 @@ class SimulationEngine:
             if stance_norm not in {"reject", "neutral"}:
                 return "neutral", True, hard_policy_reason or "unsafe_policy", True
             return stance_norm, True, hard_policy_reason or "unsafe_policy", False
+
+        async def _enforce_neutral_cap_before_complete(phase_label_hint: str) -> None:
+            nonlocal pending_clarification_state
+            nonlocal last_clarification_step
+            nonlocal last_clarification_reason_tag
+            nonlocal last_clarification_phase
+            nonlocal clarification_count
+            if neutral_enforcement != "clarification_before_complete":
+                return
+            neutral_ratio = metrics_counts.get("neutral", 0) / max(1, len(agents))
+            if neutral_ratio <= neutral_cap_pct:
+                return
+            if clarification_count >= max_neutral_clarifications:
+                raise RuntimeError(
+                    "Neutral cap gate failed after clarification cycles "
+                    f"(neutral={neutral_ratio:.2f}, cap={neutral_cap_pct:.2f}, max={max_neutral_clarifications})"
+                )
+            reason_summary = (
+                f"Neutral ratio is still high ({neutral_ratio:.0%}) above cap ({neutral_cap_pct:.0%}). "
+                "Need one focused clarification before completion."
+                if language != "ar"
+                else f"نسبة الحياد ما زالت مرتفعة ({neutral_ratio:.0%}) أعلى من الحد ({neutral_cap_pct:.0%}). "
+                "نحتاج توضيحًا مركزًا قبل الإنهاء."
+            )
+            snippets = [str(msg) for msg in list(recent_messages)[-3:]]
+            clarification_payload = await _generate_clarification_payload(
+                reason_tag="evidence_gap",
+                reason_summary=reason_summary,
+                snippets=snippets,
+                phase_label=phase_label_hint,
+            )
+            pending_clarification_state = clarification_payload
+            last_clarification_step = int(clarification_total_steps)
+            last_clarification_reason_tag = str(clarification_payload.get("reason_tag") or "evidence_gap")
+            last_clarification_phase = phase_label_hint
+            clarification_count += 1
+            clarification_history.append(
+                {
+                    "question_id": clarification_payload.get("question_id"),
+                    "phase_label": phase_label_hint,
+                    "reason_tag": clarification_payload.get("reason_tag"),
+                    "reason_summary": clarification_payload.get("reason_summary"),
+                    "created_at": clarification_payload.get("created_at"),
+                }
+            )
+            raise ClarificationNeeded(clarification_payload)
 
         total_iterations = len(phase_order)
         effective_total_iterations = total_iterations
@@ -2763,6 +2859,7 @@ class SimulationEngine:
             next_task_index: int = 0,
             last_error: Optional[str] = None,
             status_reason: Optional[str] = None,
+            last_step_uid: Optional[str] = None,
         ) -> None:
             if checkpoint_emitter is None:
                 return
@@ -2792,6 +2889,10 @@ class SimulationEngine:
                     "policy_mode": policy_mode,
                     "policy_reason": hard_policy_reason if hard_unsafe_triggered else None,
                     "search_quality": search_quality,
+                    "run_mode": run_mode,
+                    "neutral_cap_pct": float(neutral_cap_pct),
+                    "neutral_enforcement": neutral_enforcement,
+                    "clarification_count": int(clarification_count),
                     "last_error": last_error,
                     "next_iteration": max(1, int(next_iteration)),
                     "current_iteration": max(0, int(current_iteration)),
@@ -2809,6 +2910,9 @@ class SimulationEngine:
                     "clarification_notice_sent": bool(clarification_notice_sent),
                     "clarification_history": clarification_history[-30:],
                     "total_reasoning_steps": int(clarification_total_steps),
+                    "phase_cursor": int(current_iteration),
+                    "last_reasoning_step_uid": last_step_uid or None,
+                    "agent_state_ref": "agents_table",
                 },
             }
             try:
@@ -2824,6 +2928,7 @@ class SimulationEngine:
             resume_tasks_payload = []
         resume_task_index = int(checkpoint_meta.get("next_task_index") or 0)
         resume_task_index = max(0, resume_task_index)
+        last_reasoning_step_uid = str(checkpoint_meta.get("last_reasoning_step_uid") or "").strip() or None
 
         if resume_current_iteration < 1 and resume_tasks_payload:
             resume_current_iteration = resume_next_iteration
@@ -2832,6 +2937,7 @@ class SimulationEngine:
 
         start_iteration = resume_current_iteration if resume_current_iteration > 0 else resume_next_iteration
         if start_iteration > total_iterations:
+            await _enforce_neutral_cap_before_complete("Finalization Gate")
             final_metrics = compute_metrics(agents)
             await _emit_checkpoint(
                 status_value="completed",
@@ -2842,6 +2948,7 @@ class SimulationEngine:
                 tasks=[],
                 next_task_index=0,
                 status_reason="completed",
+                last_step_uid=last_reasoning_step_uid,
             )
             return final_metrics
 
@@ -2855,6 +2962,7 @@ class SimulationEngine:
             tasks=[],
             next_task_index=resume_task_index if resume_current_iteration else 0,
             status_reason="running",
+            last_step_uid=last_reasoning_step_uid,
         )
 
         for iteration in range(start_iteration, total_iterations + 1):
@@ -2877,6 +2985,56 @@ class SimulationEngine:
                 iteration == resume_current_iteration
                 and bool(resume_tasks_payload)
             )
+
+            reasoning_phase = phase_key in {"deliberation", "convergence"}
+
+            if not reasoning_phase:
+                # Non-dialogue phases: emit entry + completion checkpoints and move on.
+                await _emit_checkpoint(
+                    status_value="running",
+                    next_iteration=iteration,
+                    current_iteration=iteration,
+                    phase_label=phase_label,
+                    phase_key=phase_key,
+                    phase_progress_pct=phase_start_progress,
+                    tasks=[],
+                    next_task_index=0,
+                    status_reason="running",
+                    last_step_uid=last_reasoning_step_uid,
+                )
+                await _emit_event(
+                    "phase_update",
+                    {
+                        "phase_key": phase_key,
+                        "phase_label": phase_label,
+                        "progress_pct": phase_start_progress,
+                        "status": "running",
+                    },
+                )
+                await _emit_checkpoint(
+                    status_value="running",
+                    next_iteration=iteration + 1,
+                    current_iteration=0,
+                    phase_label=None,
+                    phase_key=phase_key,
+                    phase_progress_pct=(iteration / max(1, total_iterations)) * 100.0,
+                    tasks=[],
+                    next_task_index=0,
+                    status_reason="running",
+                    last_step_uid=last_reasoning_step_uid,
+                )
+                await _emit_event(
+                    "phase_update",
+                    {
+                        "phase_key": phase_key,
+                        "phase_label": phase_label,
+                        "progress_pct": (iteration / max(1, total_iterations)) * 100.0,
+                        "status": "completed",
+                    },
+                )
+                if step_delay > 0:
+                    await asyncio.sleep(step_delay / speed)
+                continue
 
             if using_resume_tasks:
                 for raw_task in resume_tasks_payload:
@@ -2912,7 +3070,7 @@ class SimulationEngine:
                 else:
                     base_speakers = int(math.ceil(0.12 * max(1, num_agents)))
                     dynamic_speakers = min(80, max(24, base_speakers))
-                    if phase_label in {"Clash of Values", "Resolution Pressure"}:
+                    if phase_label in {"Deliberation", "Convergence"}:
                         dynamic_speakers = min(num_agents, max(dynamic_speakers, 36))
                     speakers = _select_speakers(min(num_agents, dynamic_speakers))
                 speaker_ids = {agent.agent_id for agent in speakers}
@@ -2981,6 +3139,7 @@ class SimulationEngine:
                 tasks=tasks,
                 next_task_index=next_task_index,
                 status_reason="running",
+                last_step_uid=last_reasoning_step_uid,
             )
 
             tasks_to_process = tasks[next_task_index:]
@@ -3098,6 +3257,22 @@ class SimulationEngine:
 
                 limit = full_limit if length_mode == "full" else short_limit
                 message = _clip_text(message, limit)
+                sanitized_state: Optional[str] = None
+                if message:
+                    message, sanitized_state = _sanitize_reasoning_text(
+                        raw_text=message,
+                        role_label=role_label,
+                        stance=stance,
+                        evidence_hint=task.get("evidence_hint") or "",
+                    )
+                    if sanitized_state == "fallback":
+                        if opinion_source != "fallback":
+                            reasoning_stats["fallback_steps"] = int(reasoning_stats.get("fallback_steps", 0)) + 1
+                        opinion_source = "fallback"
+                        fallback_reason = fallback_reason or "encoding_mojibake"
+                        confidence = min(confidence, 0.35)
+                    elif sanitized_state == "repaired":
+                        fallback_reason = fallback_reason or "encoding_repaired"
                 if emit_message:
                     reason_tag = _extract_reason_tag(message, stance)
 
@@ -3161,6 +3336,7 @@ class SimulationEngine:
                         last_clarification_step = clarification_total_steps
                         last_clarification_reason_tag = str(clarification_payload.get("reason_tag") or "")
                         last_clarification_phase = phase_label
+                        clarification_count += 1
                         clarification_history.append(
                             {
                                 "question_id": clarification_payload.get("question_id"),
@@ -3208,6 +3384,7 @@ class SimulationEngine:
                             "clarification_triggered": clarification_triggered,
                         },
                     )
+                    last_reasoning_step_uid = step_uid
                     if length_mode == "full":
                         dialogue_history.append(
                             {
@@ -3229,6 +3406,7 @@ class SimulationEngine:
                     tasks=tasks,
                     next_task_index=processed_index,
                     status_reason="running",
+                    last_step_uid=last_reasoning_step_uid,
                 )
 
                 await _emit_event("metrics", _build_metrics_payload(iteration))
@@ -3242,6 +3420,7 @@ class SimulationEngine:
                     tasks=tasks,
                     next_task_index=processed_index,
                     status_reason="running",
+                    last_step_uid=last_reasoning_step_uid,
                 )
                 if clarification_triggered and clarification_payload:
                     raise ClarificationNeeded(clarification_payload)
@@ -3267,6 +3446,7 @@ class SimulationEngine:
                 tasks=[],
                 next_task_index=0,
                 status_reason="running",
+                last_step_uid=last_reasoning_step_uid,
             )
             await _emit_event(
                 "phase_update",
@@ -3285,7 +3465,7 @@ class SimulationEngine:
                 resume_current_iteration = 0
 
             neutral_ratio = metrics_counts.get("neutral", 0) / max(1, len(agents))
-            if iteration >= 3 and neutral_ratio <= 0.10:
+            if phase_key == "convergence" and neutral_ratio <= 0.10:
                 effective_total_iterations = max(1, iteration)
                 await _emit_event("metrics", _build_metrics_payload(iteration))
                 await _emit_checkpoint(
@@ -3298,6 +3478,7 @@ class SimulationEngine:
                     tasks=[],
                     next_task_index=0,
                     status_reason="running",
+                    last_step_uid=last_reasoning_step_uid,
                 )
                 await _emit_event(
                     "phase_update",
@@ -3309,8 +3490,8 @@ class SimulationEngine:
                         "reason": "neutral_target_reached",
                     },
                 )
-                break
 
+        await _enforce_neutral_cap_before_complete("Finalization Gate")
         # After all iterations, compute final metrics
         final_metrics = compute_metrics(agents)
         final_metrics["total_iterations"] = effective_total_iterations
@@ -3340,6 +3521,7 @@ class SimulationEngine:
             tasks=[],
             next_task_index=0,
             status_reason="completed",
+            last_step_uid=last_reasoning_step_uid,
         )
         await _emit_event(
             "phase_update",

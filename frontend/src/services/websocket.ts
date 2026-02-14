@@ -104,8 +104,9 @@ export interface ResearchUpdateEvent {
   type: 'research_update';
   simulation_id?: string;
   event_seq?: number;
-  action?: 'query_started' | 'query_result' | 'url_opened' | 'url_extracted' | 'url_failed' | 'search_completed' | 'search_failed' | string;
+  action?: 'research_started' | 'query_planned' | 'search_results_ready' | 'review_required' | 'fetch_started' | 'fetch_done' | 'summary_ready' | 'evidence_cards_ready' | 'gaps_ready' | 'research_done' | 'research_failed' | 'query_started' | 'query_result' | 'url_opened' | 'url_extracted' | 'url_failed' | 'search_completed' | 'search_failed' | string;
   status?: string;
+  cycle_id?: string | null;
   url?: string | null;
   domain?: string | null;
   favicon_url?: string | null;
@@ -116,6 +117,7 @@ export interface ResearchUpdateEvent {
   snippet?: string | null;
   error?: string | null;
   progress_pct?: number;
+  meta_json?: Record<string, unknown> | null;
 }
 
 export interface ClarificationRequestEvent {

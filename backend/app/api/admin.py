@@ -135,7 +135,7 @@ async def update_billing_settings(
 class RoleUpdateRequest(BaseModel):
     user_id: Optional[int] = None
     username: Optional[str] = None
-    role: str = Field(..., description="Role to set, e.g. admin or user")
+    role: str = Field(..., description="Role to set: user, developer, or admin")
 
 
 @router.post("/role")
@@ -145,6 +145,9 @@ async def update_role(
 ) -> Dict[str, Any]:
     if not request.user_id and not request.username:
         raise HTTPException(status_code=400, detail="Provide user_id or username")
+    role_value = str(request.role or "").strip().lower()
+    if role_value not in {"user", "developer", "admin"}:
+        raise HTTPException(status_code=400, detail="Role must be one of: user, developer, admin")
     user_id = request.user_id
     if user_id is None:
         rows = await db.execute(
@@ -155,13 +158,13 @@ async def update_role(
         if not rows:
             raise HTTPException(status_code=404, detail="User not found")
         user_id = int(rows[0]["id"])
-    await auth_core.set_user_role(user_id, request.role.strip())
+    await auth_core.set_user_role(user_id, role_value)
     updated = await db.execute(
         "SELECT id, username, role, credits FROM users WHERE id=%s",
         (user_id,),
         fetch=True,
     )
-    return updated[0] if updated else {"id": user_id, "role": request.role.strip()}
+    return updated[0] if updated else {"id": user_id, "role": role_value}
 
 
 class UsageResetRequest(BaseModel):

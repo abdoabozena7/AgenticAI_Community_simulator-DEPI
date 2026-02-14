@@ -9,38 +9,61 @@ interface IterationTimelineProps {
   phaseProgressPct?: number | null;
 }
 
-type PhaseKey =
+type CanonicalPhaseKey =
   | 'intake'
-  | 'search_bootstrap'
-  | 'evidence_map'
-  | 'debate'
-  | 'resolution'
+  | 'research_digest'
+  | 'agent_init'
+  | 'deliberation'
+  | 'convergence'
+  | 'verdict'
+  | 'summary'
   | 'completed';
 
-const PHASE_ORDER: PhaseKey[] = [
+const PHASE_ORDER: CanonicalPhaseKey[] = [
   'intake',
-  'search_bootstrap',
-  'evidence_map',
-  'debate',
-  'resolution',
+  'research_digest',
+  'agent_init',
+  'deliberation',
+  'convergence',
+  'verdict',
+  'summary',
   'completed',
 ];
 
-const phaseLabel = (key: PhaseKey, language: 'ar' | 'en') => {
-  const labelsAr: Record<PhaseKey, string> = {
+const LEGACY_TO_CANONICAL: Record<string, CanonicalPhaseKey> = {
+  intake: 'intake',
+  search_bootstrap: 'research_digest',
+  evidence_map: 'research_digest',
+  research_digest: 'research_digest',
+  agent_init: 'agent_init',
+  debate: 'deliberation',
+  deliberation: 'deliberation',
+  convergence: 'convergence',
+  resolution: 'verdict',
+  verdict: 'verdict',
+  summary: 'summary',
+  completed: 'completed',
+};
+
+const phaseLabel = (key: CanonicalPhaseKey, language: 'ar' | 'en') => {
+  const labelsAr: Record<CanonicalPhaseKey, string> = {
     intake: 'تهيئة',
-    search_bootstrap: 'بحث',
-    evidence_map: 'أدلة',
-    debate: 'نقاش',
-    resolution: 'حسم',
+    research_digest: 'بحث/أدلة',
+    agent_init: 'تجهيز الوكلاء',
+    deliberation: 'نقاش',
+    convergence: 'تقليل الحياد',
+    verdict: 'حسم',
+    summary: 'ملخص',
     completed: 'اكتمل',
   };
-  const labelsEn: Record<PhaseKey, string> = {
+  const labelsEn: Record<CanonicalPhaseKey, string> = {
     intake: 'Intake',
-    search_bootstrap: 'Search',
-    evidence_map: 'Evidence',
-    debate: 'Debate',
-    resolution: 'Resolution',
+    research_digest: 'Research',
+    agent_init: 'Agent Init',
+    deliberation: 'Deliberation',
+    convergence: 'Convergence',
+    verdict: 'Verdict',
+    summary: 'Summary',
     completed: 'Done',
   };
   return language === 'ar' ? labelsAr[key] : labelsEn[key];
@@ -51,6 +74,12 @@ const safePct = (value?: number | null) => {
   return Math.max(0, Math.min(100, value));
 };
 
+const normalizePhase = (raw?: string | null): CanonicalPhaseKey | null => {
+  const key = String(raw || '').trim();
+  if (!key) return null;
+  return LEGACY_TO_CANONICAL[key] || null;
+};
+
 export function IterationTimeline({
   currentIteration,
   totalIterations,
@@ -59,9 +88,7 @@ export function IterationTimeline({
   currentPhaseKey,
   phaseProgressPct,
 }: IterationTimelineProps) {
-  const normalizedPhase = PHASE_ORDER.includes((currentPhaseKey || '') as PhaseKey)
-    ? (currentPhaseKey as PhaseKey)
-    : null;
+  const normalizedPhase = normalizePhase(currentPhaseKey);
   const phaseIndex = normalizedPhase ? PHASE_ORDER.indexOf(normalizedPhase) : -1;
   const phaseRatio = safePct(phaseProgressPct) / 100;
 
@@ -125,7 +152,7 @@ export function IterationTimeline({
               {typeof phaseProgressPct === 'number' && ` - ${Math.round(safePct(phaseProgressPct))}%`}
             </span>
           </div>
-          <div className="grid grid-cols-6 gap-1.5">
+          <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5">
             {PHASE_ORDER.map((phase, index) => {
               const passed = phaseIndex > index || normalizedPhase === 'completed';
               const active = phaseIndex === index && normalizedPhase !== 'completed';

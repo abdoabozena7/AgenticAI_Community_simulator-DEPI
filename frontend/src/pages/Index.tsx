@@ -306,6 +306,7 @@ const Index = () => {
   const [reportBusy, setReportBusy] = useState(false);
   const [resumeBusy, setResumeBusy] = useState(false);
   const [pauseBusy, setPauseBusy] = useState(false);
+  const [researchReviewBusy, setResearchReviewBusy] = useState(false);
   const [clarificationBusy, setClarificationBusy] = useState(false);
   const [postActionBusy, setPostActionBusy] = useState<'make_acceptable' | 'bring_to_world' | null>(null);
   const [postActionResult, setPostActionResult] = useState<{
@@ -1105,6 +1106,41 @@ const Index = () => {
     simulation,
   ]);
 
+  const handleSubmitResearchAction = useCallback(async (payload: {
+    cycleId: string;
+    action: 'scrape_selected' | 'continue_search' | 'cancel_review';
+    selectedUrlIds?: string[];
+    addedUrls?: string[];
+    queryRefinement?: string;
+  }) => {
+    if (!simulation.simulationId || researchReviewBusy) return;
+    setResearchReviewBusy(true);
+    try {
+      await simulation.submitResearchAction({
+        simulationId: simulation.simulationId,
+        cycleId: payload.cycleId,
+        action: payload.action,
+        selectedUrlIds: payload.selectedUrlIds,
+        addedUrls: payload.addedUrls,
+        queryRefinement: payload.queryRefinement,
+      });
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'تم اعتماد إجراء البحث. جاري استكمال جمع الأدلة.'
+          : 'Research action accepted. Continuing evidence collection.'
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
+      addSystemMessage(
+        settings.language === 'ar'
+          ? `تعذر تنفيذ إجراء البحث.${msg}`.trim()
+          : `Failed to apply research action.${msg}`.trim()
+      );
+    } finally {
+      setResearchReviewBusy(false);
+    }
+  }, [addSystemMessage, researchReviewBusy, settings.language, simulation]);
+
   const handleRunPostAction = useCallback(async (action: 'make_acceptable' | 'bring_to_world') => {
     if (!simulation.simulationId || postActionBusy) return;
     setPostActionBusy(action);
@@ -1225,6 +1261,7 @@ const Index = () => {
     setFilteredAgentsTotal(0);
     setPostActionResult(null);
     setPostActionBusy(null);
+    setResearchReviewBusy(false);
     setClarificationBusy(false);
   }, [simulation.simulationId]);
 
@@ -2170,10 +2207,17 @@ If rejection is about competition or location, suggest searching for a better lo
       && simulation.statusReason === 'paused_clarification_needed'
       && simulation.pendingClarification?.questionId
     );
-    if (!needsClarification) return;
+    const needsResearchReview = Boolean(
+      simulation.simulationId
+      && simulation.status === 'paused'
+      && simulation.statusReason === 'paused_research_review'
+      && simulation.pendingResearchReview?.cycleId
+    );
+    if (!needsClarification && !needsResearchReview) return;
     setActivePanel('chat');
   }, [
     simulation.pendingClarification,
+    simulation.pendingResearchReview,
     simulation.simulationId,
     simulation.status,
     simulation.statusReason,
@@ -2210,6 +2254,12 @@ If rejection is about competition or location, suggest searching for a better lo
     && simulation.statusReason === 'paused_clarification_needed'
     && simulation.pendingClarification?.questionId
   );
+  const isResearchReviewPause = Boolean(
+    simulation.simulationId
+    && simulation.status === 'paused'
+    && simulation.statusReason === 'paused_research_review'
+    && simulation.pendingResearchReview?.cycleId
+  );
   const resumeBannerText = simulation.statusReason === 'paused_manual'
     ? (settings.language === 'ar'
       ? 'تم إيقاف الجلسة يدويًا. يمكنك المتابعة من آخر نقطة محفوظة.'
@@ -2233,6 +2283,9 @@ If rejection is about competition or location, suggest searching for a better lo
   const clarificationBannerText = settings.language === 'ar'
     ? 'المحاكاة متوقفة مؤقتًا لأن الوكلاء يحتاجون توضيحًا منك قبل الاستكمال.'
     : 'Simulation is paused because agents require clarification before continuing.';
+  const researchReviewBannerText = settings.language === 'ar'
+    ? 'تم إيقاف المحاكاة مؤقتًا لمراجعة روابط البحث. اختر روابط ثم واصل الاستخراج.'
+    : 'Simulation is paused for research review. Select URLs then continue scraping.';
   const quickReplies = pendingUpdate
     ? [
         { label: settings.language === 'ar' ? 'نعم' : 'Yes', value: 'yes' },
@@ -2244,14 +2297,14 @@ If rejection is about competition or location, suggest searching for a better lo
         { label: settings.language === 'ar' ? 'تعديل' : 'Edit', value: 'edit' },
       ]
     : null;
-
-  const handleOpenReasoning = useCallback(() => {
-    setActivePanel('chat');
-  }, []);
+  const finalAcceptancePct = simulation.metrics.totalAgents > 0
+    ? (simulation.metrics.accepted / simulation.metrics.totalAgents) * 100
+    : 0;
+  const recommendedPostAction: 'make_acceptable' | 'bring_to_world' =
+    finalAcceptancePct >= 60 ? 'bring_to_world' : 'make_acceptable';
 
   const primaryControl = useMemo(() => {
     const hasIdea = Boolean(userInput.idea.trim());
-    const hasReasoning = simulation.reasoningFeed.length > 0;
 
     if (simulation.status === 'running') {
       return {
@@ -2275,6 +2328,19 @@ If rejection is about competition or location, suggest searching for a better lo
         busy: clarificationBusy,
         tone: 'warning' as const,
         icon: 'reasoning' as const,
+        onClick: () => { setActivePanel('chat'); },
+      };
+    }
+
+    if (isResearchReviewPause) {
+      return {
+        key: 'research_review_required',
+        label: settings.language === 'ar' ? 'مراجعة نتائج البحث' : 'Review search results',
+        description: settings.language === 'ar' ? 'استخدم بطاقة مراجعة الروابط داخل الدردشة' : 'Use the URL review card in chat',
+        disabled: false,
+        busy: researchReviewBusy,
+        tone: 'warning' as const,
+        icon: 'sparkles' as const,
         onClick: () => { setActivePanel('chat'); },
       };
     }
@@ -2348,19 +2414,6 @@ If rejection is about competition or location, suggest searching for a better lo
       };
     }
 
-    if (simulation.status === 'completed' && hasReasoning) {
-      return {
-        key: 'open_reasoning',
-        label: settings.language === 'ar' ? 'عرض التفكير النهائي' : 'Open final reasoning',
-        description: settings.language === 'ar' ? 'عرض كامل من نفس زر التحكم الرئيسي' : 'Open full reasoning from the main controller',
-        disabled: false,
-        busy: false,
-        tone: 'secondary' as const,
-        icon: 'reasoning' as const,
-        onClick: handleOpenReasoning,
-      };
-    }
-
     return {
       key: 'start',
       label: settings.language === 'ar' ? 'ابدأ المحاكاة' : 'Start simulation',
@@ -2377,20 +2430,20 @@ If rejection is about competition or location, suggest searching for a better lo
     handleConfirmStart,
     handleManualPause,
     handleManualResume,
-    handleOpenReasoning,
     handleSearchRetry,
     isClarificationPause,
+    isResearchReviewPause,
     isChatThinking,
     isConfigSearching,
     pauseBusy,
     pendingConfigReview,
     pendingResearchReview,
+    researchReviewBusy,
     simulation.currentPhaseKey,
     resumeBusy,
     searchState.status,
     settings.language,
     showResumeAction,
-    simulation.reasoningFeed.length,
     simulation.simulationId,
     simulation.status,
     setActivePanel,
@@ -2437,6 +2490,14 @@ If rejection is about competition or location, suggest searching for a better lo
           )}
         </div>
       )}
+      {isResearchReviewPause && (
+        <div className="mx-4 mt-3 rounded-2xl border border-cyan-400/30 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100">
+          <p>{researchReviewBannerText}</p>
+          {simulation.pendingResearchReview?.gapSummary && (
+            <p className="text-xs text-cyan-200/80 mt-1">{simulation.pendingResearchReview.gapSummary}</p>
+          )}
+        </div>
+      )}
       {showResumeAction && (
         <div className="mx-4 mt-3 rounded-2xl border border-cyan-400/30 bg-cyan-400/10 px-4 py-3 text-sm text-cyan-100">
           <p>{resumeBannerText}</p>
@@ -2447,9 +2508,9 @@ If rejection is about competition or location, suggest searching for a better lo
       )}
 
       <div className="flex-1 overflow-hidden min-h-0 p-3 md:p-4">
-        <div className="h-full grid grid-cols-1 xl:grid-cols-[62%_38%] gap-4 min-h-0">
+        <div dir="ltr" className="h-full grid grid-cols-1 xl:grid-cols-[65%_35%] gap-4 min-h-0">
           <div className="order-2 xl:order-1 min-h-0 grid grid-rows-[minmax(0,1fr)_auto] gap-4">
-            <div className="min-h-0 grid grid-cols-1 2xl:grid-cols-[minmax(0,1fr)_340px] gap-4">
+            <div className="min-h-0 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] gap-4">
               <div className="min-h-0 rounded-2xl border border-border/50 overflow-hidden">
                 <SimulationArena
                   agents={Array.from(simulation.agents.values())}
@@ -2506,7 +2567,7 @@ If rejection is about competition or location, suggest searching for a better lo
               </div>
             </div>
 
-            <div className="min-h-0 flex-1">
+            <div className="min-h-0 flex-1" dir={settings.language === 'ar' ? 'rtl' : 'ltr'}>
               {activePanel === 'config' ? (
                 <ConfigPanel
                   value={userInput}
@@ -2554,12 +2615,16 @@ If rejection is about competition or location, suggest searching for a better lo
                   quickReplies={quickReplies || undefined}
                   onQuickReply={handleQuickReply}
                   primaryControl={primaryControl}
-                  onOpenReasoning={handleOpenReasoning}
                   pendingClarification={simulation.pendingClarification}
                   canAnswerClarification={simulation.canAnswerClarification}
                   clarificationBusy={clarificationBusy}
                   onSubmitClarification={handleSubmitClarification}
+                  pendingResearchReview={simulation.pendingResearchReview}
+                  researchReviewBusy={researchReviewBusy}
+                  onSubmitResearchReviewAction={handleSubmitResearchAction}
                   postActionsEnabled={simulation.status === 'completed' && Boolean(simulation.simulationId)}
+                  recommendedPostAction={recommendedPostAction}
+                  finalAcceptancePct={finalAcceptancePct}
                   postActionBusy={postActionBusy}
                   postActionResult={postActionResult}
                   onRunPostAction={(action) => { void handleRunPostAction(action); }}

@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
   Brain, TrendingUp, Users, Zap, Settings,
   LogOut, Plus, Search, Bell, User,
   CreditCard, Shield, Globe, Moon, Sun, Home,
-  Scale, Sparkles, BarChart3, Clock, CheckCircle2, AlertTriangle, Target,
+  Scale, Sparkles, BarChart3, Clock, CheckCircle2, AlertTriangle, Target, Beaker,
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { RippleButton } from '@/components/ui/ripple-button';
@@ -27,6 +27,7 @@ import SimulationDetails, { type SimulationData } from '@/components/dashboard/S
 import ResearchTab from '@/components/dashboard/ResearchTab';
 import IdeaCourtTab from '@/components/dashboard/IdeaCourtTab';
 import AdminTab from '@/components/dashboard/AdminTab';
+import DeveloperLabTab from '@/components/dashboard/DeveloperLabTab';
 import NotificationsPanel, { type NotificationItem } from '@/components/dashboard/NotificationsPanel';
 import { getIdeaLog, type IdeaLogEntry } from '@/lib/ideaLog';
 
@@ -255,6 +256,7 @@ export default function DashboardPage() {
     return simulations.filter((sim) => sim.name.toLowerCase().includes(query));
   }, [searchQuery, simulations]);
   const isAdmin = user?.role === 'admin';
+  const isDeveloper = user?.role === 'developer' || isAdmin;
   const totalSimulations = analytics?.totals.total_simulations ?? simulations.length;
   const completedSimulations = analytics?.totals.completed ?? simulations.filter((sim) => sim.status === 'completed').length;
   const totalAgents = analytics?.totals.total_agents ?? simulations.reduce((sum, sim) => sum + (sim.agents || 0), 0);
@@ -289,6 +291,7 @@ export default function DashboardPage() {
     { label: isRTL ? 'البحث' : 'Research', icon: Search, id: 'research' },
     { label: isRTL ? 'محكمة الأفكار' : 'Idea Court', icon: Scale, id: 'idea-court' },
     { label: isRTL ? 'التحليلات' : 'Analytics', icon: BarChart3, id: 'analytics' },
+    ...(isDeveloper ? [{ label: isRTL ? 'مختبر المطور' : 'Developer Lab', icon: Beaker, id: 'developer-lab' }] : []),
     ...(isAdmin ? [{ label: isRTL ? 'الإدارة' : 'Admin', icon: Shield, id: 'admin' }] : []),
     { label: isRTL ? 'الإعدادات' : 'Settings', icon: Settings, id: 'settings' },
   ];
@@ -504,7 +507,7 @@ export default function DashboardPage() {
   const renderOverview = () => (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold">{isRTL ? 'أهلاً بك' : 'Welcome back'} 👋</h1>
+        <h1 className="text-3xl font-bold">{isRTL ? 'أهلاً بك' : 'Welcome back'} ًں‘‹</h1>
         <p className="text-muted-foreground mt-1">{isRTL ? 'ملخص نشاطك' : "Here's your activity summary"}</p>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -955,6 +958,7 @@ export default function DashboardPage() {
         </div>
       );
       case 'idea-court': return <IdeaCourtTab />;
+      case 'developer-lab': return <DeveloperLabTab />;
       case 'admin': return <AdminTab />;
       case 'simulations': return renderSimulations();
       case 'analytics': return renderAnalytics();
@@ -1076,5 +1080,8 @@ export default function DashboardPage() {
     </div>
   );
 }
+
+
+
 
 

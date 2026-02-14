@@ -1,4 +1,4 @@
-import { useRef, useMemo } from 'react';
+import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, PerspectiveCamera, Line, Sphere } from '@react-three/drei';
 import * as THREE from 'three';
@@ -167,6 +167,33 @@ interface SimulationArenaProps {
 }
 
 export const SimulationArena = ({ agents, activePulses }: SimulationArenaProps) => {
+  const [contextLost, setContextLost] = useState(false);
+  const [canvasKey, setCanvasKey] = useState(0);
+  const cleanupGlListenersRef = useRef<(() => void) | null>(null);
+
+  const bindGlLifecycle = useCallback((state: { gl: THREE.WebGLRenderer }) => {
+    cleanupGlListenersRef.current?.();
+    const canvas = state.gl.domElement;
+
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      setContextLost(true);
+    };
+    const handleContextRestored = () => {
+      setContextLost(false);
+    };
+
+    canvas.addEventListener('webglcontextlost', handleContextLost, false);
+    canvas.addEventListener('webglcontextrestored', handleContextRestored, false);
+
+    cleanupGlListenersRef.current = () => {
+      canvas.removeEventListener('webglcontextlost', handleContextLost, false);
+      canvas.removeEventListener('webglcontextrestored', handleContextRestored, false);
+    };
+  }, []);
+
+  useEffect(() => () => cleanupGlListenersRef.current?.(), []);
+
   return (
     <div className="w-full h-full relative">
       {/* Legend */}
@@ -198,7 +225,7 @@ export const SimulationArena = ({ agents, activePulses }: SimulationArenaProps) 
         </div>
       </div>
       
-      <Canvas>
+      <Canvas key={canvasKey} onCreated={bindGlLifecycle}>
         <PerspectiveCamera makeDefault position={[0, 0, 12]} fov={60} />
         <OrbitControls 
           enablePan={false}
@@ -224,6 +251,26 @@ export const SimulationArena = ({ agents, activePulses }: SimulationArenaProps) 
           />
         </Sphere>
       </Canvas>
+
+      {contextLost && (
+        <div className="absolute inset-0 z-20 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="rounded-lg border border-border bg-card/90 p-4 text-center space-y-3 max-w-xs">
+            <div className="text-sm text-foreground">
+              WebGL context lost. Visualization paused.
+            </div>
+            <button
+              type="button"
+              className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-sm"
+              onClick={() => {
+                setContextLost(false);
+                setCanvasKey((prev) => prev + 1);
+              }}
+            >
+              Retry renderer
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

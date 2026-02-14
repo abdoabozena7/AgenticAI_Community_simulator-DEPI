@@ -34,6 +34,9 @@ def _db_config(include_db: bool = True) -> Dict[str, Any]:
         "user": os.getenv("DB_USER") or os.getenv("MYSQL_USER", "root"),
         "password": os.getenv("DB_PASSWORD") or os.getenv("MYSQL_PASSWORD", ""),
         "autocommit": True,
+        "charset": "utf8mb4",
+        "use_unicode": True,
+        "collation": "utf8mb4_unicode_ci",
     }
     if include_db:
         cfg["database"] = _resolve_db_name()
@@ -158,6 +161,7 @@ def _apply_migrations(cursor: mysql.connector.cursor.MySQLCursor) -> None:
         "ALTER TABLE users ADD COLUMN email_verified TINYINT(1) NOT NULL DEFAULT 0",
         "ALTER TABLE users ADD COLUMN email_verified_at TIMESTAMP NULL",
         "ALTER TABLE users MODIFY credits DECIMAL(12,2) NOT NULL DEFAULT 0.00",
+        "ALTER TABLE users MODIFY COLUMN role VARCHAR(16) NOT NULL DEFAULT 'user'",
         "ALTER TABLE refresh_tokens MODIFY expires_at DATETIME NOT NULL",
         "ALTER TABLE email_verifications MODIFY expires_at DATETIME NOT NULL",
         "ALTER TABLE password_resets MODIFY expires_at DATETIME NOT NULL",
@@ -189,6 +193,7 @@ def _apply_migrations(cursor: mysql.connector.cursor.MySQLCursor) -> None:
             "id BIGINT AUTO_INCREMENT PRIMARY KEY, "
             "simulation_id VARCHAR(36) NOT NULL, "
             "event_seq BIGINT NULL, "
+            "cycle_id VARCHAR(64) NULL, "
             "url TEXT NULL, "
             "domain VARCHAR(255) NULL, "
             "favicon_url VARCHAR(1024) NULL, "
@@ -196,6 +201,7 @@ def _apply_migrations(cursor: mysql.connector.cursor.MySQLCursor) -> None:
             "status VARCHAR(24) NULL, "
             "snippet TEXT NULL, "
             "error TEXT NULL, "
+            "meta_json JSON NULL, "
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
             "INDEX idx_research_events_sim (simulation_id), "
             "INDEX idx_research_events_seq (simulation_id, event_seq), "
@@ -208,6 +214,8 @@ def _apply_migrations(cursor: mysql.connector.cursor.MySQLCursor) -> None:
         "ALTER TABLE research_events ADD COLUMN http_status INT NULL AFTER title",
         "ALTER TABLE research_events ADD COLUMN content_chars INT NULL AFTER http_status",
         "ALTER TABLE research_events ADD COLUMN relevance_score FLOAT NULL AFTER content_chars",
+        "ALTER TABLE research_events ADD COLUMN cycle_id VARCHAR(64) NULL AFTER event_seq",
+        "ALTER TABLE research_events ADD COLUMN meta_json JSON NULL AFTER error",
         (
             "CREATE TABLE IF NOT EXISTS simulation_chat_events ("
             "id BIGINT AUTO_INCREMENT PRIMARY KEY, "
@@ -243,6 +251,40 @@ def _apply_migrations(cursor: mysql.connector.cursor.MySQLCursor) -> None:
             "setting_key VARCHAR(64) PRIMARY KEY, "
             "setting_value VARCHAR(255) NOT NULL, "
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        ),
+        (
+            "CREATE TABLE IF NOT EXISTS developer_suite_runs ("
+            "id VARCHAR(36) PRIMARY KEY, "
+            "user_id BIGINT NOT NULL, "
+            "status VARCHAR(16) NOT NULL DEFAULT 'running', "
+            "config_json JSON NULL, "
+            "result_json JSON NULL, "
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, "
+            "ended_at TIMESTAMP NULL, "
+            "INDEX idx_dev_suite_runs_user_created (user_id, created_at), "
+            "CONSTRAINT fk_dev_suite_runs_user FOREIGN KEY (user_id) "
+            "REFERENCES users(id) ON DELETE CASCADE"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        ),
+        (
+            "CREATE TABLE IF NOT EXISTS developer_suite_cases ("
+            "id BIGINT AUTO_INCREMENT PRIMARY KEY, "
+            "suite_id VARCHAR(36) NOT NULL, "
+            "case_key VARCHAR(32) NOT NULL, "
+            "simulation_id VARCHAR(36) NULL, "
+            "expected_json JSON NULL, "
+            "actual_json JSON NULL, "
+            "status VARCHAR(16) NOT NULL DEFAULT 'pending', "
+            "pass TINYINT(1) NULL, "
+            "failure_reason TEXT NULL, "
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, "
+            "UNIQUE KEY uq_dev_suite_case (suite_id, case_key), "
+            "INDEX idx_dev_suite_cases_suite (suite_id), "
+            "CONSTRAINT fk_dev_suite_cases_run FOREIGN KEY (suite_id) "
+            "REFERENCES developer_suite_runs(id) ON DELETE CASCADE"
             ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         ),
         (
@@ -552,8 +594,28 @@ async def fetch_simulation_snapshot(simulation_id: str) -> Optional[Dict[str, An
         if isinstance(checkpoint_meta, dict)
         else None
     )
+    checkpoint_pending_research_review = (
+        checkpoint_meta.get("pending_research_review")
+        if isinstance(checkpoint_meta, dict)
+        else None
+    )
     checkpoint_search_quality = (
         checkpoint_meta.get("search_quality")
+        if isinstance(checkpoint_meta, dict)
+        else None
+    )
+    checkpoint_neutral_cap_pct = (
+        checkpoint_meta.get("neutral_cap_pct")
+        if isinstance(checkpoint_meta, dict)
+        else None
+    )
+    checkpoint_neutral_enforcement = (
+        checkpoint_meta.get("neutral_enforcement")
+        if isinstance(checkpoint_meta, dict)
+        else None
+    )
+    checkpoint_clarification_count = (
+        checkpoint_meta.get("clarification_count")
         if isinstance(checkpoint_meta, dict)
         else None
     )
@@ -696,7 +758,8 @@ async def fetch_simulation_snapshot(simulation_id: str) -> Optional[Dict[str, An
     ended_at_iso = _iso_datetime(sim_row.get("ended_at"))
     summary_text = sim_row.get("summary")
     last_error = (checkpoint_row or {}).get("last_error")
-    can_resume = status_value in {"error", "paused"} and str(checkpoint_status_reason or "").strip().lower() != "paused_clarification_needed"
+    blocked_resume_reasons = {"paused_clarification_needed", "paused_research_review"}
+    can_resume = status_value in {"error", "paused"} and str(checkpoint_status_reason or "").strip().lower() not in blocked_resume_reasons
 
     return {
         "simulation_id": simulation_id,
@@ -718,8 +781,12 @@ async def fetch_simulation_snapshot(simulation_id: str) -> Optional[Dict[str, An
         "policy_mode": str(checkpoint_policy_mode) if checkpoint_policy_mode else None,
         "policy_reason": str(checkpoint_policy_reason) if checkpoint_policy_reason else None,
         "search_quality": checkpoint_search_quality if isinstance(checkpoint_search_quality, dict) else None,
+        "neutral_cap_pct": float(checkpoint_neutral_cap_pct) if checkpoint_neutral_cap_pct is not None else None,
+        "neutral_enforcement": str(checkpoint_neutral_enforcement) if checkpoint_neutral_enforcement else None,
+        "clarification_count": int(checkpoint_clarification_count) if checkpoint_clarification_count is not None else None,
         "pending_clarification": checkpoint_pending_clarification if isinstance(checkpoint_pending_clarification, dict) else None,
         "can_answer_clarification": bool(isinstance(checkpoint_pending_clarification, dict) and checkpoint_pending_clarification),
+        "pending_research_review": checkpoint_pending_research_review if isinstance(checkpoint_pending_research_review, dict) else None,
         "checkpoint": checkpoint_data,
     }
 
@@ -908,11 +975,12 @@ async def fetch_simulation_agents_filtered(
 
 async def insert_research_event(simulation_id: str, data: Dict[str, Any]) -> None:
     await execute(
-        "INSERT INTO research_events (simulation_id, event_seq, url, domain, favicon_url, action, status, title, http_status, content_chars, relevance_score, snippet, error) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "INSERT INTO research_events (simulation_id, event_seq, cycle_id, url, domain, favicon_url, action, status, title, http_status, content_chars, relevance_score, snippet, error, meta_json) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             simulation_id,
             data.get("event_seq"),
+            data.get("cycle_id"),
             data.get("url"),
             data.get("domain"),
             data.get("favicon_url"),
@@ -924,13 +992,14 @@ async def insert_research_event(simulation_id: str, data: Dict[str, Any]) -> Non
             data.get("relevance_score"),
             data.get("snippet"),
             data.get("error"),
+            json.dumps(data.get("meta_json") or {}, ensure_ascii=False),
         ),
     )
 
 
 async def fetch_research_events(simulation_id: str) -> List[Dict[str, Any]]:
     rows = await execute(
-        "SELECT event_seq, url, domain, favicon_url, action, status, title, http_status, content_chars, relevance_score, snippet, error, created_at "
+        "SELECT event_seq, cycle_id, url, domain, favicon_url, action, status, title, http_status, content_chars, relevance_score, snippet, error, meta_json, created_at "
         "FROM research_events WHERE simulation_id=%s ORDER BY id ASC",
         (simulation_id,),
         fetch=True,
@@ -940,6 +1009,7 @@ async def fetch_research_events(simulation_id: str) -> List[Dict[str, Any]]:
         items.append(
             {
                 "event_seq": int(row.get("event_seq")) if row.get("event_seq") is not None else None,
+                "cycle_id": row.get("cycle_id"),
                 "url": row.get("url"),
                 "domain": row.get("domain"),
                 "favicon_url": row.get("favicon_url"),
@@ -951,6 +1021,7 @@ async def fetch_research_events(simulation_id: str) -> List[Dict[str, Any]]:
                 "relevance_score": float(row.get("relevance_score")) if row.get("relevance_score") is not None else None,
                 "snippet": row.get("snippet"),
                 "error": row.get("error"),
+                "meta_json": _safe_json(row.get("meta_json"), {}),
                 "timestamp": int((row.get("created_at") or 0).timestamp() * 1000) if row.get("created_at") else None,
             }
         )
@@ -1181,3 +1252,162 @@ async def fetch_audit_logs(user_id: int, limit: int = 20, offset: int = 0) -> Li
             }
         )
     return logs
+
+
+async def insert_developer_suite_run(
+    suite_id: str,
+    user_id: int,
+    *,
+    status: str = "running",
+    config: Optional[Dict[str, Any]] = None,
+) -> None:
+    await execute(
+        "INSERT INTO developer_suite_runs (id, user_id, status, config_json) VALUES (%s, %s, %s, %s) "
+        "ON DUPLICATE KEY UPDATE user_id=VALUES(user_id), status=VALUES(status), config_json=VALUES(config_json)",
+        (
+            suite_id,
+            int(user_id),
+            str(status or "running"),
+            json.dumps(config or {}, ensure_ascii=False),
+        ),
+    )
+
+
+async def update_developer_suite_run(
+    suite_id: str,
+    *,
+    status: Optional[str] = None,
+    result: Optional[Dict[str, Any]] = None,
+    ended: bool = False,
+) -> None:
+    fields: List[str] = []
+    params: List[Any] = []
+    if status is not None:
+        fields.append("status=%s")
+        params.append(str(status))
+    if result is not None:
+        fields.append("result_json=%s")
+        params.append(json.dumps(result, ensure_ascii=False))
+    if ended:
+        fields.append("ended_at=CURRENT_TIMESTAMP")
+    if not fields:
+        return
+    params.append(suite_id)
+    await execute(
+        f"UPDATE developer_suite_runs SET {', '.join(fields)} WHERE id=%s",
+        params,
+    )
+
+
+async def upsert_developer_suite_case(
+    suite_id: str,
+    case_key: str,
+    *,
+    simulation_id: Optional[str] = None,
+    expected: Optional[Dict[str, Any]] = None,
+    actual: Optional[Dict[str, Any]] = None,
+    status: Optional[str] = None,
+    passed: Optional[bool] = None,
+    failure_reason: Optional[str] = None,
+) -> None:
+    await execute(
+        "INSERT INTO developer_suite_cases (suite_id, case_key, simulation_id, expected_json, actual_json, status, pass, failure_reason) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+        "ON DUPLICATE KEY UPDATE "
+        "simulation_id=COALESCE(VALUES(simulation_id), simulation_id), "
+        "expected_json=COALESCE(VALUES(expected_json), expected_json), "
+        "actual_json=COALESCE(VALUES(actual_json), actual_json), "
+        "status=COALESCE(VALUES(status), status), "
+        "pass=COALESCE(VALUES(pass), pass), "
+        "failure_reason=COALESCE(VALUES(failure_reason), failure_reason)",
+        (
+            suite_id,
+            case_key,
+            simulation_id,
+            json.dumps(expected, ensure_ascii=False) if expected is not None else None,
+            json.dumps(actual, ensure_ascii=False) if actual is not None else None,
+            status,
+            int(passed) if passed is not None else None,
+            failure_reason,
+        ),
+    )
+
+
+async def fetch_developer_suite_run(suite_id: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    if user_id is None:
+        run_rows = await execute(
+            "SELECT id, user_id, status, config_json, result_json, created_at, updated_at, ended_at "
+            "FROM developer_suite_runs WHERE id=%s LIMIT 1",
+            (suite_id,),
+            fetch=True,
+        )
+    else:
+        run_rows = await execute(
+            "SELECT id, user_id, status, config_json, result_json, created_at, updated_at, ended_at "
+            "FROM developer_suite_runs WHERE id=%s AND user_id=%s LIMIT 1",
+            (suite_id, int(user_id)),
+            fetch=True,
+        )
+    if not run_rows:
+        return None
+    run = run_rows[0]
+    case_rows = await execute(
+        "SELECT case_key, simulation_id, expected_json, actual_json, status, pass, failure_reason, created_at, updated_at "
+        "FROM developer_suite_cases WHERE suite_id=%s ORDER BY id ASC",
+        (suite_id,),
+        fetch=True,
+    )
+    cases: List[Dict[str, Any]] = []
+    for row in case_rows or []:
+        cases.append(
+            {
+                "key": row.get("case_key"),
+                "simulation_id": row.get("simulation_id"),
+                "expected": _safe_json(row.get("expected_json"), {}),
+                "actual": _safe_json(row.get("actual_json"), {}),
+                "status": row.get("status") or "pending",
+                "pass": bool(row.get("pass")) if row.get("pass") is not None else None,
+                "failures": [str(row.get("failure_reason"))] if row.get("failure_reason") else [],
+            }
+        )
+    return {
+        "suite_id": run.get("id"),
+        "user_id": int(run.get("user_id") or 0),
+        "status": run.get("status") or "running",
+        "config": _safe_json(run.get("config_json"), {}),
+        "result": _safe_json(run.get("result_json"), {}),
+        "cases": cases,
+        "started_at": _iso_datetime(run.get("created_at")),
+        "updated_at": _iso_datetime(run.get("updated_at")),
+        "ended_at": _iso_datetime(run.get("ended_at")),
+    }
+
+
+async def list_developer_suite_runs(user_id: int, limit: int = 20, offset: int = 0) -> Dict[str, Any]:
+    safe_limit = max(1, min(100, int(limit or 20)))
+    safe_offset = max(0, int(offset or 0))
+    rows = await execute(
+        "SELECT id, status, result_json, created_at, ended_at FROM developer_suite_runs "
+        "WHERE user_id=%s ORDER BY created_at DESC LIMIT %s OFFSET %s",
+        (int(user_id), safe_limit, safe_offset),
+        fetch=True,
+    )
+    total_rows = await execute(
+        "SELECT COUNT(*) AS total FROM developer_suite_runs WHERE user_id=%s",
+        (int(user_id),),
+        fetch=True,
+    )
+    items: List[Dict[str, Any]] = []
+    for row in rows or []:
+        result = _safe_json(row.get("result_json"), {})
+        items.append(
+            {
+                "suite_id": row.get("id"),
+                "status": row.get("status") or "running",
+                "summary": result.get("summary") if isinstance(result, dict) else None,
+                "created_at": _iso_datetime(row.get("created_at")),
+                "ended_at": _iso_datetime(row.get("ended_at")),
+            }
+        )
+    total = int((total_rows or [{}])[0].get("total") or 0)
+    return {"items": items, "total": total}

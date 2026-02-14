@@ -51,7 +51,7 @@ export interface SimulationConfig {
 export interface SimulationResponse {
   simulation_id: string;
   status: 'initializing' | 'running' | 'paused' | 'completed' | 'error';
-  status_reason?: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'error' | 'completed';
+  status_reason?: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_research_review' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'error' | 'completed';
 }
 
 export interface SimulationResultResponse {
@@ -72,7 +72,7 @@ export interface SimulationResultResponse {
 export interface SimulationStateResponse {
   simulation_id: string;
   status: 'running' | 'paused' | 'completed' | 'error';
-  status_reason?: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'error' | 'completed';
+  status_reason?: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_research_review' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'error' | 'completed';
   policy_mode?: 'normal' | 'safety_guard_hard';
   policy_reason?: string | null;
   search_quality?: {
@@ -98,6 +98,28 @@ export interface SimulationStateResponse {
     required?: boolean;
   } | null;
   can_answer_clarification?: boolean;
+  pending_research_review?: {
+    cycle_id: string;
+    query_plan: string[];
+    candidate_urls: Array<{
+      id: string;
+      url: string;
+      domain?: string;
+      title?: string;
+      snippet?: string;
+      favicon_url?: string | null;
+      score?: number;
+    }>;
+    quality_snapshot?: {
+      usable_sources: number;
+      domains: number;
+      extraction_success_rate: number;
+      max_content_chars?: number;
+    } | null;
+    gap_summary?: string | null;
+    suggested_queries?: string[];
+    required?: boolean;
+  } | null;
   metrics?: {
     total_agents?: number;
     accepted: number;
@@ -149,6 +171,7 @@ export interface SimulationStateResponse {
   }[];
   research_sources?: {
     event_seq?: number;
+    cycle_id?: string | null;
     url?: string | null;
     domain?: string | null;
     favicon_url?: string | null;
@@ -161,6 +184,7 @@ export interface SimulationStateResponse {
     progress_pct?: number | null;
     snippet?: string | null;
     error?: string | null;
+    meta_json?: Record<string, unknown> | null;
     timestamp?: number | null;
   }[];
   summary?: string;
@@ -277,6 +301,13 @@ export interface SimulationPauseResponse {
   paused: boolean;
 }
 
+export interface SimulationResearchActionResponse {
+  ok: boolean;
+  simulation_id: string;
+  status: 'running' | 'paused' | 'completed' | 'error';
+  status_reason?: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_research_review' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'error' | 'completed';
+}
+
 export interface SimulationChatEventResponse {
   ok: boolean;
   event_seq: number;
@@ -328,6 +359,7 @@ export interface SimulationResearchSourcesResponse {
   simulation_id: string;
   items: {
     event_seq?: number;
+    cycle_id?: string | null;
     url?: string | null;
     domain?: string | null;
     favicon_url?: string | null;
@@ -340,6 +372,7 @@ export interface SimulationResearchSourcesResponse {
     progress_pct?: number | null;
     snippet?: string | null;
     error?: string | null;
+    meta_json?: Record<string, unknown> | null;
     timestamp?: number | null;
   }[];
 }
@@ -364,6 +397,72 @@ export interface NotificationLogItem {
 
 export interface NotificationsResponse {
   items: NotificationLogItem[];
+}
+
+export interface DevLabSearchTestResponse {
+  provider?: string;
+  is_live: boolean;
+  strict_mode: boolean;
+  quality: {
+    usable_sources?: number;
+    domains?: number;
+    extraction_success_rate?: number;
+    max_content_chars?: number;
+  };
+  results: SearchResult[];
+  structured?: SearchStructured;
+  latency_ms: number;
+  warnings: string[];
+}
+
+export interface DevLabLlmTestResponse {
+  text: string;
+  latency_ms: number;
+  model?: string;
+  mojibake_detected: boolean;
+  warnings: string[];
+}
+
+export interface DevLabSuiteCase {
+  key: string;
+  title: string;
+  idea: string;
+  expected: Record<string, unknown>;
+}
+
+export interface DevLabSuiteStartResponse {
+  suite_id: string;
+  status: 'running' | 'completed' | 'failed';
+  created_at?: number;
+}
+
+export interface DevLabSuiteStateResponse {
+  suite_id: string;
+  status: 'running' | 'completed' | 'failed';
+  progress_pct: number;
+  cases: Array<{
+    key: string;
+    simulation_id?: string;
+    expected?: Record<string, unknown>;
+    actual?: Record<string, unknown>;
+    status?: string;
+    pass?: boolean | null;
+    failures?: string[];
+  }>;
+  started_at?: string;
+  ended_at?: string;
+  summary?: Record<string, unknown>;
+}
+
+export interface DevLabSuiteListResponse {
+  items: Array<{
+    suite_id: string;
+    status: string;
+    summary?: Record<string, unknown>;
+    created_at?: string;
+    ended_at?: string;
+  }>;
+  total: number;
 }
 
 class ApiService {
@@ -607,6 +706,53 @@ class ApiService {
     });
   }
 
+  async devlabSearchTest(payload: {
+    query: string;
+    language?: 'ar' | 'en';
+    max_results?: number;
+  }): Promise<DevLabSearchTestResponse> {
+    return this.request<DevLabSearchTestResponse>('/devlab/search/test', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async devlabLlmTest(payload: {
+    prompt: string;
+    system?: string;
+    temperature?: number;
+    language?: 'ar' | 'en';
+  }): Promise<DevLabLlmTestResponse> {
+    return this.request<DevLabLlmTestResponse>('/devlab/llm/test', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async startDevlabReasoningSuite(payload: {
+    language?: 'ar' | 'en';
+    agent_count?: number;
+    iterations?: number;
+    neutral_cap_pct?: number;
+    cases?: DevLabSuiteCase[];
+  }): Promise<DevLabSuiteStartResponse> {
+    return this.request<DevLabSuiteStartResponse>('/devlab/reasoning-suite/start', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async getDevlabReasoningSuiteState(suiteId: string): Promise<DevLabSuiteStateResponse> {
+    return this.request<DevLabSuiteStateResponse>(`/devlab/reasoning-suite/state?suite_id=${encodeURIComponent(suiteId)}`);
+  }
+
+  async listDevlabReasoningSuites(limit = 20, offset = 0): Promise<DevLabSuiteListResponse> {
+    return this.request<DevLabSuiteListResponse>(`/devlab/reasoning-suite/list?limit=${limit}&offset=${offset}`);
+  }
+
   async startSimulation(config: SimulationConfig): Promise<SimulationResponse> {
     // Backend contract: POST /simulation/start
     return this.request<SimulationResponse>('/simulation/start', {
@@ -628,6 +774,21 @@ class ApiService {
     return this.request<SimulationPauseResponse>('/simulation/pause', {
       method: 'POST',
       body: JSON.stringify({ simulation_id: simulationId, reason }),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async submitResearchAction(payload: {
+    simulation_id: string;
+    cycle_id: string;
+    action: 'scrape_selected' | 'continue_search' | 'cancel_review';
+    selected_url_ids?: string[];
+    added_urls?: string[];
+    query_refinement?: string;
+  }): Promise<SimulationResearchActionResponse> {
+    return this.request<SimulationResearchActionResponse>('/simulation/research/action', {
+      method: 'POST',
+      body: JSON.stringify(payload),
       timeoutMs: ApiService.LONG_TIMEOUT_MS,
     });
   }

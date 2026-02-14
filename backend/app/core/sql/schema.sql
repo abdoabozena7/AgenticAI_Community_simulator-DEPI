@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS users (
     username VARCHAR(64) NOT NULL UNIQUE,
     email VARCHAR(128),
     password_hash VARCHAR(256) NOT NULL,
-    role ENUM('user','admin') DEFAULT 'user',
+    role ENUM('user','developer','admin') DEFAULT 'user',
     credits DECIMAL(12,2) DEFAULT 0.00,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -180,6 +180,7 @@ CREATE TABLE IF NOT EXISTS research_events (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     simulation_id VARCHAR(36) NOT NULL,
     event_seq BIGINT,
+    cycle_id VARCHAR(64),
     url TEXT,
     domain VARCHAR(255),
     favicon_url VARCHAR(1024),
@@ -191,6 +192,7 @@ CREATE TABLE IF NOT EXISTS research_events (
     relevance_score FLOAT,
     snippet TEXT,
     error TEXT,
+    meta_json JSON,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_research_events_sim (simulation_id),
     INDEX idx_research_events_seq (simulation_id, event_seq),
@@ -209,6 +211,36 @@ CREATE TABLE IF NOT EXISTS simulation_chat_events (
     INDEX idx_chat_events_sim_seq (simulation_id, event_seq),
     UNIQUE KEY uq_chat_events_sim_msg (simulation_id, message_id),
     FOREIGN KEY (simulation_id) REFERENCES simulations(simulation_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS developer_suite_runs (
+    id VARCHAR(36) PRIMARY KEY,
+    user_id INT NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'running',
+    config_json JSON,
+    result_json JSON,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    ended_at TIMESTAMP NULL,
+    INDEX idx_dev_suite_runs_user_created (user_id, created_at),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS developer_suite_cases (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    suite_id VARCHAR(36) NOT NULL,
+    case_key VARCHAR(32) NOT NULL,
+    simulation_id VARCHAR(36),
+    expected_json JSON,
+    actual_json JSON,
+    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    pass TINYINT(1),
+    failure_reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_dev_suite_case (suite_id, case_key),
+    INDEX idx_dev_suite_cases_suite (suite_id),
+    FOREIGN KEY (suite_id) REFERENCES developer_suite_runs(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS research_sessions (

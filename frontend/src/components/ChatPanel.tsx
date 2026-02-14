@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { ChatMessage, PendingClarification, ReasoningMessage, SimulationStatus } from '@/types/simulation';
+import { ChatMessage, PendingClarification, PendingResearchReview, ReasoningMessage, SimulationStatus } from '@/types/simulation';
 import { cn } from '@/lib/utils';
 import { SearchResult } from '@/services/api';
 
@@ -99,6 +99,7 @@ interface ChatPanelProps {
   };
   researchSourcesLive?: {
     eventSeq?: number;
+    cycleId?: string | null;
     action?: string | null;
     status?: string | null;
     url?: string | null;
@@ -111,6 +112,7 @@ interface ChatPanelProps {
     progressPct?: number | null;
     snippet?: string | null;
     error?: string | null;
+    metaJson?: Record<string, unknown> | null;
     timestamp?: number | null;
   }[];
   primaryControl?: {
@@ -128,7 +130,6 @@ interface ChatPanelProps {
       onClick?: () => void;
     };
   } | null;
-  onOpenReasoning?: () => void;
   pendingClarification?: PendingClarification | null;
   canAnswerClarification?: boolean;
   clarificationBusy?: boolean;
@@ -137,7 +138,18 @@ interface ChatPanelProps {
     selectedOptionId?: string;
     customText?: string;
   }) => void;
+  pendingResearchReview?: PendingResearchReview | null;
+  researchReviewBusy?: boolean;
+  onSubmitResearchReviewAction?: (payload: {
+    cycleId: string;
+    action: 'scrape_selected' | 'continue_search' | 'cancel_review';
+    selectedUrlIds?: string[];
+    addedUrls?: string[];
+    queryRefinement?: string;
+  }) => void;
   postActionsEnabled?: boolean;
+  recommendedPostAction?: 'make_acceptable' | 'bring_to_world';
+  finalAcceptancePct?: number;
   postActionBusy?: 'make_acceptable' | 'bring_to_world' | null;
   postActionResult?: {
     action: 'make_acceptable' | 'bring_to_world';
@@ -165,13 +177,17 @@ function ReadMoreText({
   collapsedLines = 6,
   language,
   className,
+  expanded,
+  onToggleExpanded,
 }: {
   text: string;
   collapsedLines?: number;
   language: 'ar' | 'en';
   className?: string;
+  expanded?: boolean;
+  onToggleExpanded?: () => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [internalExpanded, setInternalExpanded] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
     const apply = () => setIsMobile(window.innerWidth < 768);
@@ -179,9 +195,10 @@ function ReadMoreText({
     window.addEventListener('resize', apply);
     return () => window.removeEventListener('resize', apply);
   }, []);
+  const isExpanded = typeof expanded === 'boolean' ? expanded : internalExpanded;
   const words = useMemo(() => text.trim().split(/\s+/).filter(Boolean).length, [text]);
-  const shouldClamp = words > (isMobile ? 70 : 100);
-  const clampStyle = shouldClamp && !expanded
+  const shouldClamp = words > (isMobile ? 55 : 85);
+  const clampStyle = shouldClamp && !isExpanded
     ? ({
         display: '-webkit-box',
         WebkitLineClamp: collapsedLines,
@@ -199,14 +216,20 @@ function ReadMoreText({
       {shouldClamp && (
         <span
           className="readmore"
-          onClick={() => setExpanded((p) => !p)}
+          onClick={() => {
+            if (onToggleExpanded) {
+              onToggleExpanded();
+              return;
+            }
+            setInternalExpanded((prev) => !prev);
+          }}
           role="button"
           tabIndex={0}
         >
           <ChevronDown
-            className={cn('w-4 h-4 transition-transform', expanded && 'rotate-180')}
+            className={cn('w-4 h-4 transition-transform', isExpanded && 'rotate-180')}
           />
-          {expanded
+          {isExpanded
             ? (language === 'ar' ? 'عرض أقل' : 'Read less')
             : (language === 'ar' ? 'اقرأ المزيد' : 'Read more')}
         </span>
@@ -291,12 +314,16 @@ export function ChatPanel({
   phaseState,
   researchSourcesLive = [],
   primaryControl = null,
-  onOpenReasoning,
   pendingClarification = null,
   canAnswerClarification = false,
   clarificationBusy = false,
   onSubmitClarification,
+  pendingResearchReview = null,
+  researchReviewBusy = false,
+  onSubmitResearchReviewAction,
   postActionsEnabled = false,
+  recommendedPostAction,
+  finalAcceptancePct,
   postActionBusy = null,
   postActionResult = null,
   onRunPostAction,
@@ -314,6 +341,12 @@ export function ChatPanel({
   const [showDebug, setShowDebug] = useState(false);
   const [selectedClarificationOption, setSelectedClarificationOption] = useState<string | null>(null);
   const [clarificationInput, setClarificationInput] = useState('');
+  const [selectedResearchUrlIds, setSelectedResearchUrlIds] = useState<string[]>([]);
+  const [addedResearchUrlsInput, setAddedResearchUrlsInput] = useState('');
+  const [researchRefinementInput, setResearchRefinementInput] = useState('');
+  const [previewUrl, setPreviewUrl] = useState<string>('');
+  const [expandedTextMap, setExpandedTextMap] = useState<Record<string, boolean>>({});
+  const [brokenFaviconMap, setBrokenFaviconMap] = useState<Record<string, boolean>>({});
 
   const isSimulationDone =
     simulationStatus === 'completed' ||
@@ -330,11 +363,15 @@ export function ChatPanel({
     Boolean(research?.signals?.length);
   const hasReasoningContent = reasoningFeed.length > 0;
   const reasoningUnavailable = !hasReasoningContent && !reasoningActive && isSimulationDone;
-  const canOpenReasoning = hasReasoningContent;
   const hasPendingClarification = Boolean(
     canAnswerClarification
     && pendingClarification
     && pendingClarification.questionId
+  );
+  const hasPendingResearchReview = Boolean(
+    pendingResearchReview
+    && pendingResearchReview.cycleId
+    && pendingResearchReview.required
   );
   const recentResearchSources = useMemo(
     () => [...researchSourcesLive]
@@ -348,6 +385,12 @@ export function ChatPanel({
     if (!key) return null;
     const labelsAr: Record<string, string> = {
       intake: 'التهيئة',
+      research_digest: 'تلخيص الأدلة',
+      agent_init: 'تهيئة الوكلاء',
+      deliberation: 'النقاش',
+      convergence: 'تقليل الحياد',
+      verdict: 'الحسم',
+      summary: 'الملخص',
       search_bootstrap: 'البحث الأولي',
       evidence_map: 'جمع الأدلة',
       debate: 'النقاش',
@@ -356,6 +399,12 @@ export function ChatPanel({
     };
     const labelsEn: Record<string, string> = {
       intake: 'Intake',
+      research_digest: 'Research Digest',
+      agent_init: 'Agent Init',
+      deliberation: 'Deliberation',
+      convergence: 'Convergence',
+      verdict: 'Verdict',
+      summary: 'Summary',
       search_bootstrap: 'Search Bootstrap',
       evidence_map: 'Evidence Mapping',
       debate: 'Debate',
@@ -366,6 +415,15 @@ export function ChatPanel({
       ? (labelsAr[key] || key)
       : (labelsEn[key] || key);
   }, [phaseState?.currentPhaseKey, settings.language]);
+  const effectivePostAction: 'make_acceptable' | 'bring_to_world' =
+    recommendedPostAction
+    || ((finalAcceptancePct ?? 0) >= 60 ? 'bring_to_world' : 'make_acceptable');
+  const acceptancePctValue = Number.isFinite(finalAcceptancePct)
+    ? Math.max(0, Math.min(100, finalAcceptancePct as number))
+    : null;
+  const toggleExpandedText = useCallback((key: string) => {
+    setExpandedTextMap((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
 
 
   const formatResearchError = useCallback((errorText?: string | null) => {
@@ -399,12 +457,36 @@ export function ChatPanel({
     return `Search quality is below the required threshold. Usable sources: ${usableCurrent}/${usableRequired}, domains: ${domainsCurrent}/${domainsRequired}, max extracted content: ${charsCurrent}/${charsRequired} chars, extraction success: ${(extractionRate * 100).toFixed(0)}%.`;
   }, [settings.language]);
 
-  const getFavicon = useCallback((item: NonNullable<ChatPanelProps['researchSourcesLive']>[number]) => {
-    if (item.faviconUrl) return item.faviconUrl;
-    const host = (item.domain || '').trim();
-    if (!host) return null;
-    return `https://www.google.com/s2/favicons?domain=${host}&sz=64`;
+  const toSafeHttpUrl = useCallback((value?: string | null): string | null => {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    try {
+      const parsed = new URL(raw);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+      return parsed.toString();
+    } catch {
+      return null;
+    }
   }, []);
+
+  const extractSafeHost = useCallback((value?: string | null): string | null => {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    try {
+      const parsed = raw.includes('://') ? new URL(raw) : new URL(`https://${raw}`);
+      return parsed.hostname || null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const getFavicon = useCallback((item: NonNullable<ChatPanelProps['researchSourcesLive']>[number]) => {
+    const providedFavicon = toSafeHttpUrl(item.faviconUrl);
+    if (providedFavicon) return providedFavicon;
+    const host = extractSafeHost(item.domain) || extractSafeHost(item.url);
+    if (!host) return null;
+    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64`;
+  }, [extractSafeHost, toSafeHttpUrl]);
 
   const [hiddenOptionIds, setHiddenOptionIds] = useState<Set<string>>(new Set());
   const hideTimersRef = useRef<Record<string, number>>({});
@@ -592,6 +674,90 @@ export function ChatPanel({
     selectedClarificationOption,
   ]);
 
+  useEffect(() => {
+    if (!hasPendingResearchReview || !pendingResearchReview) {
+      setSelectedResearchUrlIds([]);
+      setAddedResearchUrlsInput('');
+      setResearchRefinementInput('');
+      setBrokenFaviconMap({});
+      return;
+    }
+    const defaults = pendingResearchReview.candidateUrls.slice(0, 2).map((item) => item.id);
+    const initialPreview =
+      pendingResearchReview.candidateUrls
+        .map((item) => toSafeHttpUrl(item.url))
+        .find((item): item is string => Boolean(item))
+      || '';
+    setSelectedResearchUrlIds(defaults);
+    setPreviewUrl(initialPreview);
+    setBrokenFaviconMap({});
+  }, [hasPendingResearchReview, pendingResearchReview, toSafeHttpUrl]);
+
+  const parsedAddedUrls = useMemo(
+    () => addedResearchUrlsInput
+      .split(/\n|,/g)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 8),
+    [addedResearchUrlsInput]
+  );
+
+  const toggleResearchUrlSelection = useCallback((id: string) => {
+    setSelectedResearchUrlIds((prev) => {
+      if (prev.includes(id)) return prev.filter((item) => item !== id);
+      return [...prev, id];
+    });
+  }, []);
+
+  const handleScrapeSelected = useCallback(() => {
+    if (!hasPendingResearchReview || !pendingResearchReview || !onSubmitResearchReviewAction) return;
+    onSubmitResearchReviewAction({
+      cycleId: pendingResearchReview.cycleId,
+      action: 'scrape_selected',
+      selectedUrlIds: selectedResearchUrlIds,
+      addedUrls: parsedAddedUrls,
+      queryRefinement: researchRefinementInput.trim() || undefined,
+    });
+  }, [
+    hasPendingResearchReview,
+    onSubmitResearchReviewAction,
+    parsedAddedUrls,
+    pendingResearchReview,
+    researchRefinementInput,
+    selectedResearchUrlIds,
+  ]);
+
+  const handleContinueSearch = useCallback(() => {
+    if (!hasPendingResearchReview || !pendingResearchReview || !onSubmitResearchReviewAction) return;
+    onSubmitResearchReviewAction({
+      cycleId: pendingResearchReview.cycleId,
+      action: 'continue_search',
+      queryRefinement: researchRefinementInput.trim() || undefined,
+    });
+  }, [
+    hasPendingResearchReview,
+    onSubmitResearchReviewAction,
+    pendingResearchReview,
+    researchRefinementInput,
+  ]);
+
+  const handleCancelReview = useCallback(() => {
+    if (!hasPendingResearchReview || !pendingResearchReview || !onSubmitResearchReviewAction) return;
+    onSubmitResearchReviewAction({
+      cycleId: pendingResearchReview.cycleId,
+      action: 'cancel_review',
+    });
+  }, [hasPendingResearchReview, onSubmitResearchReviewAction, pendingResearchReview]);
+
+  const previewFallbackText = useMemo(() => {
+    if (!previewUrl) return '';
+    const fromPending = pendingResearchReview?.candidateUrls.find((item) => item.url === previewUrl);
+    if (fromPending?.snippet) return fromPending.snippet;
+    const fromTimeline = researchSourcesLive.find((item) => item.url === previewUrl);
+    return String(fromTimeline?.snippet || '');
+  }, [pendingResearchReview?.candidateUrls, previewUrl, researchSourcesLive]);
+  const safePreviewUrl = useMemo(() => toSafeHttpUrl(previewUrl), [previewUrl, toSafeHttpUrl]);
+
   return (
     <div className="glass-panel h-full flex flex-col min-h-0">
       {/* -------------------- TABS -------------------- */}
@@ -619,7 +785,7 @@ export function ChatPanel({
         {/* Reasoning */}
         <button
           onClick={() => {
-            if (!canOpenReasoning) return;
+            if (!hasReasoningContent) return;
             setActiveTab('reasoning');
           }}
           className={cn(
@@ -627,9 +793,9 @@ export function ChatPanel({
             activeTab === 'reasoning'
               ? 'text-primary'
               : 'text-muted-foreground hover:text-foreground',
-            !canOpenReasoning && 'opacity-50 cursor-not-allowed'
+            !hasReasoningContent && 'opacity-50 cursor-not-allowed'
           )}
-          disabled={!canOpenReasoning}
+          disabled={!hasReasoningContent}
           data-testid="tab-reasoning"
         >
           <span className="flex items-center justify-center gap-2">
@@ -698,7 +864,7 @@ export function ChatPanel({
               /* ------------ LIST OF CHAT MESSAGES ------------ */
               messages.map((msg, idx) => (
                 <div
-                  key={`${msg.id}-${idx}`}
+                  key={msg.id || `msg-${idx}`}
                   className={cn(
                     'message message-compact',
                     msg.type === 'user' ? 'user' : 'bot'
@@ -707,7 +873,13 @@ export function ChatPanel({
                   {/* Simple text bubbles */}
                   {!msg.options && (
                     <div className="bubble bubble-compact">
-                      <ReadMoreText text={msg.content} collapsedLines={6} language={settings.language} />
+                      <ReadMoreText
+                        text={msg.content}
+                        collapsedLines={6}
+                        language={settings.language}
+                        expanded={Boolean(expandedTextMap[`chat-${msg.id}`])}
+                        onToggleExpanded={() => toggleExpandedText(`chat-${msg.id}`)}
+                      />
                     </div>
                   )}
 
@@ -777,6 +949,17 @@ export function ChatPanel({
                     </div>
                     {(() => {
                       const actionAr: Record<string, string> = {
+                        research_started: 'بدء البحث',
+                        query_planned: 'تخطيط الاستعلام',
+                        search_results_ready: 'نتائج البحث جاهزة',
+                        review_required: 'مطلوب مراجعة',
+                        fetch_started: 'بدء الاستخراج',
+                        fetch_done: 'اكتمل جلب الصفحة',
+                        summary_ready: 'ملخص الصفحة',
+                        evidence_cards_ready: 'بطاقات الأدلة',
+                        gaps_ready: 'تحليل الفجوات',
+                        research_done: 'اكتمل البحث',
+                        research_failed: 'فشل البحث',
                         query_started: 'بدء الاستعلام',
                         query_result: 'نتيجة الاستعلام',
                         url_opened: 'فتح الرابط',
@@ -786,6 +969,17 @@ export function ChatPanel({
                         search_failed: 'فشل البحث',
                       };
                       const actionEn: Record<string, string> = {
+                        research_started: 'Research started',
+                        query_planned: 'Query planned',
+                        search_results_ready: 'Search results ready',
+                        review_required: 'Review required',
+                        fetch_started: 'Fetch started',
+                        fetch_done: 'Fetch completed',
+                        summary_ready: 'Page summary ready',
+                        evidence_cards_ready: 'Evidence cards ready',
+                        gaps_ready: 'Gap analysis ready',
+                        research_done: 'Research done',
+                        research_failed: 'Research failed',
                         query_started: 'Query started',
                         query_result: 'Query result',
                         url_opened: 'URL opened',
@@ -815,18 +1009,28 @@ export function ChatPanel({
                         >
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0 flex items-start gap-2">
-                              {getFavicon(item) ? (
-                                <img
-                                  src={getFavicon(item) || undefined}
-                                  alt=""
-                                  className="w-5 h-5 rounded-sm mt-0.5 border border-border/40 bg-card"
-                                  loading="lazy"
-                                />
-                              ) : (
-                                <span className="w-5 h-5 rounded-sm border border-border/40 bg-card flex items-center justify-center mt-0.5">
-                                  <Globe className="w-3 h-3 text-muted-foreground" />
-                                </span>
-                              )}
+                              {(() => {
+                                const iconKey = `${item.eventSeq ?? 'x'}-${item.domain ?? item.url ?? ''}`;
+                                const faviconSrc = getFavicon(item);
+                                if (!faviconSrc || brokenFaviconMap[iconKey]) {
+                                  return (
+                                    <span className="w-5 h-5 rounded-sm border border-border/40 bg-card flex items-center justify-center mt-0.5">
+                                      <Globe className="w-3 h-3 text-muted-foreground" />
+                                    </span>
+                                  );
+                                }
+                                return (
+                                  <img
+                                    src={faviconSrc}
+                                    alt=""
+                                    className="w-5 h-5 rounded-sm mt-0.5 border border-border/40 bg-card"
+                                    loading="lazy"
+                                    onError={() => {
+                                      setBrokenFaviconMap((prev) => ({ ...prev, [iconKey]: true }));
+                                    }}
+                                  />
+                                );
+                              })()}
                               <div className="min-w-0">
                                 <div className="text-foreground truncate font-medium">
                                   {settings.language === 'ar'
@@ -870,6 +1074,127 @@ export function ChatPanel({
                         </div>
                       ));
                     })()}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {hasPendingResearchReview && pendingResearchReview && (
+              <div className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 p-3 space-y-3">
+                <div className="text-sm font-semibold text-cyan-100">
+                  {settings.language === 'ar'
+                    ? 'مراجعة نتائج البحث قبل المتابعة'
+                    : 'Review search results before continuing'}
+                </div>
+                {pendingResearchReview.gapSummary && (
+                  <div className="text-xs text-cyan-100/80">{pendingResearchReview.gapSummary}</div>
+                )}
+                {pendingResearchReview.queryPlan?.length > 0 && (
+                  <div className="text-xs text-cyan-100/80">
+                    {settings.language === 'ar' ? 'خطة الاستعلام:' : 'Query plan:'}{' '}
+                    {pendingResearchReview.queryPlan.slice(0, 3).join(' | ')}
+                  </div>
+                )}
+
+                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                  {pendingResearchReview.candidateUrls.map((item) => {
+                    const checked = selectedResearchUrlIds.includes(item.id);
+                    return (
+                      <label
+                        key={item.id}
+                        className={cn(
+                          'flex items-start gap-2 rounded-lg border px-2 py-2 cursor-pointer transition',
+                          checked ? 'border-primary/40 bg-primary/10' : 'border-border/50 bg-card/60 hover:border-primary/30'
+                        )}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleResearchUrlSelection(item.id)}
+                          disabled={researchReviewBusy}
+                          className="mt-0.5"
+                        />
+                        <button
+                          type="button"
+                          className="min-w-0 flex-1 text-start"
+                          onClick={() => setPreviewUrl(toSafeHttpUrl(item.url) || '')}
+                        >
+                          <div className="text-xs text-foreground truncate">{item.title || item.url}</div>
+                          <div className="text-[11px] text-muted-foreground truncate">{item.domain || item.url}</div>
+                        </button>
+                      </label>
+                    );
+                  })}
+                </div>
+
+                <Input
+                  value={addedResearchUrlsInput}
+                  onChange={(event) => setAddedResearchUrlsInput(event.target.value)}
+                  dir="ltr"
+                  placeholder={settings.language === 'ar' ? 'أضف روابط إضافية (كل رابط في سطر)' : 'Add custom URLs (one per line)'}
+                  disabled={researchReviewBusy}
+                />
+                <Input
+                  value={researchRefinementInput}
+                  onChange={(event) => setResearchRefinementInput(event.target.value)}
+                  dir={settings.language === 'ar' ? 'rtl' : 'ltr'}
+                  placeholder={settings.language === 'ar' ? 'تحسين الاستعلام (اختياري)' : 'Query refinement (optional)'}
+                  disabled={researchReviewBusy}
+                />
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <Button
+                    type="button"
+                    onClick={handleScrapeSelected}
+                    disabled={researchReviewBusy || (!selectedResearchUrlIds.length && !parsedAddedUrls.length)}
+                    className="w-full"
+                  >
+                    {settings.language === 'ar' ? 'استخراج المحدد' : 'Scrape selected'}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={handleContinueSearch}
+                    disabled={researchReviewBusy}
+                    className="w-full"
+                  >
+                    {settings.language === 'ar' ? 'متابعة البحث' : 'Continue search'}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleCancelReview}
+                    disabled={researchReviewBusy}
+                    className="w-full"
+                  >
+                    {settings.language === 'ar' ? 'إبقاء الإيقاف' : 'Keep paused'}
+                  </Button>
+                </div>
+
+                {previewUrl && (
+                  <div className="rounded-lg border border-border/50 bg-card/70 p-2 space-y-2">
+                    <div className="text-xs text-muted-foreground truncate">{previewUrl}</div>
+                    {safePreviewUrl ? (
+                      <div className="h-48 rounded-md overflow-hidden border border-border/40 bg-background/60">
+                        <iframe
+                          src={safePreviewUrl}
+                          title="page-preview"
+                          className="w-full h-full"
+                          loading="lazy"
+                          sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
+                          referrerPolicy="no-referrer"
+                        />
+                      </div>
+                    ) : (
+                      <div className="text-xs text-amber-300/90">
+                        {settings.language === 'ar'
+                          ? 'تعذر معاينة الرابط مباشرة. افتحه في تبويب جديد أو استخدم النص المستخرج.'
+                          : 'Unable to preview this URL directly. Open it in a new tab or use extracted text.'}
+                      </div>
+                    )}
+                    {previewFallbackText && (
+                      <div className="text-xs text-muted-foreground line-clamp-4">{previewFallbackText}</div>
+                    )}
                   </div>
                 )}
               </div>
@@ -944,35 +1269,37 @@ export function ChatPanel({
                     ? 'الخطوات التالية بعد انتهاء المحاكاة'
                     : 'Next actions after simulation completion'}
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    className="w-full justify-center"
-                    disabled={Boolean(postActionBusy)}
-                    onClick={() => onRunPostAction?.('make_acceptable')}
-                  >
-                    {postActionBusy === 'make_acceptable'
-                      ? (settings.language === 'ar' ? 'جاري التحضير...' : 'Preparing...')
-                      : (settings.language === 'ar' ? 'اجعل فكرتك مقبولة' : 'Make your idea acceptable')}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    className="w-full justify-center"
-                    disabled={Boolean(postActionBusy)}
-                    onClick={() => onRunPostAction?.('bring_to_world')}
-                  >
-                    {postActionBusy === 'bring_to_world'
-                      ? (settings.language === 'ar' ? 'جاري التحضير...' : 'Preparing...')
-                      : (settings.language === 'ar' ? 'انطلق بالفكرة للسوق' : 'Bring your idea to world')}
-                  </Button>
-                </div>
+                {acceptancePctValue !== null && (
+                  <div className="text-xs text-muted-foreground">
+                    {settings.language === 'ar'
+                      ? `نسبة القبول النهائية: ${acceptancePctValue.toFixed(0)}%`
+                      : `Final acceptance rate: ${acceptancePctValue.toFixed(0)}%`}
+                  </div>
+                )}
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="w-full justify-center"
+                  disabled={Boolean(postActionBusy)}
+                  onClick={() => onRunPostAction?.(effectivePostAction)}
+                >
+                  {postActionBusy
+                    ? (settings.language === 'ar' ? 'جاري التحضير...' : 'Preparing...')
+                    : effectivePostAction === 'make_acceptable'
+                    ? (settings.language === 'ar' ? 'اجعل فكرتك مقبولة' : 'Make your idea acceptable')
+                    : (settings.language === 'ar' ? 'انطلق بالفكرة للسوق' : 'Bring your idea to world')}
+                </Button>
 
                 {postActionResult && (
                   <div className="rounded-lg border border-border/50 bg-background/40 p-3 space-y-2">
                     <div className="text-sm font-semibold text-foreground">{postActionResult.title}</div>
-                    <ReadMoreText text={postActionResult.summary} collapsedLines={4} language={settings.language} />
+                    <ReadMoreText
+                      text={postActionResult.summary}
+                      collapsedLines={4}
+                      language={settings.language}
+                      expanded={Boolean(expandedTextMap['post-action-summary'])}
+                      onToggleExpanded={() => toggleExpandedText('post-action-summary')}
+                    />
                     {postActionResult.steps?.length > 0 && (
                       <div className="space-y-1">
                         {postActionResult.steps.slice(0, 4).map((step) => (
@@ -992,21 +1319,6 @@ export function ChatPanel({
                   </div>
                 )}
               </div>
-            )}
-
-            {hasReasoningContent && (
-              <Button
-                type="button"
-                variant="secondary"
-                className="w-full justify-center gap-2"
-                onClick={() => {
-                  onOpenReasoning?.();
-                  setActiveTab('reasoning');
-                }}
-              >
-                <Bot className="w-4 h-4" />
-                {settings.language === 'ar' ? 'فتح شاشة التفكير' : 'Open reasoning'}
-              </Button>
             )}
 
             {/* Typing indicator */}
@@ -1165,6 +1477,8 @@ export function ChatPanel({
                             text={msg.message}
                             collapsedLines={7}
                             language={settings.language}
+                            expanded={Boolean(expandedTextMap[`reasoning-${msg.id}`])}
+                            onToggleExpanded={() => toggleExpandedText(`reasoning-${msg.id}`)}
                             className="text-sm text-foreground/95"
                           />
                           {msg.archetype && (
@@ -1371,9 +1685,6 @@ export function ChatPanel({
                 type="button"
                 onClick={() => {
                   primaryControl.onClick?.();
-                  if (primaryControl.key === 'open_reasoning' && canOpenReasoning) {
-                    setActiveTab('reasoning');
-                  }
                 }}
                 disabled={primaryControl.disabled}
                 className={cn(

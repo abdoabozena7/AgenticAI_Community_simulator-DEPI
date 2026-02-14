@@ -1,11 +1,11 @@
 ﻿import { useState, useCallback, useEffect, useReducer, useRef } from 'react';
 import { websocketService, WebSocketEvent, MetricsEvent, ReasoningStepEvent, ReasoningDebugEvent, AgentsEvent } from '@/services/websocket';
 import { apiService, SimulationConfig, SimulationStateResponse, getAuthToken } from '@/services/api';
-import { Agent, ReasoningMessage, ReasoningDebug, SimulationMetrics, SimulationStatus, SimulationChatEvent, PendingClarification } from '@/types/simulation';
+import { Agent, ReasoningMessage, ReasoningDebug, SimulationMetrics, SimulationStatus, SimulationChatEvent, PendingClarification, PendingResearchReview } from '@/types/simulation';
 
 interface SimulationState {
   status: SimulationStatus;
-  statusReason: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'error' | 'completed' | null;
+  statusReason: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_research_review' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'error' | 'completed' | null;
   policyMode: 'normal' | 'safety_guard_hard';
   policyReason: string | null;
   searchQuality: {
@@ -24,6 +24,7 @@ interface SimulationState {
   chatEvents: SimulationChatEvent[];
   researchSources: {
     eventSeq?: number;
+    cycleId?: string | null;
     action?: string | null;
     status?: string | null;
     url?: string | null;
@@ -36,6 +37,7 @@ interface SimulationState {
     progressPct?: number | null;
     snippet?: string | null;
     error?: string | null;
+    metaJson?: Record<string, unknown> | null;
     timestamp: number;
   }[];
   summary: string | null;
@@ -43,6 +45,7 @@ interface SimulationState {
   resumeReason: string | null;
   pendingClarification: PendingClarification | null;
   canAnswerClarification: boolean;
+  pendingResearchReview: PendingResearchReview | null;
   activePulses: { from: string; to: string; active: boolean; pulseProgress: number }[];
 }
 
@@ -65,6 +68,7 @@ type SimulationAction =
   | { type: 'SET_SUMMARY'; payload: string | null }
   | { type: 'SET_RESUME_META'; payload: { canResume: boolean; resumeReason: string | null } }
   | { type: 'SET_CLARIFICATION'; payload: { pendingClarification: PendingClarification | null; canAnswerClarification: boolean } }
+  | { type: 'SET_RESEARCH_REVIEW'; payload: PendingResearchReview | null }
   | { type: 'SET_PULSES'; payload: { from: string; to: string; active: boolean; pulseProgress: number }[] }
   | { type: 'ADD_PULSES'; payload: { from: string; to: string; active: boolean; pulseProgress: number }[] }
   | { type: 'RESET' };
@@ -102,6 +106,7 @@ const initialState: SimulationState = {
   resumeReason: null,
   pendingClarification: null,
   canAnswerClarification: false,
+  pendingResearchReview: null,
   activePulses: [],
 };
 
@@ -431,6 +436,13 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
       };
     }
 
+    case 'SET_RESEARCH_REVIEW': {
+      return {
+        ...state,
+        pendingResearchReview: action.payload,
+      };
+    }
+
     case 'SET_PULSES': {
       return {
         ...state,
@@ -659,6 +671,7 @@ export function useSimulation(options?: UseSimulationOptions) {
     if (stateResponse.research_sources && stateResponse.research_sources.length > 0) {
       const mappedResearch = stateResponse.research_sources.map((entry, index) => ({
         eventSeq: entry.event_seq,
+        cycleId: entry.cycle_id ?? null,
         action: entry.action,
         status: entry.status,
         url: entry.url ?? null,
@@ -671,6 +684,7 @@ export function useSimulation(options?: UseSimulationOptions) {
         progressPct: typeof entry.progress_pct === 'number' ? entry.progress_pct : null,
         snippet: entry.snippet ?? null,
         error: entry.error ?? null,
+        metaJson: entry.meta_json ?? null,
         timestamp: typeof entry.timestamp === 'number' ? entry.timestamp : Date.now() + index,
       }));
       dispatch({ type: 'SET_RESEARCH_SOURCES', payload: mappedResearch });
@@ -728,6 +742,52 @@ export function useSimulation(options?: UseSimulationOptions) {
           : null,
         canAnswerClarification: Boolean(stateResponse.can_answer_clarification),
       },
+    });
+    const pendingResearchRaw = stateResponse.pending_research_review;
+    const mappedPendingResearch: PendingResearchReview | null =
+      pendingResearchRaw && typeof pendingResearchRaw === 'object'
+        ? {
+            cycleId: String(pendingResearchRaw.cycle_id || '').trim(),
+            queryPlan: Array.isArray(pendingResearchRaw.query_plan)
+              ? pendingResearchRaw.query_plan.map((q) => String(q || '').trim()).filter(Boolean)
+              : [],
+            candidateUrls: Array.isArray(pendingResearchRaw.candidate_urls)
+              ? pendingResearchRaw.candidate_urls
+                  .map((item) => {
+                    if (!item || typeof item !== 'object') return null;
+                    const id = String(item.id || '').trim();
+                    const url = String(item.url || '').trim();
+                    if (!id || !url) return null;
+                    return {
+                      id,
+                      url,
+                      domain: typeof item.domain === 'string' ? item.domain : undefined,
+                      title: typeof item.title === 'string' ? item.title : undefined,
+                      snippet: typeof item.snippet === 'string' ? item.snippet : undefined,
+                      faviconUrl: typeof item.favicon_url === 'string' ? item.favicon_url : null,
+                      score: typeof item.score === 'number' ? item.score : undefined,
+                    };
+                  })
+                  .filter((item): item is PendingResearchReview['candidateUrls'][number] => Boolean(item))
+              : [],
+            qualitySnapshot: pendingResearchRaw.quality_snapshot && typeof pendingResearchRaw.quality_snapshot === 'object'
+              ? {
+                  usable_sources: Number((pendingResearchRaw.quality_snapshot as { usable_sources?: number }).usable_sources || 0),
+                  domains: Number((pendingResearchRaw.quality_snapshot as { domains?: number }).domains || 0),
+                  extraction_success_rate: Number((pendingResearchRaw.quality_snapshot as { extraction_success_rate?: number }).extraction_success_rate || 0),
+                  max_content_chars: Number((pendingResearchRaw.quality_snapshot as { max_content_chars?: number }).max_content_chars || 0),
+                }
+              : null,
+            gapSummary: typeof pendingResearchRaw.gap_summary === 'string' ? pendingResearchRaw.gap_summary : null,
+            suggestedQueries: Array.isArray(pendingResearchRaw.suggested_queries)
+              ? pendingResearchRaw.suggested_queries.map((q) => String(q || '').trim()).filter(Boolean)
+              : [],
+            required: Boolean(pendingResearchRaw.required ?? true),
+          }
+        : null;
+    dispatch({
+      type: 'SET_RESEARCH_REVIEW',
+      payload: mappedPendingResearch && mappedPendingResearch.cycleId ? mappedPendingResearch : null,
     });
     dispatch({
       type: 'SET_STATUS_REASON',
@@ -883,6 +943,7 @@ export function useSimulation(options?: UseSimulationOptions) {
           type: 'ADD_RESEARCH_SOURCE',
           payload: {
             eventSeq: event.event_seq,
+            cycleId: event.cycle_id ?? null,
             action: event.action ?? null,
             status: event.status ?? null,
             url: event.url ?? null,
@@ -895,9 +956,70 @@ export function useSimulation(options?: UseSimulationOptions) {
             progressPct: typeof event.progress_pct === 'number' ? event.progress_pct : null,
             snippet: event.snippet ?? null,
             error: event.error ?? null,
+            metaJson: event.meta_json ?? null,
             timestamp: Date.now(),
           },
         });
+        if (event.action === 'review_required') {
+          const raw = event.meta_json && typeof event.meta_json === 'object' ? event.meta_json : {};
+          const pendingReview: PendingResearchReview = {
+            cycleId: String((raw as { cycle_id?: string }).cycle_id || event.cycle_id || '').trim(),
+            queryPlan: Array.isArray((raw as { query_plan?: unknown[] }).query_plan)
+              ? ((raw as { query_plan: unknown[] }).query_plan.map((q) => String(q || '').trim()).filter(Boolean))
+              : [],
+            candidateUrls: Array.isArray((raw as { candidate_urls?: unknown[] }).candidate_urls)
+              ? (raw as { candidate_urls: unknown[] }).candidate_urls
+                  .map((item) => {
+                    if (!item || typeof item !== 'object') return null;
+                    const obj = item as Record<string, unknown>;
+                    const id = String(obj.id || '').trim();
+                    const url = String(obj.url || '').trim();
+                    if (!id || !url) return null;
+                    return {
+                      id,
+                      url,
+                      domain: typeof obj.domain === 'string' ? obj.domain : undefined,
+                      title: typeof obj.title === 'string' ? obj.title : undefined,
+                      snippet: typeof obj.snippet === 'string' ? obj.snippet : undefined,
+                      faviconUrl: typeof obj.favicon_url === 'string' ? obj.favicon_url : null,
+                      score: typeof obj.score === 'number' ? obj.score : undefined,
+                    };
+                  })
+                  .filter((item): item is PendingResearchReview['candidateUrls'][number] => Boolean(item))
+              : [],
+            qualitySnapshot: (raw as { quality_snapshot?: unknown }).quality_snapshot && typeof (raw as { quality_snapshot?: unknown }).quality_snapshot === 'object'
+              ? {
+                  usable_sources: Number(((raw as { quality_snapshot: { usable_sources?: number } }).quality_snapshot.usable_sources) || 0),
+                  domains: Number(((raw as { quality_snapshot: { domains?: number } }).quality_snapshot.domains) || 0),
+                  extraction_success_rate: Number(((raw as { quality_snapshot: { extraction_success_rate?: number } }).quality_snapshot.extraction_success_rate) || 0),
+                  max_content_chars: Number(((raw as { quality_snapshot: { max_content_chars?: number } }).quality_snapshot.max_content_chars) || 0),
+                }
+              : null,
+            gapSummary: typeof (raw as { gap_summary?: unknown }).gap_summary === 'string' ? String((raw as { gap_summary?: unknown }).gap_summary) : null,
+            suggestedQueries: Array.isArray((raw as { suggested_queries?: unknown[] }).suggested_queries)
+              ? ((raw as { suggested_queries: unknown[] }).suggested_queries.map((q) => String(q || '').trim()).filter(Boolean))
+              : [],
+            required: true,
+          };
+          dispatch({ type: 'SET_RESEARCH_REVIEW', payload: pendingReview.cycleId ? pendingReview : null });
+          dispatch({ type: 'SET_STATUS', payload: 'paused' });
+          dispatch({ type: 'SET_STATUS_REASON', payload: 'paused_research_review' });
+          dispatch({ type: 'SET_RESUME_META', payload: { canResume: false, resumeReason: event.error ?? event.snippet ?? null } });
+        } else if (event.action && [
+          'research_started',
+          'query_planned',
+          'search_results_ready',
+          'fetch_started',
+          'fetch_done',
+          'summary_ready',
+          'evidence_cards_ready',
+          'gaps_ready',
+          'research_done',
+        ].includes(event.action)) {
+          dispatch({ type: 'SET_RESEARCH_REVIEW', payload: null });
+          dispatch({ type: 'SET_STATUS', payload: 'running' });
+          dispatch({ type: 'SET_STATUS_REASON', payload: 'running' });
+        }
         break;
       case 'summary':
         dispatch({ type: 'SET_SUMMARY', payload: event.summary });
@@ -1114,6 +1236,46 @@ export function useSimulation(options?: UseSimulationOptions) {
     return response;
   }, [applyStateResponse, clearPolling, mapBackendStatus]);
 
+  const submitResearchAction = useCallback(async (payload: {
+    simulationId: string;
+    cycleId: string;
+    action: 'scrape_selected' | 'continue_search' | 'cancel_review';
+    selectedUrlIds?: string[];
+    addedUrls?: string[];
+    queryRefinement?: string;
+  }) => {
+    const simulationId = payload.simulationId?.trim();
+    if (!simulationId) return null;
+    const opEpoch = requestEpochRef.current + 1;
+    requestEpochRef.current = opEpoch;
+    setError(null);
+    dispatch({ type: 'SET_STATUS', payload: 'configuring' });
+    await ensureSocketConnection();
+    if (requestEpochRef.current !== opEpoch) return null;
+    websocketService.setSimulationSubscription(simulationId);
+    const response = await apiService.submitResearchAction({
+      simulation_id: simulationId,
+      cycle_id: payload.cycleId,
+      action: payload.action,
+      selected_url_ids: payload.selectedUrlIds,
+      added_urls: payload.addedUrls,
+      query_refinement: payload.queryRefinement,
+    });
+    if (requestEpochRef.current !== opEpoch) return response;
+    const snapshot = await apiService.getSimulationState(simulationId).catch(() => null);
+    if (snapshot && (!snapshot.simulation_id || snapshot.simulation_id === simulationId)) {
+      applyStateResponse(snapshot);
+      if (snapshot.status === 'running') beginPolling(simulationId, opEpoch);
+      else clearPolling();
+    } else {
+      dispatch({ type: 'SET_STATUS', payload: mapBackendStatus(response.status) });
+      dispatch({ type: 'SET_STATUS_REASON', payload: response.status_reason ?? null });
+      if (response.status === 'running') beginPolling(simulationId, opEpoch);
+      else clearPolling();
+    }
+    return response;
+  }, [applyStateResponse, beginPolling, clearPolling, ensureSocketConnection, mapBackendStatus]);
+
   const submitClarificationAnswer = useCallback(async (payload: {
     simulationId: string;
     questionId: string;
@@ -1230,6 +1392,7 @@ export function useSimulation(options?: UseSimulationOptions) {
     loadSimulation,
     resumeSimulation,
     pauseSimulation,
+    submitResearchAction,
     submitClarificationAnswer,
     stopSimulation,
     activePulses: state.activePulses,

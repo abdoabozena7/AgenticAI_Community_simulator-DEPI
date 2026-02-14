@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 
 type Language = 'en' | 'ar';
 
@@ -9,19 +9,18 @@ interface LanguageContextType {
   isRTL: boolean;
 }
 
-const translations = {
+const translations: Record<Language, Record<string, string>> = {
   en: {
-    // Navbar
     'nav.features': 'Features',
     'nav.howItWorks': 'How it Works',
     'nav.pricing': 'Pricing',
     'nav.signIn': 'Sign In',
     'nav.startFree': 'Start Free',
 
-    // Hero
     'hero.title1': 'Test Your Idea',
     'hero.title2': 'Before You Build',
-    'hero.subtitle': 'Got an idea stuck in your head? Not sure if it\'s brilliant or just wishful thinking? There\'s a huge difference between an idea being "cool" in your imagination and being realistic, executable, and actually wanted by people.',
+    'hero.subtitle':
+      'Got an idea in your head? We help you validate it before spending time and money.',
     'hero.cta': 'Start Free Trial',
     'hero.watchDemo': 'Watch Demo',
     'hero.stat1': '24+ AI Agents',
@@ -31,177 +30,169 @@ const translations = {
     'hero.stat3': '< 5min',
     'hero.stat3Label': 'Results Time',
 
-    // Problem Section
     'problem.tag': 'The Problem',
     'problem.title': 'Why Most Ideas Fail',
-    'problem.desc': 'You ask ChatGPT "what do you think?" and get a diplomatic, safe answer. That\'s not real validation.',
+    'problem.desc':
+      'Generic chatbot replies are not real validation. You need diverse, realistic perspectives.',
     'problem.point1': 'No real market feedback',
-    'problem.point1Desc': 'AI chatbots give you what you want to hear, not what the market thinks',
+    'problem.point1Desc':
+      'People often hear what they want, not what the market will actually do.',
     'problem.point2': 'Fear of embarrassment',
-    'problem.point2Desc': 'Testing ideas on real people means risking rejection and judgment',
+    'problem.point2Desc':
+      'Testing in public can be risky before the idea is mature.',
     'problem.point3': 'No diverse perspectives',
-    'problem.point3Desc': 'You need skeptics, optimists, risk-takers, and pragmatists to evaluate',
+    'problem.point3Desc':
+      'You need skeptics, optimists, and pragmatists, not one voice.',
 
-    // Solution Section
     'solution.tag': 'The Solution',
     'solution.title': 'Meet ASSET',
     'solution.subtitle': 'AI Social Simulation & Evolution Tool',
-    'solution.desc': 'What if you could test your idea on real people... without actually testing it on people? No embarrassment, no risk, just pure insights.',
+    'solution.desc':
+      'Test ideas in a virtual environment first, then iterate safely.',
 
-    // Simulation
     'sim.tag': 'How it works',
     'sim.title': 'Watch AI Agents Test Your Idea',
-    'sim.desc': 'We built a virtual society of 24 AI agents, each with unique personalities, professional backgrounds, and psychological traits.',
+    'sim.desc':
+      'A virtual society of AI agents with different backgrounds and personalities.',
     'sim.live': 'Live Simulation',
     'sim.agents': 'agents',
     'sim.feature1': 'Real Personalities',
-    'sim.feature1Desc': 'Skeptical developers, practical entrepreneurs, stability-seeking employees, cautious professionals',
+    'sim.feature1Desc': 'Different roles and mindsets for balanced evaluation.',
     'sim.feature2': 'Psychological Traits',
-    'sim.feature2Desc': 'Each agent has different levels of optimism, skepticism, and risk tolerance',
+    'sim.feature2Desc': 'Different optimism, skepticism, and risk tolerance.',
     'sim.feature3': 'Live Debates',
-    'sim.feature3Desc': 'Agents discuss, persuade each other, with opinion leaders influencing the group',
+    'sim.feature3Desc': 'Agents discuss and influence each other in real time.',
     'sim.feature4': 'Real Data Grounding',
-    'sim.feature4Desc': 'Connected to web search analyzing real market conditions, competitors, and regulations',
+    'sim.feature4Desc': 'Web-grounded context when available.',
 
-    // Features
     'features.tag': 'Features',
     'features.title': 'Everything You Need',
-    'features.desc': 'Powerful tools to validate your ideas with confidence',
+    'features.desc': 'Powerful tools to validate your ideas with confidence.',
     'features.f1': 'Instant Results',
-    'features.f1Desc': 'Get comprehensive market feedback in under 5 minutes',
+    'features.f1Desc': 'Fast feedback loop.',
     'features.f2': 'Acceptance Rate',
-    'features.f2Desc': 'See how different demographics respond to your idea',
+    'features.f2Desc': 'See likely audience response.',
     'features.f3': 'Polarization Index',
-    'features.f3Desc': 'Measure how divided or unified opinions are about your concept',
+    'features.f3Desc': 'Measure disagreement and alignment.',
     'features.f4': 'Deep Analysis',
-    'features.f4Desc': 'Strengths, weaknesses, risks, and improvement suggestions',
+    'features.f4Desc': 'Strengths, risks, and suggestions.',
     'features.f5': 'Global Markets',
-    'features.f5Desc': 'Test ideas across different regions and cultures',
+    'features.f5Desc': 'Explore different regions and contexts.',
     'features.f6': 'Real-Time Thinking',
-    'features.f6Desc': 'Watch agents change their minds as they debate',
+    'features.f6Desc': 'Track opinion shifts over time.',
 
-    // Pricing
     'pricing.tag': 'Pricing',
     'pricing.title': 'Start Free Today',
-    'pricing.desc': 'Try everything free for 7 days. No strings attached.',
+    'pricing.desc': 'Try it free first.',
     'pricing.trial': 'Free Trial',
     'pricing.trialTitle': '7-Day Trial',
     'pricing.price': '$0',
     'pricing.per': '/week',
-    'pricing.includes': '3 simulations daily â€¢ Full access',
+    'pricing.includes': '3 simulations daily • Full access',
     'pricing.f1': '3 simulations per day',
     'pricing.f2': '24 AI agents per simulation',
     'pricing.f3': 'Real-time analytics',
-    'pricing.f4': 'Full market insights',
+    'pricing.f4': 'Market insights',
     'pricing.f5': 'Email support',
     'pricing.f6': 'No credit card required',
     'pricing.cta': 'Start Free Trial',
     'pricing.noCard': 'No payment info required to start',
 
-    // CTA
     'cta.title': 'Ready to Validate Your Idea?',
-    'cta.desc': 'Make mistakes in a virtual environment. Refine your idea until you reach the best version ready for real-world success.',
+    'cta.desc': 'Iterate in a safe virtual environment before launch.',
     'cta.button': 'Try ASSET Free',
 
-    // Footer
-    'footer.rights': 'آ© 2024 ASSET. All rights reserved.',
+    'footer.rights': '© 2024 ASSET. All rights reserved.',
     'footer.privacy': 'Privacy Policy',
     'footer.terms': 'Terms of Service',
   },
   ar: {
-    // Navbar
     'nav.features': 'المميزات',
     'nav.howItWorks': 'كيف يعمل',
     'nav.pricing': 'الأسعار',
     'nav.signIn': 'تسجيل الدخول',
-    'nav.startFree': 'ابدأ مجاناً',
+    'nav.startFree': 'ابدأ مجانًا',
 
-    // Hero
     'hero.title1': 'جرّب فكرتك',
     'hero.title2': 'قبل ما تبنيها',
-    'hero.subtitle': 'عندك فكرة مشروع ومحتاج تعرف هل تنفع فعلاً؟ ASSET يختبرها مع وكلاء متعددين قبل ما تصرف وقت وفلوس.',
+    'hero.subtitle':
+      'عندك فكرة في دماغك؟ ASSET يساعدك تختبرها قبل ما تصرف وقت وفلوس.',
     'hero.cta': 'ابدأ تجربة مجانية',
     'hero.watchDemo': 'شاهد العرض',
-    'hero.stat1': '24+ وكيل ذكي',
+    'hero.stat1': '+24 وكيل ذكي',
     'hero.stat1Label': 'مجتمع افتراضي',
     'hero.stat2': '87%',
     'hero.stat2Label': 'دقة النتائج',
     'hero.stat3': '< 5 دقائق',
     'hero.stat3Label': 'وقت النتائج',
 
-    // Problem Section
     'problem.tag': 'المشكلة',
-    'problem.title': 'ليه معظم الأفكار بتفشل؟',
-    'problem.desc': 'لما تسأل ChatGPT "إيه رأيك؟" بيرد عليك برد دبلوماسي. ده مش تقييم حقيقي.',
-    'problem.point1': 'مفيش ردود فعل حقيقية',
-    'problem.point1Desc': 'الشات بوتات بتقولك اللي عايز تسمعه، مش رأي السوق الحقيقي',
+    'problem.title': 'ليه أغلب الأفكار بتفشل',
+    'problem.desc':
+      'الردود العامة من أدوات الدردشة مش تقييم حقيقي. أنت محتاج آراء متنوعة وواقعية.',
+    'problem.point1': 'مفيش رد فعل سوق حقيقي',
+    'problem.point1Desc': 'غالبًا بتسمع اللي عاوز تسمعه، مش اللي السوق هيعمله فعلًا.',
     'problem.point2': 'الخوف من الإحراج',
-    'problem.point2Desc': 'تجربة الأفكار على ناس حقيقيين يعني مخاطرة بالرفض والحكم',
-    'problem.point3': 'مفيش وجهات نظر متنوعة',
-    'problem.point3Desc': 'محتاج متشككين، متفائلين، مغامرين، وعمليين يقيموا فكرتك',
+    'problem.point2Desc': 'اختبار الفكرة على ناس حقيقيين بدري ممكن يكون مكلف.',
+    'problem.point3': 'غياب التنوع في الآراء',
+    'problem.point3Desc': 'لازم متشكك ومتفائل وعملي، مش صوت واحد.',
 
-    // Solution Section
     'solution.tag': 'الحل',
-    'solution.title': 'تعرف على ASSET',
-    'solution.subtitle': 'أداة المحاكاة والتطور الاجتماعي بالذكاء الاصطناعي',
-    'solution.desc': 'إيه رأيك لو تقدر تجرب فكرتك على الناس... من غير ما تجربها على الناس فعلاً؟ من غير إحراج، من غير مخاطرة، بس تحليلات حقيقية.',
+    'solution.title': 'تعرّف على ASSET',
+    'solution.subtitle': 'أداة محاكاة اجتماعية بالذكاء الاصطناعي',
+    'solution.desc': 'اختبر الفكرة افتراضيًا أولًا، ثم طوّرها بثقة.',
 
-    // Simulation
     'sim.tag': 'كيف يعمل',
     'sim.title': 'شاهد الوكلاء وهم يختبرون فكرتك',
-    'sim.desc': 'بنينا مجتمع افتراضي من 24 وكيل ذكاء اصطناعي، كل واحد بشخصية فريدة وخلفية مهنية وسمات نفسية مختلفة.',
+    'sim.desc': 'مجتمع افتراضي من وكلاء بسمات وخلفيات مختلفة.',
     'sim.live': 'محاكاة مباشرة',
     'sim.agents': 'وكيل',
-    'sim.feature1': 'شخصيات حقيقية',
-    'sim.feature1Desc': 'المبرمج المتشكك، رائد الأعمال العملي، الموظف اللي بيدور على الاستقرار، المحترف الحذر',
+    'sim.feature1': 'شخصيات مختلفة',
+    'sim.feature1Desc': 'أدوار وعقليات متنوعة لتقييم متوازن.',
     'sim.feature2': 'سمات نفسية',
-    'sim.feature2Desc': 'كل وكيل ليه مستويات مختلفة من التفاؤل، الشك، والقدرة على تحمل المخاطر',
+    'sim.feature2Desc': 'درجات مختلفة من التفاؤل والشك وتحمّل المخاطر.',
     'sim.feature3': 'نقاشات حية',
-    'sim.feature3Desc': 'الوكلاء بيتناقشوا، بيقنعوا بعض، وفيه قادة رأي بيأثروا على الباقي',
-    'sim.feature4': 'بيانات واقعية',
-    'sim.feature4Desc': 'مربوط بمحرك بحث بيحلل السوق الحقيقي والمنافسين والقوانين',
+    'sim.feature3Desc': 'الوكلاء يناقشون ويؤثرون على بعضهم مباشرة.',
+    'sim.feature4': 'اعتماد على بيانات حقيقية',
+    'sim.feature4Desc': 'ربط بحث ويب عند توفر مصادر مناسبة.',
 
-    // Features
     'features.tag': 'المميزات',
-    'features.title': 'كل اللي محتاجه',
-    'features.desc': 'أدوات قوية لتقييم أفكارك بثقة',
-    'features.f1': 'نتائج فورية',
-    'features.f1Desc': 'احصل على ردود فعل السوق الشاملة في أقل من 5 دقائق',
+    'features.title': 'كل اللي تحتاجه',
+    'features.desc': 'أدوات قوية للتحقق من فكرتك بثقة.',
+    'features.f1': 'نتائج سريعة',
+    'features.f1Desc': 'حلقة تقييم سريعة وواضحة.',
     'features.f2': 'نسبة القبول',
-    'features.f2Desc': 'شوف إزاي فئات مختلفة بتستجيب لفكرتك',
+    'features.f2Desc': 'اعرف رد فعل الجمهور المتوقع.',
     'features.f3': 'مؤشر الاستقطاب',
-    'features.f3Desc': 'قياس مدى انقسام أو اتفاق الآراء حول مفهومك',
+    'features.f3Desc': 'قياس الاختلاف والاتفاق حول الفكرة.',
     'features.f4': 'تحليل عميق',
-    'features.f4Desc': 'نقاط القوة، الضعف، المخاطر، واقتراحات التحسين',
-    'features.f5': 'أسواق عالمية',
-    'features.f5Desc': 'اختبر الأفكار عبر مناطق وثقافات مختلفة',
+    'features.f4Desc': 'نقاط قوة ومخاطر واقتراحات.',
+    'features.f5': 'أسواق متعددة',
+    'features.f5Desc': 'اختبر عبر مناطق وسياقات مختلفة.',
     'features.f6': 'تفكير لحظي',
-    'features.f6Desc': 'شاهد الوكلاء وهم يغيرون رأيهم أثناء النقاش',
+    'features.f6Desc': 'تابع تغيّر الآراء مع الوقت.',
 
-    // Pricing
     'pricing.tag': 'الأسعار',
-    'pricing.title': 'ابدأ مجاناً اليوم',
-    'pricing.desc': 'جرب كل شيء مجاناً لمدة 7 أيام. بدون أي التزام.',
+    'pricing.title': 'ابدأ مجانًا اليوم',
+    'pricing.desc': 'جرّب أولًا بدون تعقيد.',
     'pricing.trial': 'تجربة مجانية',
     'pricing.trialTitle': 'تجربة 7 أيام',
     'pricing.price': '$0',
     'pricing.per': '/أسبوع',
-    'pricing.includes': '3 محاكاة يومياً • وصول كامل',
-    'pricing.f1': '3 محاكاة في اليوم',
-    'pricing.f2': '24 وكيل ذكي لكل محاكاة',
+    'pricing.includes': '3 محاكاة يوميًا • وصول كامل',
+    'pricing.f1': '3 محاكاة يوميًا',
+    'pricing.f2': '24 وكيلًا لكل محاكاة',
     'pricing.f3': 'تحليلات لحظية',
-    'pricing.f4': 'تحليلات سوق كاملة',
-    'pricing.f5': 'دعم بالبريد الإلكتروني',
-    'pricing.f6': 'لا يلزم بطاقة ائتمان',
+    'pricing.f4': 'رؤى سوق',
+    'pricing.f5': 'دعم عبر البريد',
+    'pricing.f6': 'بدون بطاقة ائتمان',
     'pricing.cta': 'ابدأ التجربة المجانية',
-    'pricing.noCard': 'لا يلزم معلومات الدفع للبدء',
+    'pricing.noCard': 'لا يلزم إدخال بيانات دفع للبدء',
 
-    // CTA
-    'cta.title': 'جاهز تقيّم فكرتك؟',
-    'cta.desc': 'اغلط في بيئة افتراضية. عدّل فكرتك لحد ما توصل لأفضل نسخة جاهزة للنجاح في الواقع. 🎯',
-    'cta.button': 'جرب ASSET مجاناً',
+    'cta.title': 'جاهز تختبر فكرتك؟',
+    'cta.desc': 'طوّر الفكرة داخل بيئة افتراضية قبل الإطلاق.',
+    'cta.button': 'جرّب ASSET مجانًا',
 
-    // Footer
     'footer.rights': '© 2024 ASSET. جميع الحقوق محفوظة.',
     'footer.privacy': 'سياسة الخصوصية',
     'footer.terms': 'شروط الخدمة',
@@ -209,6 +200,14 @@ const translations = {
 };
 
 const LanguageContext = createContext<LanguageContextType | undefined>(undefined);
+
+const looksMojibake = (value: string): boolean => {
+  const text = String(value || '');
+  if (!text) return false;
+  if (/[ÃÂØÙ]/.test(text)) return true;
+  if (/ط[^\u0600-\u06FF\s]|ظ[^\u0600-\u06FF\s]/.test(text)) return true;
+  return false;
+};
 
 export function LanguageProvider({ children }: { children: ReactNode }) {
   const [language, setLanguage] = useState<Language>(() => {
@@ -224,7 +223,14 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
   });
 
   const t = (key: string): string => {
-    return translations[language][key as keyof typeof translations['en']] || key;
+    const localized = translations[language][key];
+    if (typeof localized === 'string') {
+      if (language === 'ar' && looksMojibake(localized)) {
+        return translations.en[key] || key;
+      }
+      return localized;
+    }
+    return translations.en[key] || key;
   };
 
   const isRTL = language === 'ar';
