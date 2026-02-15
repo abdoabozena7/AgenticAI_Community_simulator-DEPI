@@ -792,6 +792,13 @@ class SimulationEngine:
         research_summary = str(user_context.get("research_summary") or "")
         research_structured = user_context.get("research_structured") or {}
         search_quality = user_context.get("search_quality") if isinstance(user_context.get("search_quality"), dict) else None
+        preflight_summary = str(user_context.get("preflight_summary") or "").strip()
+        preflight_answers_raw = user_context.get("preflight_answers") if isinstance(user_context.get("preflight_answers"), dict) else {}
+        preflight_answers: Dict[str, str] = {
+            str(axis).strip(): str(value).strip()
+            for axis, value in preflight_answers_raw.items()
+            if str(axis).strip() and str(value).strip()
+        }
         language = str(user_context.get("language") or "ar").lower()
         run_mode = str(user_context.get("run_mode") or checkpoint_meta.get("run_mode") or "normal").strip().lower() or "normal"
         try:
@@ -990,6 +997,11 @@ class SimulationEngine:
                 parts.append(f"location={location}" if language != "ar" else f"المكان={location}")
             if isinstance(risk, (int, float)):
                 parts.append(f"risk={risk:.2f}" if language != "ar" else f"المخاطرة={risk:.2f}")
+            if preflight_summary:
+                clipped_summary = _clip_text(preflight_summary, 180)
+                parts.append(
+                    f"preflight={clipped_summary}" if language != "ar" else f"توضيح ما قبل التشغيل={clipped_summary}"
+                )
             return "; ".join(parts)
 
         def _label_opinion(opinion: str) -> str:
@@ -1197,9 +1209,14 @@ class SimulationEngine:
             "more", "less", "also", "because", "as", "at", "by", "to", "of", "in", "on",
         }
         stop_words_ar = {
-            "ط¸ظ¾ط¸ظ¹", "ط¸â€¦ط¸â€ ", "ط·آ¹ط¸â€‍ط¸â€°", "ط·آ¹ط¸â€ ", "ط¸â€،ط·آ°ط·آ§", "ط¸â€،ط·آ°ط¸â€،", "ط·آ°ط¸â€‍ط¸ئ’", "ط·ع¾ط¸â€‍ط¸ئ’", "ط·آ¥ط¸â€‍ط¸â€°", "ط·آ§ط¸â€‍ط¸â€°", "ط¸â€¦ط·آ¹", "ط¸â€‍ط¸ئ’ط¸â€ ", "ط¸â€‍ط·آ£ط¸â€ ", "ط¸â€‍ط·آ§ط¸â€ ",
-            "ط¸â€،ط¸ث†", "ط¸â€،ط¸ظ¹", "ط¸â€،ط¸â€¦", "ط¸â€،ط¸â€ ", "ط·آ£ط¸â€ ط·ع¾", "ط·آ§ط¸â€ ط·ع¾ط¸â€¦", "ط·آ§ط¸â€ ط·آ§", "ط¸â€ ط·آ­ط¸â€ ", "ط¸ئ’ط·آ§ط¸â€ ", "ط¸ئ’ط·آ§ط¸â€ ط·ع¾", "ط¸ظ¹ط¸ئ’ط¸ث†ط¸â€ ", "ط·آ¨ط·آ³ط·آ¨ط·آ¨", "ط·آ¬ط·آ¯ط·آ§ط¸â€¹",
-            "ط·آ§ط¸ث†", "ط·آ£ط¸ث†", "ط·آ«ط¸â€¦", "ط¸ئ’ط¸â€¦ط·آ§", "ط¸â€ڑط·آ¯", "ط¸â€‍ط¸â€ ", "ط¸â€‍ط·آ§", "ط¸â€¦ط·آ§", "ط¸â€‍ط¸â€¦", "ط¸â€‍ط¸â€¦ط·آ§", "ط¸â€،ط¸â€ ط·آ§ط¸ئ’", "ط¸â€،ط¸â€ ط·آ§",
+            "هذا", "هذه", "ذلك", "تلك", "هنا", "هناك", "الذي", "التي", "الذين",
+            "من", "إلى", "على", "في", "عن", "مع", "بين", "أو", "و", "ثم",
+            "هو", "هي", "هم", "هن", "كان", "كانت", "يكون", "تكون",
+            "ما", "لا", "لم", "لن", "قد", "لقد", "تم", "كل", "أي",
+            "أنا", "انت", "أنت", "انتي", "أنتِ", "نحن", "هم", "هن",
+            "لدى", "عند", "بعد", "قبل", "فقط", "أيضا", "أكثر", "أقل",
+            "جدا", "تماما", "تقريبا", "ضمن", "حول", "بشكل", "طريقة",
+            "الفكرة", "مشروع", "المشروع", "النظام",
         }
 
         def _extract_words(text: str) -> List[str]:
@@ -1229,6 +1246,46 @@ class SimulationEngine:
             if stance_value in {"reject", "neutral"}:
                 return "evidence_gap"
             return "feasibility_scalability"
+
+        clarification_axis_map: Dict[str, str] = {
+            "privacy_surveillance": "privacy_scope",
+            "legal_compliance": "compliance_boundary",
+            "ethical_discrimination": "fairness_guardrails",
+            "unclear_target": "target_segment",
+            "unclear_value": "value_proposition",
+            "feasibility_scalability": "delivery_scope",
+            "market_demand": "demand_validation",
+            "evidence_gap": "evidence_priority",
+        }
+        preflight_axis_by_reason_tag: Dict[str, str] = {
+            "privacy_surveillance": "risk_boundary",
+            "legal_compliance": "risk_boundary",
+            "ethical_discrimination": "risk_boundary",
+            "unclear_target": "target_segment",
+            "unclear_value": "value_proposition",
+            "feasibility_scalability": "delivery_model",
+            "market_demand": "pricing_or_monetization",
+            "evidence_gap": "value_proposition",
+        }
+
+        generic_question_markers = {
+            "for you",
+            "for your team",
+            "before we continue",
+            "قبل الاستكمال",
+            "قبل ما نكمل",
+            "بالنسبة لكم",
+            "عايزين توضيح",
+        }
+
+        generic_option_markers = {
+            "option 1",
+            "option 2",
+            "option 3",
+            "اختيار 1",
+            "اختيار 2",
+            "اختيار 3",
+        }
 
         def _build_clarification_template(reason_tag: str) -> Dict[str, Any]:
             if language == "ar":
@@ -1381,7 +1438,115 @@ class SimulationEngine:
                         "reason_summary": "Agents are blocked by missing evidence.",
                     },
                 }
-            return templates.get(reason_tag, templates["evidence_gap"])
+            template = dict(templates.get(reason_tag, templates["evidence_gap"]))
+            template["decision_axis"] = clarification_axis_map.get(reason_tag, "evidence_priority")
+            return template
+
+        idea_anchor_terms = list(
+            dict.fromkeys(
+                _extract_words(str(user_context.get("idea") or ""))
+                + _extract_words(idea_label_for_llm or "")
+                + _extract_words(_clip_text(research_summary or research_signals or "", 360))
+            )
+        )[:24]
+
+        def _normalize_decision_axis(axis_value: str, reason_tag: str) -> str:
+            axis = _normalized(axis_value or "")
+            if not axis:
+                return clarification_axis_map.get(reason_tag, "evidence_priority")
+            compact = re.sub(r"[^a-z0-9_]+", "_", axis).strip("_")
+            return compact[:64] if compact else clarification_axis_map.get(reason_tag, "evidence_priority")
+
+        def _contains_idea_anchor(text: str) -> bool:
+            normalized_text = _normalized(text)
+            if not normalized_text:
+                return False
+            for token in idea_anchor_terms:
+                if len(token) < 4:
+                    continue
+                if token in normalized_text:
+                    return True
+            return False
+
+        def _looks_generic_question(text: str) -> bool:
+            normalized_text = _normalized(text)
+            if not normalized_text:
+                return True
+            if normalized_text in generic_option_markers:
+                return True
+            return any(marker in normalized_text for marker in generic_question_markers)
+
+        def _is_actionable_option(label: str) -> bool:
+            normalized_label = _normalized(label)
+            if not normalized_label:
+                return False
+            if normalized_label in generic_option_markers:
+                return False
+            if len(normalized_label.split()) < 2:
+                return False
+            actionable_markers = (
+                ["use ", "set ", "limit ", "run ", "launch ", "require ", "pilot ", "remove "]
+                if language != "ar"
+                else ["اعتمد", "حدد", "شغل", "اطلق", "نفذ", "قلل", "منع", "حصر", "نسخة", "مراجعة"]
+            )
+            return any(marker in normalized_label for marker in actionable_markers) or len(normalized_label) >= 12
+
+        def _ensure_meaningful_options(reason_tag: str, options_seed: Any) -> List[Dict[str, str]]:
+            options = _normalize_clarification_options(options_seed)
+            options = [item for item in options if _is_actionable_option(str(item.get("label") or ""))]
+            if len(options) < 3:
+                template = _build_clarification_template(reason_tag)
+                for item in _normalize_clarification_options(template.get("options")):
+                    if len(options) >= 3:
+                        break
+                    key = _normalized(item.get("label") or "")
+                    if not key:
+                        continue
+                    if any(_normalized(existing.get("label") or "") == key for existing in options):
+                        continue
+                    options.append(item)
+            fallback_labels = (
+                [
+                    "Set a strict v1 scope before rollout",
+                    "Run a limited pilot with measurable criteria",
+                    "Block launch until blocker evidence is resolved",
+                ]
+                if language != "ar"
+                else [
+                    "حدد نطاق النسخة الأولى بشكل صارم قبل الإطلاق",
+                    "نفذ تجربة محدودة بمعايير قياس واضحة",
+                    "أوقف الإطلاق حتى يُحسم سبب التعطيل الحالي",
+                ]
+            )
+            idx = 0
+            while len(options) < 3:
+                label = fallback_labels[min(idx, len(fallback_labels) - 1)]
+                idx += 1
+                key = _normalized(label)
+                if any(_normalized(existing.get("label") or "") == key for existing in options):
+                    continue
+                options.append({"id": f"opt_{len(options) + 1}", "label": label})
+            return options[:3]
+
+        def _score_question_quality(
+            *,
+            question: str,
+            options: List[Dict[str, str]],
+            decision_axis: str,
+        ) -> Tuple[float, List[str]]:
+            checks: Dict[str, bool] = {}
+            option_labels = [str(item.get("label") or "") for item in options]
+            merged_text = f"{question} {' '.join(option_labels)}"
+            checks["idea_anchor"] = _contains_idea_anchor(merged_text)
+            checks["decision_axis"] = bool(_normalize_decision_axis(decision_axis, "evidence_gap"))
+            checks["three_options"] = len(options) == 3
+            normalized_option_labels = [_normalized(label) for label in option_labels if label]
+            checks["options_unique"] = len(set(normalized_option_labels)) == len(normalized_option_labels) == 3
+            checks["actionable_options"] = all(_is_actionable_option(label) for label in option_labels)
+            checks["non_generic_question"] = not _looks_generic_question(question)
+            passed = [name for name, ok in checks.items() if ok]
+            score = round((len(passed) / max(1, len(checks))) * 100, 1)
+            return score, passed
 
         def _normalize_clarification_options(raw_options: Any) -> List[Dict[str, str]]:
             normalized: List[Dict[str, str]] = []
@@ -1451,24 +1616,35 @@ class SimulationEngine:
             reason_summary: str,
             snippets: List[str],
             phase_label: str,
+            gate_stats: Optional[Dict[str, Any]] = None,
         ) -> Dict[str, Any]:
             template = _build_clarification_template(reason_tag)
             question = str(template.get("question") or "").strip()
-            options = _normalize_clarification_options(template.get("options"))
+            options = _ensure_meaningful_options(reason_tag, template.get("options"))
             summary_text = str(template.get("reason_summary") or reason_summary).strip() or reason_summary
+            decision_axis = _normalize_decision_axis(
+                str(template.get("decision_axis") or ""),
+                reason_tag,
+            )
             snippets_block = "\n".join([f"- {line}" for line in snippets if line]) or "-"
             language_label = "Arabic" if language == "ar" else "English"
+            anchor_hint = _clip_text(idea_label_for_llm or str(user_context.get("idea") or ""), 80)
             prompt = (
                 "You generate one clarification question for a paused multi-agent debate.\n"
-                "Return JSON only with keys: question, options, reason_summary.\n"
+                "Return JSON only with keys: question, options, reason_summary, decision_axis.\n"
                 "Rules:\n"
                 "- options must be exactly 3 concise and mutually exclusive options.\n"
+                "- options must be actionable decisions, not placeholders.\n"
+                "- question must reference the idea context explicitly.\n"
+                "- question must target one decision axis.\n"
                 "- question must be one sentence.\n"
                 "- reason_summary <= 140 chars.\n"
                 f"Language: {language_label}\n"
                 f"Idea: {idea_label_for_llm}\n"
+                f"Idea anchor hint: {anchor_hint}\n"
                 f"Phase: {phase_label}\n"
                 f"Top reason tag: {reason_tag}\n"
+                f"Decision axis seed: {decision_axis}\n"
                 f"Reason summary seed: {reason_summary}\n"
                 f"Evidence summary: {_clip_text(research_summary or research_signals or '', 320)}\n"
                 f"Representative snippets:\n{snippets_block}\n"
@@ -1482,25 +1658,69 @@ class SimulationEngine:
                     )
                 parsed = _extract_json_dict(raw)
                 parsed_question = str(parsed.get("question") or "").strip()
-                parsed_options = _normalize_clarification_options(parsed.get("options"))
+                parsed_options = _ensure_meaningful_options(reason_tag, parsed.get("options"))
                 parsed_summary = str(parsed.get("reason_summary") or "").strip()
+                parsed_axis = _normalize_decision_axis(str(parsed.get("decision_axis") or ""), reason_tag)
                 if parsed_question and len(parsed_options) == 3:
                     question = parsed_question[:260]
                     options = parsed_options
                 if parsed_summary:
                     summary_text = parsed_summary[:180]
+                if parsed_axis:
+                    decision_axis = parsed_axis
             except Exception:
                 pass
-            if len(options) < 3:
-                options = _normalize_clarification_options(template.get("options"))
-            while len(options) < 3:
-                options.append({"id": f"opt_{len(options) + 1}", "label": f"Option {len(options) + 1}"})
+            if not _contains_idea_anchor(question):
+                if language == "ar":
+                    question = f"في فكرة \"{anchor_hint}\"، {question}"
+                else:
+                    question = f"For \"{anchor_hint}\", {question}"
+            options = _ensure_meaningful_options(reason_tag, options)
+            quality_score, checks_passed = _score_question_quality(
+                question=question,
+                options=options,
+                decision_axis=decision_axis,
+            )
+            if quality_score < 70:
+                question = str(template.get("question") or question).strip()
+                if not _contains_idea_anchor(question):
+                    if language == "ar":
+                        question = f"في فكرة \"{anchor_hint}\"، {question}"
+                    else:
+                        question = f"For \"{anchor_hint}\", {question}"
+                options = _ensure_meaningful_options(reason_tag, template.get("options"))
+                summary_text = str(template.get("reason_summary") or summary_text).strip() or summary_text
+                decision_axis = _normalize_decision_axis(str(template.get("decision_axis") or ""), reason_tag)
+                quality_score, checks_passed = _score_question_quality(
+                    question=question,
+                    options=options,
+                    decision_axis=decision_axis,
+                )
+            supporting_snippets = [
+                _clip_text(str(line or "").strip(), 220)
+                for line in snippets
+                if str(line or "").strip()
+            ][:3]
+            affected_agents: Dict[str, int] = {}
+            if isinstance(gate_stats, dict):
+                affected_agents = {
+                    "reject": int(gate_stats.get("reject_count") or 0),
+                    "neutral": int(gate_stats.get("neutral_count") or 0),
+                    "total_window": int(gate_stats.get("total_window") or 0),
+                }
             return {
                 "question_id": uuid.uuid4().hex[:12],
                 "question": question,
                 "options": options[:3],
                 "reason_tag": reason_tag,
                 "reason_summary": summary_text or reason_summary,
+                "decision_axis": decision_axis,
+                "affected_agents": affected_agents or None,
+                "supporting_snippets": supporting_snippets,
+                "question_quality": {
+                    "score": quality_score,
+                    "checks_passed": checks_passed,
+                },
                 "created_at": int(time.time() * 1000),
                 "required": True,
                 "phase_label": phase_label,
@@ -1522,8 +1742,10 @@ class SimulationEngine:
             total = len(window)
             if total <= 0:
                 return None
-            reject_ratio = sum(1 for item in window if item.get("opinion") == "reject") / total
-            neutral_ratio = sum(1 for item in window if item.get("opinion") == "neutral") / total
+            reject_count = sum(1 for item in window if item.get("opinion") == "reject")
+            neutral_count = sum(1 for item in window if item.get("opinion") == "neutral")
+            reject_ratio = reject_count / total
+            neutral_ratio = neutral_count / total
             focus_items = [item for item in window if item.get("opinion") in {"reject", "neutral"}]
             if not focus_items:
                 return None
@@ -1546,6 +1768,9 @@ class SimulationEngine:
                 "generic_template": "unclear_value",
                 "reused_opener": "unclear_value",
                 "safety_anchor_missing": "legal_compliance",
+                "unsupported_numeric_claim": "evidence_gap",
+                "unsupported_address_claim": "evidence_gap",
+                "unsupported_specific_claim": "evidence_gap",
             }
             unresolved_fallback_reasons = set(fallback_to_reason_tag.keys())
             fallback_reasons = [
@@ -1585,6 +1810,26 @@ class SimulationEngine:
                 return None
             if fallback_quality_stall and dominant_fallback_reason:
                 top_reason_tag = fallback_to_reason_tag.get(dominant_fallback_reason, top_reason_tag)
+            mapped_preflight_axis = preflight_axis_by_reason_tag.get(top_reason_tag)
+            preflight_answer = str(preflight_answers.get(mapped_preflight_axis or "") or "").strip()
+            if preflight_answer:
+                contradiction_markers = (
+                    {"unclear", "missing", "unknown", "not clear", "ambiguous"}
+                    if language != "ar"
+                    else {"غير واضح", "ناقص", "مبهم", "غير محسوم", "محتاج توضيح"}
+                )
+                contradiction_hits = 0
+                for item in focus_items:
+                    msg = _normalized(str(item.get("message") or ""))
+                    if any(marker in msg for marker in contradiction_markers):
+                        contradiction_hits += 1
+                contradiction_ratio = contradiction_hits / max(1, len(focus_items))
+                strong_repeat_signal = (
+                    top_reason_ratio >= 0.65
+                    and (reject_ratio >= 0.65 or neutral_ratio >= 0.45 or contradiction_ratio >= 0.40)
+                )
+                if not strong_repeat_signal:
+                    return None
             same_reason = (
                 top_reason_tag == last_clarification_reason_tag
                 and phase_label == last_clarification_phase
@@ -1618,6 +1863,9 @@ class SimulationEngine:
                 "reason_tag": top_reason_tag,
                 "reason_summary": reason_summary,
                 "representative_snippets": representative,
+                "reject_count": reject_count,
+                "neutral_count": neutral_count,
+                "total_window": total,
                 "reject_ratio": reject_ratio,
                 "neutral_ratio": neutral_ratio,
                 "top_reason_ratio": top_reason_ratio,
@@ -2408,6 +2656,8 @@ class SimulationEngine:
                 "Write 2-4 concise, natural sentences.",
                 "No templates, no bullet lists, no boilerplate.",
                 "Ground the reasoning in concrete details from context/evidence.",
+                "Never invent precise numbers, addresses, standards, or partner claims unless explicitly present in evidence/context.",
+                "If data is missing, say it is missing and ask for clarification instead of guessing.",
             ]
             if hard_unsafe_triggered:
                 lines.extend(
@@ -2431,6 +2681,43 @@ class SimulationEngine:
                 lines.append("Address the reply target's argument naturally without adding IDs or metadata markers.")
             lines.append("Return plain text only.")
             return "\n".join(lines)
+
+        def _detect_unsupported_specifics(text: str, task: Dict[str, Any]) -> Optional[str]:
+            content = str(text or "").strip()
+            if not content:
+                return None
+            evidence_blob = " ".join([
+                str(task.get("evidence_hint") or ""),
+                " ".join([str(x) for x in (task.get("evidence_hints") or []) if str(x).strip()]),
+                str(task.get("reply_to_message") or ""),
+                str(research_summary or ""),
+                str(research_signals or ""),
+                str(idea_label_for_llm or ""),
+            ]).lower()
+            message_lower = content.lower()
+
+            # Reject fabricated precise numerics when no numeric support exists in evidence.
+            numeric_in_message = bool(re.search(r"\b\d+(?:[.,]\d+)?\b", message_lower))
+            numeric_in_evidence = bool(re.search(r"\b\d+(?:[.,]\d+)?\b", evidence_blob))
+            if numeric_in_message and not numeric_in_evidence:
+                return "unsupported_numeric_claim"
+
+            # Reject location/address-level claims if no address-like evidence exists.
+            addr_pattern = r"(?:\b\d{1,4}\s*/\s*\d{1,4}\b|شارع|st\.?\b|street\b|avenue\b|building\b)"
+            if re.search(addr_pattern, message_lower) and not re.search(addr_pattern, evidence_blob):
+                return "unsupported_address_claim"
+
+            # Reject protocol/standard certainty if unsupported by evidence.
+            strict_terms = {
+                "tls 1.3", "oauth2", "oauth 2.0", "jwt", "aes-256", "gdpr", "eeoc",
+                "latency", "traceroute", "ping", "api gateway", "kubernetes",
+            }
+            strict_hits = [term for term in strict_terms if term in message_lower]
+            if strict_hits:
+                supported_hits = [term for term in strict_hits if term in evidence_blob]
+                if len(supported_hits) == 0:
+                    return "unsupported_specific_claim"
+            return None
 
         def _compute_relevance_score(text: str, task: Dict[str, Any]) -> float:
             message_tokens = set(_extract_words(text))
@@ -2480,6 +2767,9 @@ class SimulationEngine:
                 }
                 if not (message_tokens & safety_tokens):
                     return False, "safety_anchor_missing", relevance_score
+            unsupported_specific_reason = _detect_unsupported_specifics(text, task)
+            if unsupported_specific_reason:
+                return False, unsupported_specific_reason, relevance_score
             if relevance_score < reasoning_min_relevance:
                 return False, "low_relevance", relevance_score
             return True, "ok", relevance_score
@@ -2540,6 +2830,7 @@ class SimulationEngine:
         def _build_single_prompt(task: Dict[str, Any]) -> str:
             idea = idea_label_for_llm
             insight = _clip_text(research_summary or research_signals or "", 220)
+            preflight_hint = _clip_text(preflight_summary, 220)
             language_note = "Arabic (Egyptian slang)" if language == "ar" else "English"
             payload = {
                 "agent_id": task["agent"].agent_id,
@@ -2569,6 +2860,7 @@ class SimulationEngine:
                 + idea
                 + "\n"
                 + ("RESEARCH: " + insight + "\n" if insight else "")
+                + ("PREFLIGHT: " + preflight_hint + "\n" if preflight_hint else "")
                 + "TASK JSON:\n"
                 + json.dumps(payload, ensure_ascii=False)
             )
@@ -2644,28 +2936,61 @@ class SimulationEngine:
             }
 
         def _fallback_message(role_label: str, stance: str, evidence_hint: str) -> str:
+            evidence = _clip_text(str(evidence_hint or "").strip(), 180)
             if language == "ar":
-                if stance == "reject":
-                    base = f"كمختص {role_label}، أنا شايف الفكرة دي خطرة ومش هتنفع بالشكل ده."
-                elif stance == "accept":
-                    base = f"كمختص {role_label}، الفكرة دي ممكن تمشي لو التنفيذ مضبوط."
-                else:
-                    base = f"كمختص {role_label}، أنا محتاج توضيح أكتر قبل ما أحكم."
+                openers = {
+                    "reject": [
+                        f"بصراحة من زاوية {role_label}، المخاطر أعلى من الفائدة حالياً.",
+                        f"أنا ميّال للرفض هنا؛ كـ {role_label} شايف فجوات كبيرة في التنفيذ.",
+                    ],
+                    "accept": [
+                        f"أنا مبدئياً موافق كـ {role_label}، لكن التنفيذ لازم يكون محسوب.",
+                        f"من منظور {role_label} الفكرة قابلة للتنفيذ بشرط ضوابط واضحة.",
+                    ],
+                    "neutral": [
+                        f"لسه محتاج نقطة حاسمة قبل القرار كـ {role_label}.",
+                        f"موقفي محايد حالياً؛ في تفاصيل ناقصة بالنسبة لدور {role_label}.",
+                    ],
+                }
+                followups = {
+                    "reject": "الأفضل نوقف ونعالج المخاطر أولاً.",
+                    "accept": "لو اتضبطت المخاطر، ممكن نمشي بخطوة تجريبية.",
+                    "neutral": "وضّح الافتراضات الأساسية والحدود التشغيلية عشان نكمل.",
+                }
+                idx_seed = abs(hash(f"{role_label}:{stance}:{evidence}")) % len(openers.get(stance, openers["neutral"]))
+                base = openers.get(stance, openers["neutral"])[idx_seed]
                 if hard_unsafe_triggered:
-                    base += " السبب الأساسي: مخاطر خصوصية/قانونية وتمييز عالية تتطلب رفض أو تحفّظ واضح."
-                if evidence_hint:
-                    base += f" مؤشر: {evidence_hint}"
+                    base += " عندي قلق واضح بخصوص الخصوصية والامتثال والتمييز."
+                if evidence:
+                    base += f" المعلومة الأقرب المتاحة: {evidence}."
+                base += f" {followups.get(stance, followups['neutral'])}"
                 return _clip_text(base, full_limit)
-            if stance == "reject":
-                base = f"As {role_label}, this is risky as-is."
-            elif stance == "accept":
-                base = f"As {role_label}, this could work with disciplined execution."
-            else:
-                base = f"As {role_label}, I need more concrete detail before deciding."
+            openers_en = {
+                "reject": [
+                    f"From a {role_label} angle, the risk outweighs the upside right now.",
+                    f"I lean reject here; key execution gaps are still unresolved for {role_label}.",
+                ],
+                "accept": [
+                    f"I lean accept as {role_label}, with strict execution controls.",
+                    f"From the {role_label} perspective, this can work if guardrails are explicit.",
+                ],
+                "neutral": [
+                    f"I'm still neutral as {role_label}; one key detail is missing.",
+                    f"I need one concrete clarification before deciding as {role_label}.",
+                ],
+            }
+            followups_en = {
+                "reject": "We should close the risk gaps first.",
+                "accept": "If risks are controlled, a pilot is reasonable.",
+                "neutral": "Clarify assumptions and operating limits so we can proceed.",
+            }
+            idx_seed = abs(hash(f"{role_label}:{stance}:{evidence}")) % len(openers_en.get(stance, openers_en["neutral"]))
+            base = openers_en.get(stance, openers_en["neutral"])[idx_seed]
             if hard_unsafe_triggered:
-                base += " Core concern: serious privacy/legal/discrimination risk."
-            if evidence_hint:
-                base += f" Signal: {evidence_hint}"
+                base += " Main concern: privacy, legal compliance, and discrimination risk."
+            if evidence:
+                base += f" Closest available signal: {evidence}."
+            base += f" {followups_en.get(stance, followups_en['neutral'])}"
             return _clip_text(base, full_limit)
 
         def _sanitize_reasoning_text(
@@ -2752,6 +3077,11 @@ class SimulationEngine:
                 reason_summary=reason_summary,
                 snippets=snippets,
                 phase_label=phase_label_hint,
+                gate_stats={
+                    "reject_count": int(metrics_counts.get("reject") or 0),
+                    "neutral_count": int(metrics_counts.get("neutral") or 0),
+                    "total_window": int(len(agents)),
+                },
             )
             pending_clarification_state = clarification_payload
             last_clarification_step = int(clarification_total_steps)
@@ -3330,6 +3660,7 @@ class SimulationEngine:
                             reason_summary=str(gate.get("reason_summary") or ""),
                             snippets=[str(item) for item in (gate.get("representative_snippets") or [])],
                             phase_label=phase_label,
+                            gate_stats=gate,
                         )
                         clarification_triggered = True
                         pending_clarification_state = clarification_payload

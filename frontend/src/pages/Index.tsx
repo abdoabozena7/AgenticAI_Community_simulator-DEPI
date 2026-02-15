@@ -13,9 +13,9 @@ import { SimulationArena } from '@/components/SimulationArena';
 import { MetricsPanel } from '@/components/MetricsPanel';
 import { IterationTimeline } from '@/components/IterationTimeline';
 import { useSimulation } from '@/hooks/useSimulation';
-import { ChatMessage, UserInput } from '@/types/simulation';
+import { ChatMessage, PreflightQuestion, UserInput } from '@/types/simulation';
 import { websocketService } from '@/services/websocket';
-import { apiService, SearchResponse, UserMe } from '@/services/api';
+import { apiService, SearchResponse, SimulationConfig, SimulationPreflightNextResponse, UserMe } from '@/services/api';
 import { cn } from '@/lib/utils';
 import { addIdeaLogEntry, updateIdeaLogEntry } from '@/lib/ideaLog';
 
@@ -191,58 +191,6 @@ const normalizeAssistantText = (text: string): string => {
     .trim();
 };
 
-const parseNumericQualityFields = (raw: string) => {
-  const text = String(raw || '');
-  const readPair = (key: string) => {
-    const match = text.match(new RegExp(`${key}=([0-9.]+)/([0-9.]+)`, 'i'));
-    if (!match) return null;
-    return {
-      current: Number(match[1]),
-      required: Number(match[2]),
-    };
-  };
-  const usable = readPair('usable_sources');
-  const domains = readPair('domains');
-  const chars = readPair('max_content_chars');
-  const extraction = (() => {
-    const match = text.match(/extraction_success_rate=([0-9.]+)/i);
-    return match ? Number(match[1]) : null;
-  })();
-  return { usable, domains, chars, extraction };
-};
-
-const formatSearchFailureReason = (
-  reason: string | null | undefined,
-  language: 'ar' | 'en',
-  searchQuality?: {
-    usable_sources: number;
-    domains: number;
-    extraction_success_rate: number;
-  } | null
-) => {
-  const raw = String(reason || '').trim();
-  if (!raw) return '';
-  const isQualityGate = /search quality below threshold/i.test(raw);
-  if (!isQualityGate) return raw;
-
-  const parsed = parseNumericQualityFields(raw);
-  const usableCurrent = parsed.usable?.current ?? searchQuality?.usable_sources ?? 0;
-  const usableRequired = parsed.usable?.required ?? 2;
-  const domainsCurrent = parsed.domains?.current ?? searchQuality?.domains ?? 0;
-  const domainsRequired = parsed.domains?.required ?? 2;
-  const charsCurrent = parsed.chars?.current ?? 0;
-  const charsRequired = parsed.chars?.required ?? 80;
-  const extractionRate = parsed.extraction ?? searchQuality?.extraction_success_rate ?? 0;
-
-  if (language === 'ar') {
-    return `جودة البحث أقل من الحد المطلوب. المصادر الصالحة: ${usableCurrent}/${usableRequired}، النطاقات المختلفة: ${domainsCurrent}/${domainsRequired}، أكبر محتوى مستخرج: ${charsCurrent}/${charsRequired} حرف، ونسبة نجاح الاستخراج: ${(extractionRate * 100).toFixed(0)}%.`;
-  }
-
-  return `Search quality is below the required threshold. Usable sources: ${usableCurrent}/${usableRequired}, domains: ${domainsCurrent}/${domainsRequired}, max extracted content: ${charsCurrent}/${charsRequired} chars, extraction success: ${(extractionRate * 100).toFixed(0)}%.`;
-};
-
-
-
 const Index = () => {
   const location = useLocation();
   const navigate = useNavigate();
@@ -284,6 +232,8 @@ const Index = () => {
   const [hasStarted, setHasStarted] = useState(false);
   const [autoStartPending, setAutoStartPending] = useState(false);
   const summaryRef = useRef<string | null>(null);
+  const lastPhaseMarkerRef = useRef<string | null>(null);
+  const lastIterationMarkerRef = useRef<number>(0);
   const searchPromptedRef = useRef(false);
   const searchAttemptRef = useRef(0);
   const [settings, setSettings] = useState({
@@ -293,21 +243,28 @@ const Index = () => {
   });
   const [showSettings, setShowSettings] = useState(false);
 
-  const [activePanel, setActivePanel] = useState<'config' | 'chat'>('chat');
+  const [activePanel, setActivePanel] = useState<'config' | 'chat' | 'reasoning'>('chat');
   const [missingFields, setMissingFields] = useState<string[]>([]);
   const [pendingConfigReview, setPendingConfigReview] = useState(false);
   const [isConfigSearching, setIsConfigSearching] = useState(false);
   const [isChatThinking, setIsChatThinking] = useState(false);
   const [llmBusy, setLlmBusy] = useState(false);
   const [llmRetryMessage, setLlmRetryMessage] = useState<string | null>(null);
-  const [summaryAdvice, setSummaryAdvice] = useState<string>('');
-  const [summaryReasons, setSummaryReasons] = useState<string[]>([]);
   const [pendingResearchReview, setPendingResearchReview] = useState(false);
   const [reportBusy, setReportBusy] = useState(false);
   const [resumeBusy, setResumeBusy] = useState(false);
   const [pauseBusy, setPauseBusy] = useState(false);
   const [researchReviewBusy, setResearchReviewBusy] = useState(false);
   const [clarificationBusy, setClarificationBusy] = useState(false);
+  const [preflightBusy, setPreflightBusy] = useState(false);
+  const [pendingPreflightQuestion, setPendingPreflightQuestion] = useState<PreflightQuestion | null>(null);
+  const [preflightRound, setPreflightRound] = useState(0);
+  const [preflightMaxRounds, setPreflightMaxRounds] = useState(3);
+  const [preflightClarityScore, setPreflightClarityScore] = useState(0);
+  const [preflightMissingAxes, setPreflightMissingAxes] = useState<string[]>([]);
+  const [preflightHistory, setPreflightHistory] = useState<Array<Record<string, unknown>>>([]);
+  const [preflightNormalizedContext, setPreflightNormalizedContext] = useState<Record<string, unknown> | null>(null);
+  const [preflightSummary, setPreflightSummary] = useState<string>('');
   const [postActionBusy, setPostActionBusy] = useState<'make_acceptable' | 'bring_to_world' | null>(null);
   const [postActionResult, setPostActionResult] = useState<{
     action: 'make_acceptable' | 'bring_to_world';
@@ -359,6 +316,14 @@ const Index = () => {
   const consumedRouteStartRef = useRef(false);
   const persistedChatKeysRef = useRef<Set<string>>(new Set());
   const persistChatBusyRef = useRef(false);
+  const preflightResolvedKeyRef = useRef('');
+  const preflightStartPayloadRef = useRef<{
+    preflight_ready: boolean;
+    preflight_summary: string;
+    preflight_answers: Record<string, unknown>;
+    preflight_clarity_score: number;
+    preflight_assumptions: string[];
+  } | null>(null);
 
   const getAssistantMessage = useCallback(async (prompt: string) => {
     const context = chatMessages
@@ -580,13 +545,10 @@ const Index = () => {
   useEffect(() => {
     if (!simulation.summary) return;
     if (simulation.summary === summaryRef.current) return;
-    addSystemMessage(simulation.summary);
+    addSystemMessage(simulation.summary, undefined, 'append');
     const arMatch = simulation.summary.split('صياغة إقناع الرافضين:')[1];
     const enMatch = simulation.summary.split('Advice to persuade rejecters:')[1];
     const advice = (arMatch || enMatch || '').trim();
-    if (advice) {
-      setSummaryAdvice(advice);
-    }
     const reasonKeywords = settings.language === 'ar'
       ? ['خطر', 'قلق', 'رفض', 'غير واضح', 'غير حاسم', 'امتثال', 'ثقة', 'خصوصية', 'تكلفة', 'منافس']
       : ['risk', 'concern', 'reject', 'unclear', 'inconclusive', 'compliance', 'trust', 'privacy', 'cost', 'competition'];
@@ -595,11 +557,33 @@ const Index = () => {
       .map((s) => s.trim())
       .filter(Boolean);
     const reasons = sentences.filter((s) => reasonKeywords.some((k) => s.toLowerCase().includes(k)));
+    const acceptancePct = simulation.metrics.totalAgents > 0
+      ? ((simulation.metrics.accepted / simulation.metrics.totalAgents) * 100)
+      : 0;
+    const recommendation = acceptancePct >= 60
+      ? (settings.language === 'ar' ? 'التوصية: انطلق بالفكرة للسوق.' : 'Recommendation: bring this idea to market.')
+      : (settings.language === 'ar' ? 'التوصية: حسّن الفكرة أولاً لتصبح مقبولة.' : 'Recommendation: make the idea acceptable first.');
+    const statsLine = settings.language === 'ar'
+      ? `النتيجة النهائية: قبول ${simulation.metrics.accepted} | رفض ${simulation.metrics.rejected} | محايد ${simulation.metrics.neutral} | نسبة القبول ${acceptancePct.toFixed(0)}%.`
+      : `Final outcome: accepted ${simulation.metrics.accepted} | rejected ${simulation.metrics.rejected} | neutral ${simulation.metrics.neutral} | acceptance ${acceptancePct.toFixed(0)}%.`;
+    addSystemMessage(`${statsLine}\n${recommendation}`, undefined, 'append');
     if (reasons.length) {
-      setSummaryReasons(reasons.slice(0, 4));
+      const reasonsText = settings.language === 'ar'
+        ? `أبرز أسباب القرار:\n- ${reasons.slice(0, 4).join('\n- ')}`
+        : `Top decision reasons:\n- ${reasons.slice(0, 4).join('\n- ')}`;
+      addSystemMessage(reasonsText, undefined, 'append');
+    }
+    if (advice) {
+      addSystemMessage(
+        settings.language === 'ar'
+          ? `نصيحة لتحسين الإقناع:\n${advice}`
+          : `Advice to improve persuasiveness:\n${advice}`,
+        undefined,
+        'append'
+      );
     }
     summaryRef.current = simulation.summary;
-  }, [simulation.summary, addSystemMessage, settings.language]);
+  }, [simulation.metrics.accepted, simulation.metrics.neutral, simulation.metrics.rejected, simulation.metrics.totalAgents, simulation.summary, addSystemMessage, settings.language]);
 
   useEffect(() => {
     const last = simulation.reasoningFeed.at(-1);
@@ -613,6 +597,63 @@ const Index = () => {
       setReasoningActive(false);
     }, 2200);
   }, [simulation.reasoningFeed, simulation.status]);
+
+  useEffect(() => {
+    if (simulation.status !== 'running') return;
+    if (!simulation.reasoningFeed.length) return;
+
+    const iteration = simulation.metrics.currentIteration || 0;
+    const phaseKey = String(simulation.currentPhaseKey || '').trim();
+
+    const phaseLabelAr: Record<string, string> = {
+      intake: 'التهيئة',
+      research_digest: 'تلخيص الأدلة',
+      agent_init: 'تهيئة الوكلاء',
+      deliberation: 'النقاش',
+      convergence: 'تقليل الحياد',
+      verdict: 'الحسم',
+      summary: 'الملخص',
+      completed: 'اكتمل',
+    };
+    const phaseLabelEn: Record<string, string> = {
+      intake: 'Intake',
+      research_digest: 'Research digest',
+      agent_init: 'Agent init',
+      deliberation: 'Deliberation',
+      convergence: 'Convergence',
+      verdict: 'Verdict',
+      summary: 'Summary',
+      completed: 'Completed',
+    };
+    const phaseLabel = settings.language === 'ar'
+      ? (phaseLabelAr[phaseKey] || phaseKey || 'مرحلة')
+      : (phaseLabelEn[phaseKey] || phaseKey || 'Phase');
+
+    if (iteration > 0 && iteration !== lastIterationMarkerRef.current) {
+      const iterMarker = settings.language === 'ar'
+        ? `التكرار ${iteration} - ${phaseLabel}`
+        : `Iteration ${iteration} - ${phaseLabel}`;
+      addSystemMessage(iterMarker, undefined, 'append');
+      lastIterationMarkerRef.current = iteration;
+      lastPhaseMarkerRef.current = phaseKey || null;
+      return;
+    }
+
+    if (phaseKey && phaseKey !== lastPhaseMarkerRef.current) {
+      const phaseMarker = settings.language === 'ar'
+        ? `المرحلة الحالية: ${phaseLabel}`
+        : `Current phase: ${phaseLabel}`;
+      addSystemMessage(phaseMarker, undefined, 'append');
+      lastPhaseMarkerRef.current = phaseKey;
+    }
+  }, [
+    addSystemMessage,
+    settings.language,
+    simulation.currentPhaseKey,
+    simulation.metrics.currentIteration,
+    simulation.reasoningFeed,
+    simulation.status,
+  ]);
 
   useEffect(() => {
     const saved = localStorage.getItem('appSettings');
@@ -702,13 +743,207 @@ const Index = () => {
     root.classList.add(`theme-${settings.theme}`);
   }, [settings]);
 
+  const computePreflightKey = useCallback((input: UserInput) => JSON.stringify({
+    idea: input.idea.trim(),
+    category: input.category || DEFAULT_CATEGORY,
+    targetAudience: [...input.targetAudience].sort(),
+    country: input.country.trim(),
+    city: input.city.trim(),
+    riskAppetite: Math.max(0, Math.min(100, input.riskAppetite ?? 50)),
+    ideaMaturity: input.ideaMaturity || 'concept',
+    goals: [...input.goals].sort(),
+    language: settings.language,
+  }), [settings.language]);
+
+  const preflightContextKey = useMemo(() => computePreflightKey(userInput), [computePreflightKey, userInput]);
+
+  useEffect(() => {
+    if (preflightResolvedKeyRef.current === preflightContextKey) return;
+    preflightStartPayloadRef.current = null;
+    setPendingPreflightQuestion(null);
+    setPreflightRound(0);
+    setPreflightMaxRounds(3);
+    setPreflightClarityScore(0);
+    setPreflightMissingAxes([]);
+    setPreflightHistory([]);
+    setPreflightNormalizedContext(null);
+    setPreflightSummary('');
+  }, [preflightContextKey]);
+
+  const mapPreflightQuestion = useCallback((question: SimulationPreflightNextResponse['question']): PreflightQuestion | null => {
+    if (!question || typeof question !== 'object') return null;
+    const questionId = String(question.question_id || '').trim();
+    const text = String(question.question || '').trim();
+    if (!questionId || !text) return null;
+    const options = Array.isArray(question.options)
+      ? question.options
+          .map((item, idx) => ({
+            id: String(item?.id || `opt_${idx + 1}`).trim(),
+            label: String(item?.label || '').trim(),
+          }))
+          .filter((item) => item.id && item.label)
+          .slice(0, 3)
+      : [];
+    if (options.length < 3) return null;
+    return {
+      questionId,
+      axis: String(question.axis || '').trim() || 'decision_axis',
+      question: text,
+      options,
+      reasonSummary: question.reason_summary ? String(question.reason_summary).trim() : undefined,
+      required: true,
+      questionQuality: question.question_quality
+        ? {
+            score: typeof question.question_quality.score === 'number' ? question.question_quality.score : undefined,
+            checksPassed: Array.isArray(question.question_quality.checks_passed)
+              ? question.question_quality.checks_passed.map((item) => String(item || '').trim()).filter(Boolean)
+              : undefined,
+          }
+        : null,
+    };
+  }, []);
+
+  const buildPreflightDraftContext = useCallback((input: UserInput) => ({
+    idea: input.idea.trim(),
+    country: input.country.trim(),
+    city: input.city.trim(),
+    category: input.category || DEFAULT_CATEGORY,
+    target_audience: input.targetAudience,
+    goals: input.goals,
+    idea_maturity: input.ideaMaturity || 'concept',
+    risk_appetite: Math.max(0, Math.min(100, input.riskAppetite ?? 50)) / 100,
+    preflight_axis_answers: (
+      preflightNormalizedContext
+      && typeof preflightNormalizedContext.preflight_axis_answers === 'object'
+      && preflightNormalizedContext.preflight_axis_answers
+    )
+      ? (preflightNormalizedContext.preflight_axis_answers as Record<string, string>)
+      : {},
+  }), [preflightNormalizedContext]);
+
+  const finalizePreflight = useCallback(async (
+    normalizedContext: Record<string, unknown>,
+    history: Array<Record<string, unknown>>,
+    contextKey: string,
+  ) => {
+    const final = await apiService.simulationPreflightFinalize({
+      normalized_context: normalizedContext,
+      history,
+      language: settings.language,
+    });
+    const payload = {
+      preflight_ready: true,
+      preflight_summary: String(final.preflight_summary || '').trim(),
+      preflight_answers: (final.preflight_answers && typeof final.preflight_answers === 'object')
+        ? final.preflight_answers
+        : {},
+      preflight_clarity_score: Number(final.preflight_clarity_score || 0),
+      preflight_assumptions: Array.isArray(final.assumptions)
+        ? final.assumptions.map((item) => String(item || '').trim()).filter(Boolean)
+        : [],
+    };
+    preflightStartPayloadRef.current = payload;
+    preflightResolvedKeyRef.current = contextKey;
+    setPreflightSummary(payload.preflight_summary);
+    setPendingPreflightQuestion(null);
+    setPreflightMissingAxes(Array.isArray(final.missing_axes) ? final.missing_axes.map((item) => String(item || '').trim()) : []);
+    setPreflightClarityScore(payload.preflight_clarity_score);
+    return payload;
+  }, [settings.language]);
+
+  const runPreflightGate = useCallback(async (answer?: {
+    questionId: string;
+    selectedOptionId?: string;
+    customText?: string;
+  }, inputOverride?: UserInput): Promise<boolean> => {
+    const draftInput = inputOverride || userInput;
+    const draftKey = computePreflightKey(draftInput);
+    if (preflightResolvedKeyRef.current === draftKey && preflightStartPayloadRef.current) {
+      return true;
+    }
+    if (preflightBusy) return false;
+
+    setPreflightBusy(true);
+    try {
+      const response = await apiService.simulationPreflightNext({
+        draft_context: buildPreflightDraftContext(draftInput),
+        history: preflightHistory,
+        answer: answer
+          ? {
+              question_id: answer.questionId,
+              selected_option_id: answer.selectedOptionId,
+              custom_text: answer.customText,
+            }
+          : undefined,
+        language: settings.language,
+      });
+
+      const nextHistory = Array.isArray(response.history)
+        ? response.history
+        : preflightHistory;
+      const nextContext = (response.normalized_context && typeof response.normalized_context === 'object')
+        ? response.normalized_context
+        : buildPreflightDraftContext(draftInput);
+
+      setPreflightRound(Number(response.round || 0));
+      setPreflightMaxRounds(Number(response.max_rounds || 3));
+      setPreflightClarityScore(Number(response.clarity_score || 0));
+      setPreflightMissingAxes(Array.isArray(response.missing_axes) ? response.missing_axes.map((item) => String(item || '').trim()) : []);
+      setPreflightHistory(nextHistory);
+      setPreflightNormalizedContext(nextContext);
+
+      if (response.ready) {
+        const finalPayload = await finalizePreflight(nextContext, nextHistory, draftKey);
+        if (finalPayload.preflight_summary) {
+          addSystemMessage(finalPayload.preflight_summary);
+        }
+        return true;
+      }
+
+      const mappedQuestion = mapPreflightQuestion(response.question || null);
+      if (!mappedQuestion) {
+        addSystemMessage(
+          settings.language === 'ar'
+            ? 'تعذر توليد سؤال توضيح مناسب. حاول مرة أخرى.'
+            : 'Unable to generate a valid clarification question. Please try again.'
+        );
+        return false;
+      }
+      setPendingPreflightQuestion(mappedQuestion);
+      return false;
+    } catch (err: unknown) {
+      const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
+      addSystemMessage(
+        settings.language === 'ar'
+          ? `تعذر تشغيل مرحلة التوضيح قبل البدء.${msg}`.trim()
+          : `Pre-start clarification failed.${msg}`.trim()
+      );
+      return false;
+    } finally {
+      setPreflightBusy(false);
+    }
+  }, [
+    addSystemMessage,
+    buildPreflightDraftContext,
+    computePreflightKey,
+    finalizePreflight,
+    mapPreflightQuestion,
+    preflightBusy,
+    preflightHistory,
+    settings.language,
+    userInput,
+  ]);
+
   const buildConfig = useCallback((input: UserInput) => {
     const trimmedIdea = input.idea.trim();
     const hasMatchingResearch = Boolean(trimmedIdea && researchIdea && researchIdea === trimmedIdea);
     const researchSummary = hasMatchingResearch ? researchContext.summary : '';
     const researchSources = hasMatchingResearch ? researchContext.sources : [];
     const researchStructured = hasMatchingResearch ? researchContext.structured : undefined;
-    return {
+    const preflightPayload = preflightResolvedKeyRef.current === preflightContextKey
+      ? preflightStartPayloadRef.current
+      : null;
+    const payload: SimulationConfig = {
       idea: trimmedIdea,
       category: input.category || DEFAULT_CATEGORY,
       targetAudience: input.targetAudience,
@@ -724,7 +959,15 @@ const Index = () => {
       speed: simulationSpeed,
       agentCount: input.agentCount,
     };
-  }, [researchContext, researchIdea, settings.language, simulationSpeed]);
+    if (preflightPayload) {
+      payload.preflight_ready = preflightPayload.preflight_ready;
+      payload.preflight_summary = preflightPayload.preflight_summary;
+      payload.preflight_answers = preflightPayload.preflight_answers;
+      payload.preflight_clarity_score = preflightPayload.preflight_clarity_score;
+      payload.preflight_assumptions = preflightPayload.preflight_assumptions;
+    }
+    return payload;
+  }, [preflightContextKey, researchContext, researchIdea, settings.language, simulationSpeed]);
 
   const getMissingForStart = useCallback((input: UserInput, overrideChoice?: 'yes' | 'no' | null) => {
     const missing: string[] = [];
@@ -921,6 +1164,18 @@ const Index = () => {
     const asked = await promptForMissing(missing);
     if (asked) return;
 
+    const preflightReady = await runPreflightGate();
+    if (!preflightReady) {
+      setActivePanel('chat');
+      if (pendingPreflightQuestion) return;
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'قبل التشغيل نحتاج توضيح سريع لبعض النقاط الأساسية.'
+          : 'Before execution, we need a quick clarification on key decisions.'
+      );
+      return;
+    }
+
     if (hasStarted || simulation.status === 'running') return;
     if (isCreditsBlocked(meSnapshot)) {
       const msg = settings.language === 'ar'
@@ -1106,6 +1361,22 @@ const Index = () => {
     simulation,
   ]);
 
+  const handleSubmitPreflight = useCallback(async (payload: {
+    questionId: string;
+    selectedOptionId?: string;
+    customText?: string;
+  }) => {
+    if (preflightBusy) return;
+    const ready = await runPreflightGate(payload);
+    if (!ready) return;
+    addSystemMessage(
+      settings.language === 'ar'
+        ? 'تم حفظ توضيحات ما قبل البدء. جاري تشغيل المحاكاة.'
+        : 'Pre-start clarifications saved. Starting simulation now.'
+    );
+    await handleStart();
+  }, [addSystemMessage, handleStart, preflightBusy, runPreflightGate, settings.language]);
+
   const handleSubmitResearchAction = useCallback(async (payload: {
     cycleId: string;
     action: 'scrape_selected' | 'continue_search' | 'cancel_review';
@@ -1195,6 +1466,15 @@ const Index = () => {
     }
     try {
       addSystemMessage(settings.language === 'ar' ? 'بدء جلسة متابعة...' : 'Starting follow-up simulation...');
+      const preflightReady = await runPreflightGate(undefined, nextInput);
+      if (!preflightReady) {
+        addSystemMessage(
+          settings.language === 'ar'
+            ? 'أجب على أسئلة التوضيح قبل البدء ثم أكمل.'
+            : 'Please answer the pre-start clarification, then continue.'
+        );
+        return;
+      }
       await simulation.startSimulation(
         {
           ...buildConfig(nextInput),
@@ -1220,6 +1500,7 @@ const Index = () => {
     addSystemMessage,
     buildConfig,
     postActionResult,
+    runPreflightGate,
     settings.language,
     simulation,
     userInput,
@@ -2260,26 +2541,6 @@ If rejection is about competition or location, suggest searching for a better lo
     && simulation.statusReason === 'paused_research_review'
     && simulation.pendingResearchReview?.cycleId
   );
-  const resumeBannerText = simulation.statusReason === 'paused_manual'
-    ? (settings.language === 'ar'
-      ? 'تم إيقاف الجلسة يدويًا. يمكنك المتابعة من آخر نقطة محفوظة.'
-      : 'Simulation is paused manually. Resume from the last checkpoint.')
-    : simulation.statusReason === 'paused_credits_exhausted'
-      ? (settings.language === 'ar'
-        ? 'توقفت الجلسة بسبب نفاد الرصيد. اشحن Credits ثم استكمل من نفس النقطة.'
-        : 'Simulation paused because credits were exhausted. Recharge and resume from the same point.')
-      : simulation.statusReason === 'paused_search_failed'
-        ? (settings.language === 'ar'
-          ? 'توقف البحث الأولي قبل اكتمال الجلسة. يمكنك إعادة الاستكمال من آخر نقطة.'
-          : 'Search bootstrap failed before completion. You can resume from the latest checkpoint.')
-        : (settings.language === 'ar'
-          ? 'تم إيقاف الجلسة مؤقتًا. يمكنك المتابعة من آخر نقطة محفوظة.'
-          : 'This simulation was interrupted. You can resume from the latest checkpoint.');
-  const formattedResumeReason = formatSearchFailureReason(
-    simulation.resumeReason,
-    settings.language,
-    simulation.searchQuality
-  );
   const clarificationBannerText = settings.language === 'ar'
     ? 'المحاكاة متوقفة مؤقتًا لأن الوكلاء يحتاجون توضيحًا منك قبل الاستكمال.'
     : 'Simulation is paused because agents require clarification before continuing.';
@@ -2449,6 +2710,15 @@ If rejection is about competition or location, suggest searching for a better lo
     setActivePanel,
     userInput.idea,
   ]);
+  const hasReasoningContent = simulation.reasoningFeed.length > 0;
+  const isArabic = settings.language === 'ar';
+
+  useEffect(() => {
+    if (activePanel === 'reasoning' && !hasReasoningContent) {
+      setActivePanel('chat');
+    }
+  }, [activePanel, hasReasoningContent]);
+
   return (
     <div className="h-screen w-screen bg-background flex flex-col overflow-hidden">
       {/* Header */}
@@ -2475,13 +2745,6 @@ If rejection is about competition or location, suggest searching for a better lo
           </button>
         </div>
       )}
-      {simulation.status === 'running' && simulation.simulationId && (
-        <div className="mx-4 mt-3 rounded-2xl border border-slate-400/30 bg-slate-500/10 px-4 py-3 text-sm text-slate-100">
-          {settings.language === 'ar'
-            ? 'المحاكاة تعمل الآن. يمكنك التحكم الكامل من زر التحكم الرئيسي داخل الدردشة.'
-            : 'Simulation is running. Use the main controller button in chat for pause/resume actions.'}
-        </div>
-      )}
       {isClarificationPause && (
         <div className="mx-4 mt-3 rounded-2xl border border-cyan-400/30 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100">
           <p>{clarificationBannerText}</p>
@@ -2498,25 +2761,143 @@ If rejection is about competition or location, suggest searching for a better lo
           )}
         </div>
       )}
-      {showResumeAction && (
-        <div className="mx-4 mt-3 rounded-2xl border border-cyan-400/30 bg-cyan-400/10 px-4 py-3 text-sm text-cyan-100">
-          <p>{resumeBannerText}</p>
-          {formattedResumeReason && (
-            <p className="text-xs text-cyan-200/80 mt-1">{formattedResumeReason}</p>
-          )}
-        </div>
-      )}
-
       <div className="flex-1 overflow-hidden min-h-0 p-3 md:p-4">
-        <div dir="ltr" className="h-full grid grid-cols-1 xl:grid-cols-[65%_35%] gap-4 min-h-0">
-          <div className="order-2 xl:order-1 min-h-0 grid grid-rows-[minmax(0,1fr)_auto] gap-4">
-            <div className="min-h-0 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] gap-4">
-              <div className="min-h-0 rounded-2xl border border-border/50 overflow-hidden">
-                <SimulationArena
-                  agents={Array.from(simulation.agents.values())}
-                  activePulses={simulation.activePulses}
+        <div className="h-full grid grid-cols-1 xl:grid-cols-[minmax(280px,26%)_minmax(0,1fr)_minmax(320px,30%)] gap-4 min-h-0">
+          {isArabic ? (
+            <>
+              <div className="min-h-0 rounded-2xl border border-border/50 bg-card/20 overflow-hidden flex flex-col">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-border/40 bg-background/50 backdrop-blur">
+                  <div className="flex gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => setActivePanel('chat')}
+                      className={cn(
+                        'px-3 py-1.5 rounded-full text-xs font-medium transition',
+                        activePanel === 'chat'
+                          ? 'bg-primary text-primary-foreground'
+                          : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
+                      )}
+                    >
+                      {settings.language === 'ar' ? 'الدردشة' : 'Chat'}
+                    </button>
+                    {hasReasoningContent && (
+                      <button
+                        type="button"
+                        onClick={() => setActivePanel('reasoning')}
+                        className={cn(
+                          'px-3 py-1.5 rounded-full text-xs font-medium transition',
+                          activePanel === 'reasoning'
+                            ? 'bg-primary text-primary-foreground'
+                            : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
+                        )}
+                      >
+                        {settings.language === 'ar' ? 'تفكير الوكلاء' : 'Reasoning'}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setActivePanel('config')}
+                      className={cn(
+                        'px-3 py-1.5 rounded-full text-xs font-medium transition',
+                        activePanel === 'config'
+                          ? 'bg-primary text-primary-foreground'
+                          : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
+                      )}
+                    >
+                      {settings.language === 'ar' ? 'الإعدادات' : 'Config'}
+                    </button>
+                  </div>
+                </div>
+                <div className="min-h-0 flex-1" dir={settings.language === 'ar' ? 'rtl' : 'ltr'}>
+                  {activePanel === 'config' ? (
+                    <ConfigPanel
+                      value={userInput}
+                      onChange={(updates) => {
+                        setUserInput((prev) => {
+                          const next = { ...prev, ...updates };
+                          const hasLocation = Boolean(next.city.trim() || next.country.trim());
+                          if (hasLocation) {
+                            setLocationChoice('yes');
+                            setIsWaitingForLocationChoice(false);
+                          }
+                          const missing = getMissingForStart(next, hasLocation ? 'yes' : undefined);
+                          setMissingFields(missing.filter((field) => field !== 'location_choice'));
+                          return next;
+                        });
+                      }}
+                      onSubmit={handleConfigSubmit}
+                      missingFields={missingFields}
+                      language={settings.language}
+                      isSearching={isConfigSearching}
+                    />
+                  ) : (
+                    <ChatPanel
+                      viewMode={activePanel === 'reasoning' ? 'reasoning' : 'chat'}
+                      messages={chatMessages}
+                      reasoningFeed={simulation.reasoningFeed}
+                      reasoningDebug={simulation.reasoningDebug}
+                      onSendMessage={handleSendMessage}
+                      onSelectOption={handleOptionSelect}
+                      isWaitingForCity={isWaitingForCity}
+                      isWaitingForCountry={isWaitingForCountry}
+                      isWaitingForLocationChoice={isWaitingForLocationChoice}
+                      searchState={searchState}
+                      isThinking={isChatThinking}
+                      showRetry={llmBusy}
+                      onRetryLlm={handleRetryLlm}
+                      simulationStatus={simulation.status}
+                      simulationError={simulation.error}
+                      reasoningActive={reasoningActive}
+                      isSummarizing={isSummarizing}
+                      phaseState={{
+                        currentPhaseKey: simulation.currentPhaseKey,
+                        progressPct: simulation.phaseProgressPct,
+                      }}
+                      researchSourcesLive={simulation.researchSources}
+                      quickReplies={quickReplies || undefined}
+                      onQuickReply={handleQuickReply}
+                      primaryControl={primaryControl}
+                      pendingClarification={simulation.pendingClarification}
+                      canAnswerClarification={simulation.canAnswerClarification}
+                      clarificationBusy={clarificationBusy}
+                      onSubmitClarification={handleSubmitClarification}
+                      pendingPreflightQuestion={pendingPreflightQuestion}
+                      preflightRound={preflightRound}
+                      preflightMaxRounds={preflightMaxRounds}
+                      preflightBusy={preflightBusy}
+                      onSubmitPreflight={handleSubmitPreflight}
+                      pendingResearchReview={simulation.pendingResearchReview}
+                      researchReviewBusy={researchReviewBusy}
+                      onSubmitResearchReviewAction={handleSubmitResearchAction}
+                      postActionsEnabled={simulation.status === 'completed' && Boolean(simulation.simulationId)}
+                      recommendedPostAction={recommendedPostAction}
+                      finalAcceptancePct={finalAcceptancePct}
+                      postActionBusy={postActionBusy}
+                      postActionResult={postActionResult}
+                      onRunPostAction={(action) => { void handleRunPostAction(action); }}
+                      onStartFollowupFromPostAction={() => { void handleStartFollowupFromAction(); }}
+                      settings={settings}
+                    />
+                  )}
+                </div>
+              </div>
+
+              <div className="min-h-0 grid grid-rows-[minmax(0,1fr)_auto] gap-4">
+                <div className="min-h-0 rounded-2xl border border-border/50 overflow-hidden">
+                  <SimulationArena
+                    agents={Array.from(simulation.agents.values())}
+                    activePulses={simulation.activePulses}
+                  />
+                </div>
+                <IterationTimeline
+                  currentIteration={simulation.metrics.currentIteration}
+                  totalIterations={simulation.metrics.totalIterations}
+                  language={settings.language}
+                  currentPhaseKey={simulation.currentPhaseKey}
+                  phaseProgressPct={simulation.phaseProgressPct}
                 />
               </div>
+
               <div className="min-h-0">
                 <MetricsPanel
                   metrics={simulation.metrics}
@@ -2527,137 +2908,154 @@ If rejection is about competition or location, suggest searching for a better lo
                   filteredAgentsTotal={filteredAgentsTotal}
                 />
               </div>
-            </div>
-            <IterationTimeline
-              currentIteration={simulation.metrics.currentIteration}
-              totalIterations={simulation.metrics.totalIterations}
-              language={settings.language}
-              currentPhaseKey={simulation.currentPhaseKey}
-              phaseProgressPct={simulation.phaseProgressPct}
-            />
-          </div>
-
-          <div className="order-1 xl:order-2 min-h-0 rounded-2xl border border-border/50 bg-card/20 overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-border/40 bg-background/50 backdrop-blur">
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setActivePanel('chat')}
-                  className={cn(
-                    'px-3 py-1.5 rounded-full text-xs font-medium transition',
-                    activePanel === 'chat'
-                      ? 'bg-primary text-primary-foreground'
-                      : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
-                  )}
-                >
-                  {settings.language === 'ar' ? 'الدردشة' : 'Chat'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActivePanel('config')}
-                  className={cn(
-                    'px-3 py-1.5 rounded-full text-xs font-medium transition',
-                    activePanel === 'config'
-                      ? 'bg-primary text-primary-foreground'
-                      : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
-                  )}
-                >
-                  {settings.language === 'ar' ? 'الإعدادات' : 'Config'}
-                </button>
-              </div>
-            </div>
-
-            <div className="min-h-0 flex-1" dir={settings.language === 'ar' ? 'rtl' : 'ltr'}>
-              {activePanel === 'config' ? (
-                <ConfigPanel
-                  value={userInput}
-                  onChange={(updates) => {
-                    setUserInput((prev) => {
-                      const next = { ...prev, ...updates };
-                      const hasLocation = Boolean(next.city.trim() || next.country.trim());
-                      if (hasLocation) {
-                        setLocationChoice('yes');
-                        setIsWaitingForLocationChoice(false);
-                      }
-                      const missing = getMissingForStart(next, hasLocation ? 'yes' : undefined);
-                      setMissingFields(missing.filter((field) => field !== 'location_choice'));
-                      return next;
-                    });
-                  }}
-                  onSubmit={handleConfigSubmit}
-                  missingFields={missingFields}
+            </>
+          ) : (
+            <>
+              <div className="min-h-0">
+                <MetricsPanel
+                  metrics={simulation.metrics}
                   language={settings.language}
-                  isSearching={isConfigSearching}
+                  onSelectStance={handleSelectStanceFilter}
+                  selectedStance={selectedStanceFilter}
+                  filteredAgents={filteredAgents}
+                  filteredAgentsTotal={filteredAgentsTotal}
                 />
-              ) : (
-                <ChatPanel
-                  messages={chatMessages}
-                  reasoningFeed={simulation.reasoningFeed}
-                  reasoningDebug={simulation.reasoningDebug}
-                  onSendMessage={handleSendMessage}
-                  onSelectOption={handleOptionSelect}
-                  isWaitingForCity={isWaitingForCity}
-                  isWaitingForCountry={isWaitingForCountry}
-                  isWaitingForLocationChoice={isWaitingForLocationChoice}
-                  searchState={searchState}
-                  isThinking={isChatThinking}
-                  showRetry={llmBusy}
-                  onRetryLlm={handleRetryLlm}
-                  simulationStatus={simulation.status}
-                  reasoningActive={reasoningActive}
-                  isSummarizing={isSummarizing}
-                  rejectedCount={simulation.metrics.rejected}
-                  phaseState={{
-                    currentPhaseKey: simulation.currentPhaseKey,
-                    progressPct: simulation.phaseProgressPct,
-                  }}
-                  researchSourcesLive={simulation.researchSources}
-                  quickReplies={quickReplies || undefined}
-                  onQuickReply={handleQuickReply}
-                  primaryControl={primaryControl}
-                  pendingClarification={simulation.pendingClarification}
-                  canAnswerClarification={simulation.canAnswerClarification}
-                  clarificationBusy={clarificationBusy}
-                  onSubmitClarification={handleSubmitClarification}
-                  pendingResearchReview={simulation.pendingResearchReview}
-                  researchReviewBusy={researchReviewBusy}
-                  onSubmitResearchReviewAction={handleSubmitResearchAction}
-                  postActionsEnabled={simulation.status === 'completed' && Boolean(simulation.simulationId)}
-                  recommendedPostAction={recommendedPostAction}
-                  finalAcceptancePct={finalAcceptancePct}
-                  postActionBusy={postActionBusy}
-                  postActionResult={postActionResult}
-                  onRunPostAction={(action) => { void handleRunPostAction(action); }}
-                  onStartFollowupFromPostAction={() => { void handleStartFollowupFromAction(); }}
-                  reportBusy={reportBusy}
-                  onDownloadReport={handleDownloadReport}
-                  insights={{
-                    idea: userInput.idea,
-                    location: `${userInput.city || ''}${userInput.city && userInput.country ? ', ' : ''}${userInput.country || ''}`.trim(),
-                    category: userInput.category,
-                    audience: userInput.targetAudience,
-                    goals: userInput.goals,
-                    maturity: userInput.ideaMaturity,
-                    risk: userInput.riskAppetite,
-                    summary: simulation.summary || '',
-                    rejectReasons: summaryReasons,
-                  }}
-                  research={{
-                    summary: researchContext.summary,
-                    signals: researchContext.structured?.signals,
-                    competition: researchContext.structured?.competition_level,
-                    demand: researchContext.structured?.demand_level,
-                    priceSensitivity: researchContext.structured?.price_sensitivity,
-                    regulatoryRisk: researchContext.structured?.regulatory_risk,
-                    gaps: researchContext.structured?.gaps,
-                    notableLocations: researchContext.structured?.notable_locations,
-                    sourcesCount: researchContext.sources.length,
-                  }}
-                  settings={settings}
+              </div>
+
+              <div className="min-h-0 grid grid-rows-[minmax(0,1fr)_auto] gap-4">
+                <div className="min-h-0 rounded-2xl border border-border/50 overflow-hidden">
+                  <SimulationArena
+                    agents={Array.from(simulation.agents.values())}
+                    activePulses={simulation.activePulses}
+                  />
+                </div>
+                <IterationTimeline
+                  currentIteration={simulation.metrics.currentIteration}
+                  totalIterations={simulation.metrics.totalIterations}
+                  language={settings.language}
+                  currentPhaseKey={simulation.currentPhaseKey}
+                  phaseProgressPct={simulation.phaseProgressPct}
                 />
-              )}
-            </div>
-          </div>
+              </div>
+
+              <div className="min-h-0 rounded-2xl border border-border/50 bg-card/20 overflow-hidden flex flex-col">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-border/40 bg-background/50 backdrop-blur">
+                  <div className="flex gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => setActivePanel('chat')}
+                      className={cn(
+                        'px-3 py-1.5 rounded-full text-xs font-medium transition',
+                        activePanel === 'chat'
+                          ? 'bg-primary text-primary-foreground'
+                          : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
+                      )}
+                    >
+                      {settings.language === 'ar' ? 'الدردشة' : 'Chat'}
+                    </button>
+                    {hasReasoningContent && (
+                      <button
+                        type="button"
+                        onClick={() => setActivePanel('reasoning')}
+                        className={cn(
+                          'px-3 py-1.5 rounded-full text-xs font-medium transition',
+                          activePanel === 'reasoning'
+                            ? 'bg-primary text-primary-foreground'
+                            : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
+                        )}
+                      >
+                        {settings.language === 'ar' ? 'تفكير الوكلاء' : 'Reasoning'}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setActivePanel('config')}
+                      className={cn(
+                        'px-3 py-1.5 rounded-full text-xs font-medium transition',
+                        activePanel === 'config'
+                          ? 'bg-primary text-primary-foreground'
+                          : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
+                      )}
+                    >
+                      {settings.language === 'ar' ? 'الإعدادات' : 'Config'}
+                    </button>
+                  </div>
+                </div>
+                <div className="min-h-0 flex-1" dir={settings.language === 'ar' ? 'rtl' : 'ltr'}>
+                  {activePanel === 'config' ? (
+                    <ConfigPanel
+                      value={userInput}
+                      onChange={(updates) => {
+                        setUserInput((prev) => {
+                          const next = { ...prev, ...updates };
+                          const hasLocation = Boolean(next.city.trim() || next.country.trim());
+                          if (hasLocation) {
+                            setLocationChoice('yes');
+                            setIsWaitingForLocationChoice(false);
+                          }
+                          const missing = getMissingForStart(next, hasLocation ? 'yes' : undefined);
+                          setMissingFields(missing.filter((field) => field !== 'location_choice'));
+                          return next;
+                        });
+                      }}
+                      onSubmit={handleConfigSubmit}
+                      missingFields={missingFields}
+                      language={settings.language}
+                      isSearching={isConfigSearching}
+                    />
+                  ) : (
+                    <ChatPanel
+                      viewMode={activePanel === 'reasoning' ? 'reasoning' : 'chat'}
+                      messages={chatMessages}
+                      reasoningFeed={simulation.reasoningFeed}
+                      reasoningDebug={simulation.reasoningDebug}
+                      onSendMessage={handleSendMessage}
+                      onSelectOption={handleOptionSelect}
+                      isWaitingForCity={isWaitingForCity}
+                      isWaitingForCountry={isWaitingForCountry}
+                      isWaitingForLocationChoice={isWaitingForLocationChoice}
+                      searchState={searchState}
+                      isThinking={isChatThinking}
+                      showRetry={llmBusy}
+                      onRetryLlm={handleRetryLlm}
+                      simulationStatus={simulation.status}
+                      simulationError={simulation.error}
+                      reasoningActive={reasoningActive}
+                      isSummarizing={isSummarizing}
+                      phaseState={{
+                        currentPhaseKey: simulation.currentPhaseKey,
+                        progressPct: simulation.phaseProgressPct,
+                      }}
+                      researchSourcesLive={simulation.researchSources}
+                      quickReplies={quickReplies || undefined}
+                      onQuickReply={handleQuickReply}
+                      primaryControl={primaryControl}
+                      pendingClarification={simulation.pendingClarification}
+                      canAnswerClarification={simulation.canAnswerClarification}
+                      clarificationBusy={clarificationBusy}
+                      onSubmitClarification={handleSubmitClarification}
+                      pendingPreflightQuestion={pendingPreflightQuestion}
+                      preflightRound={preflightRound}
+                      preflightMaxRounds={preflightMaxRounds}
+                      preflightBusy={preflightBusy}
+                      onSubmitPreflight={handleSubmitPreflight}
+                      pendingResearchReview={simulation.pendingResearchReview}
+                      researchReviewBusy={researchReviewBusy}
+                      onSubmitResearchReviewAction={handleSubmitResearchAction}
+                      postActionsEnabled={simulation.status === 'completed' && Boolean(simulation.simulationId)}
+                      recommendedPostAction={recommendedPostAction}
+                      finalAcceptancePct={finalAcceptancePct}
+                      postActionBusy={postActionBusy}
+                      postActionResult={postActionResult}
+                      onRunPostAction={(action) => { void handleRunPostAction(action); }}
+                      onStartFollowupFromPostAction={() => { void handleStartFollowupFromAction(); }}
+                      settings={settings}
+                    />
+                  )}
+                </div>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>

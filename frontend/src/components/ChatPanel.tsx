@@ -2,7 +2,6 @@
 import {
   Send,
   Bot,
-  User,
   Sparkles,
   ChevronDown,
   Play,
@@ -13,9 +12,8 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { ChatMessage, PendingClarification, PendingResearchReview, ReasoningMessage, SimulationStatus } from '@/types/simulation';
+import { ChatMessage, PendingClarification, PendingResearchReview, PreflightQuestion, ReasoningMessage, SimulationStatus } from '@/types/simulation';
 import { cn } from '@/lib/utils';
-import { SearchResult } from '@/services/api';
 
 /* ------------------------------------------------------------------
    PROP-TYPES
@@ -60,35 +58,8 @@ interface ChatPanelProps {
   reasoningActive?: boolean;
   /** summarisation phase */
   isSummarizing?: boolean;
-  /** how many agents rejected */
-  rejectedCount?: number;
-  /** market-research data */
-  research?: {
-    summary?: string;
-    signals?: string[];
-    competition?: string;
-    demand?: string;
-    priceSensitivity?: string;
-    regulatoryRisk?: string;
-    gaps?: string[];
-    notableLocations?: string[];
-    sourcesCount?: number;
-  };
-  /** "download report" button state */
-  reportBusy?: boolean;
-  onDownloadReport?: () => void;
-  /** top-level insights shown in the "Insights" tab */
-  insights?: {
-    idea?: string;
-    location?: string;
-    category?: string;
-    audience?: string[];
-    goals?: string[];
-    maturity?: string;
-    risk?: number;
-    rejectReasons?: string[];
-    summary?: string;
-  };
+  /** external view mode controlled by page layout */
+  viewMode?: 'chat' | 'reasoning';
   /** current status of the web-search routine */
   searchState?: {
     status: 'idle' | 'searching' | 'timeout' | 'error' | 'complete';
@@ -134,6 +105,15 @@ interface ChatPanelProps {
   canAnswerClarification?: boolean;
   clarificationBusy?: boolean;
   onSubmitClarification?: (payload: {
+    questionId: string;
+    selectedOptionId?: string;
+    customText?: string;
+  }) => void;
+  pendingPreflightQuestion?: PreflightQuestion | null;
+  preflightRound?: number;
+  preflightMaxRounds?: number;
+  preflightBusy?: boolean;
+  onSubmitPreflight?: (payload: {
     questionId: string;
     selectedOptionId?: string;
     customText?: string;
@@ -305,11 +285,7 @@ export function ChatPanel({
   simulationError = null,
   reasoningActive = false,
   isSummarizing = false,
-  rejectedCount = 0,
-  research,
-  reportBusy = false,
-  onDownloadReport,
-  insights,
+  viewMode = 'chat',
   searchState,
   phaseState,
   researchSourcesLive = [],
@@ -318,6 +294,11 @@ export function ChatPanel({
   canAnswerClarification = false,
   clarificationBusy = false,
   onSubmitClarification,
+  pendingPreflightQuestion = null,
+  preflightRound = 0,
+  preflightMaxRounds = 3,
+  preflightBusy = false,
+  onSubmitPreflight,
   pendingResearchReview = null,
   researchReviewBusy = false,
   onSubmitResearchReviewAction,
@@ -331,7 +312,7 @@ export function ChatPanel({
   settings,
 }: ChatPanelProps) {
   const [inputValue, setInputValue] = useState('');
-  const [activeTab, setActiveTab] = useState<'chat' | 'reasoning' | 'insights'>('chat');
+  const inputWrapperRef = useRef<HTMLFormElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -341,28 +322,31 @@ export function ChatPanel({
   const [showDebug, setShowDebug] = useState(false);
   const [selectedClarificationOption, setSelectedClarificationOption] = useState<string | null>(null);
   const [clarificationInput, setClarificationInput] = useState('');
+  const [selectedPreflightOption, setSelectedPreflightOption] = useState<string | null>(null);
+  const [preflightInput, setPreflightInput] = useState('');
   const [selectedResearchUrlIds, setSelectedResearchUrlIds] = useState<string[]>([]);
   const [addedResearchUrlsInput, setAddedResearchUrlsInput] = useState('');
   const [researchRefinementInput, setResearchRefinementInput] = useState('');
   const [previewUrl, setPreviewUrl] = useState<string>('');
   const [expandedTextMap, setExpandedTextMap] = useState<Record<string, boolean>>({});
   const [brokenFaviconMap, setBrokenFaviconMap] = useState<Record<string, boolean>>({});
+  const [actionMenuOpen, setActionMenuOpen] = useState(false);
+  const [actionTriggerHovered, setActionTriggerHovered] = useState(false);
+  const [actionExpandedWidthPx, setActionExpandedWidthPx] = useState(44);
 
   const isSimulationDone =
     simulationStatus === 'completed' ||
     simulationStatus === 'error';
-  const hasInsights =
-    Boolean(insights?.summary) ||
-    Boolean(insights?.idea) ||
-    Boolean(insights?.category) ||
-    Boolean(insights?.audience?.length) ||
-    Boolean(insights?.goals?.length) ||
-    Boolean(insights?.maturity) ||
-    typeof insights?.risk === 'number' ||
-    Boolean(research?.summary) ||
-    Boolean(research?.signals?.length);
   const hasReasoningContent = reasoningFeed.length > 0;
   const reasoningUnavailable = !hasReasoningContent && !reasoningActive && isSimulationDone;
+  const isReasoningView = viewMode === 'reasoning';
+  const canUseActionTrigger = Boolean(primaryControl && !inputValue.trim() && !showRetry);
+  const shouldExpandTrigger = canUseActionTrigger && actionTriggerHovered && !actionMenuOpen;
+  const hasPendingPreflight = Boolean(
+    pendingPreflightQuestion
+    && pendingPreflightQuestion.questionId
+    && pendingPreflightQuestion.required
+  );
   const hasPendingClarification = Boolean(
     canAnswerClarification
     && pendingClarification
@@ -421,8 +405,26 @@ export function ChatPanel({
   const acceptancePctValue = Number.isFinite(finalAcceptancePct)
     ? Math.max(0, Math.min(100, finalAcceptancePct as number))
     : null;
+  const actionMenuPositionClass = settings.language === 'ar'
+    ? 'left-0 bottom-[calc(100%+10px)]'
+    : 'right-0 bottom-[calc(100%+10px)]';
   const toggleExpandedText = useCallback((key: string) => {
     setExpandedTextMap((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
+
+  useEffect(() => {
+    const node = inputWrapperRef.current;
+    if (!node) return;
+
+    const update = () => {
+      const width = node.getBoundingClientRect().width;
+      setActionExpandedWidthPx(Math.max(44, Math.round(width * 0.25)));
+    };
+
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    return () => observer.disconnect();
   }, []);
 
 
@@ -497,28 +499,39 @@ export function ChatPanel({
   }, [pendingClarification?.questionId]);
 
   useEffect(() => {
-    if (activeTab === 'reasoning' && reasoningUnavailable) {
-      setActiveTab(hasInsights ? 'insights' : 'chat');
+    setSelectedPreflightOption(null);
+    setPreflightInput('');
+  }, [pendingPreflightQuestion?.questionId]);
+
+  useEffect(() => {
+    if (!primaryControl) {
+      setActionMenuOpen(false);
     }
-  }, [activeTab, reasoningUnavailable, hasInsights]);
+  }, [primaryControl?.key, primaryControl]);
+
+  useEffect(() => {
+    if (inputValue.trim().length > 0) {
+      setActionMenuOpen(false);
+    }
+  }, [inputValue]);
 
   // Keep scroll locked to bottom when we are near the bottom
   useEffect(() => {
     if (scrollRef.current && isNearBottom) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, reasoningFeed, activeTab, isNearBottom]);
+  }, [isReasoningView, isNearBottom, messages, reasoningFeed]);
 
   // Autofocus the input when a new chat message arrives
   const lastMessageCount = useRef(0);
   useEffect(() => {
     if (!settings.autoFocusInput) return;
-    if (activeTab !== 'chat') return;
+    if (isReasoningView) return;
     if (messages.length !== lastMessageCount.current) {
       lastMessageCount.current = messages.length;
       inputRef.current?.focus();
     }
-  }, [messages.length, settings.autoFocusInput, activeTab]);
+  }, [isReasoningView, messages.length, settings.autoFocusInput]);
 
   useEffect(() => () => {
     Object.values(hideTimersRef.current).forEach((timerId) => {
@@ -549,26 +562,49 @@ export function ChatPanel({
       requestAnimationFrame(() => inputRef.current?.focus());
   };
 
-  const formatLevel = (value?: string) => {
-    if (!value) return '-';
-    if (settings.language === 'ar') {
-      if (value === 'low') return 'منخفض';
-      if (value === 'medium') return 'متوسط';
-      if (value === 'high') return 'مرتفع';
-    }
-    return value;
-  };
+  const renderPrimaryControlIcon = useCallback((control?: NonNullable<ChatPanelProps['primaryControl']>) => {
+    if (!control) return <Play className="w-4 h-4" />;
+    if (control.busy) return <Loader2 className="w-4 h-4 animate-spin" />;
+    if (control.icon === 'pause') return <Pause className="w-4 h-4" />;
+    if (control.icon === 'retry') return <RefreshCcw className="w-4 h-4" />;
+    if (control.icon === 'sparkles') return <Sparkles className="w-4 h-4" />;
+    if (control.icon === 'reasoning') return <Bot className="w-4 h-4" />;
+    return <Play className="w-4 h-4" />;
+  }, []);
 
-  const rejectTitle =
-    settings.language === 'ar'
-      ? rejectedCount === 1
-        ? 'ليه فيه رافض واحد؟'
-        : rejectedCount === 2
-        ? 'ليه فيه 2 رافضين؟'
-        : `ليه فيه ${rejectedCount} رافض؟`
-      : rejectedCount === 1
-      ? 'Why 1 rejects'
-      : `Why ${rejectedCount} reject`;
+  const executePrimaryControl = useCallback(() => {
+    if (!primaryControl || primaryControl.disabled) return;
+    primaryControl.onClick?.();
+    setActionMenuOpen(false);
+  }, [primaryControl]);
+
+  const executeSecondaryControl = useCallback(() => {
+    if (primaryControl?.secondary?.onClick && !primaryControl.secondary.disabled) {
+      primaryControl.secondary.onClick();
+    } else {
+      setActionMenuOpen(false);
+    }
+    setActionMenuOpen(false);
+  }, [primaryControl]);
+
+  const handleSendButtonClick = useCallback(() => {
+    setActionTriggerHovered(false);
+    if (showRetry) {
+      onRetryLlm?.();
+      return;
+    }
+    if (inputValue.trim()) {
+      onSendMessage(inputValue);
+      setInputValue('');
+      if (settings.autoFocusInput) {
+        requestAnimationFrame(() => inputRef.current?.focus());
+      }
+      return;
+    }
+    if (primaryControl) {
+      setActionMenuOpen((prev) => !prev);
+    }
+  }, [inputValue, onRetryLlm, onSendMessage, primaryControl, settings.autoFocusInput, showRetry]);
 
   const statusLabel = reasoningActive
     ? settings.language === 'ar'
@@ -657,6 +693,28 @@ export function ChatPanel({
     const hasCustomText = clarificationInput.trim().length > 0;
     return hasCustomText || Boolean(selectedClarificationOption);
   }, [clarificationInput, hasPendingClarification, pendingClarification, selectedClarificationOption]);
+
+  const canSubmitPreflight = useMemo(() => {
+    if (!hasPendingPreflight || !pendingPreflightQuestion) return false;
+    const hasCustomText = preflightInput.trim().length > 0;
+    return hasCustomText || Boolean(selectedPreflightOption);
+  }, [hasPendingPreflight, pendingPreflightQuestion, preflightInput, selectedPreflightOption]);
+
+  const handleSubmitPreflight = useCallback(() => {
+    if (!hasPendingPreflight || !pendingPreflightQuestion || !onSubmitPreflight) return;
+    const customText = preflightInput.trim();
+    onSubmitPreflight({
+      questionId: pendingPreflightQuestion.questionId,
+      selectedOptionId: customText ? undefined : (selectedPreflightOption || undefined),
+      customText: customText || undefined,
+    });
+  }, [
+    hasPendingPreflight,
+    onSubmitPreflight,
+    pendingPreflightQuestion,
+    preflightInput,
+    selectedPreflightOption,
+  ]);
 
   const handleSubmitClarification = useCallback(() => {
     if (!hasPendingClarification || !pendingClarification || !onSubmitClarification) return;
@@ -760,84 +818,11 @@ export function ChatPanel({
 
   return (
     <div className="glass-panel h-full flex flex-col min-h-0">
-      {/* -------------------- TABS -------------------- */}
-      <div className="flex border-b border-border/50">
-        {/* Chat */}
-        <button
-          onClick={() => setActiveTab('chat')}
-          className={cn(
-            'flex-1 px-3 py-3 text-sm font-medium transition-all relative',
-            activeTab === 'chat'
-              ? 'text-primary'
-              : 'text-muted-foreground hover:text-foreground'
-          )}
-          data-testid="tab-chat"
-        >
-          <span className="flex items-center justify-center gap-2">
-            <User className="w-4 h-4" />
-            {settings.language === 'ar' ? 'الدردشة' : 'Chat'}
-          </span>
-          {activeTab === 'chat' && (
-            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />
-          )}
-        </button>
-
-        {/* Reasoning */}
-        <button
-          onClick={() => {
-            if (!hasReasoningContent) return;
-            setActiveTab('reasoning');
-          }}
-          className={cn(
-            'flex-1 px-3 py-3 text-sm font-medium transition-all relative',
-            activeTab === 'reasoning'
-              ? 'text-primary'
-              : 'text-muted-foreground hover:text-foreground',
-            !hasReasoningContent && 'opacity-50 cursor-not-allowed'
-          )}
-          disabled={!hasReasoningContent}
-          data-testid="tab-reasoning"
-        >
-          <span className="flex items-center justify-center gap-2">
-            <Bot className="w-4 h-4" />
-            {settings.language === 'ar' ? 'تفكير الوكلاء' : 'Agent Reasoning'}
-            {hasReasoningContent && (
-              <span className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-            )}
-          </span>
-          {activeTab === 'reasoning' && (
-            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />
-          )}
-        </button>
-
-        {/* Insights */}
-        <button
-          onClick={() => setActiveTab('insights')}
-          className={cn(
-            'flex-1 px-3 py-3 text-sm font-medium transition-all relative',
-            activeTab === 'insights'
-              ? 'text-primary'
-              : 'text-muted-foreground hover:text-foreground'
-          )}
-          data-testid="tab-insights"
-        >
-          <span className="flex items-center justify-center gap-2">
-            <Sparkles className="w-4 h-4" />
-            {settings.language === 'ar' ? 'ملخص الفكرة' : 'Idea Insights'}
-          </span>
-          {activeTab === 'insights' && (
-            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />
-          )}
-        </button>
-      </div>
-
       {/* -------------------- MESSAGE LIST -------------------- */}
       <div
-        // **IMPORTANT change** - added bottom padding (pb-24) so the last message
-        // never gets hidden behind the pop-over that appears on timeout.
         className="messages-container scrollbar-thin pb-6"
         ref={scrollRef}
-        data-testid={activeTab === 'chat' ? 'chat-messages' : 'reasoning-messages'}
+        data-testid={isReasoningView ? 'reasoning-messages' : 'chat-messages'}
         onScroll={() => {
           const el = scrollRef.current;
           if (!el) return;
@@ -845,7 +830,7 @@ export function ChatPanel({
           setIsNearBottom(distance < 120);
         }}
       >
-        {activeTab === 'chat' ? (
+        {!isReasoningView ? (
           <div className="space-y-3">
             {/* Empty state */}
             {messages.length === 0 ? (
@@ -1202,6 +1187,84 @@ export function ChatPanel({
 
             {statusLabel && <div className="status-chip">{statusLabel}</div>}
 
+            {hasPendingPreflight && pendingPreflightQuestion && (
+              <div className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 p-3 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-sm font-semibold text-cyan-100">
+                    {settings.language === 'ar'
+                      ? 'توضيح قبل بدء التنفيذ'
+                      : 'Clarification required before execution'}
+                  </div>
+                  <div className="text-[11px] rounded-full border border-cyan-300/35 bg-cyan-400/10 px-2 py-1 text-cyan-100/90">
+                    {settings.language === 'ar'
+                      ? `الجولة ${Math.max(1, preflightRound)}/${Math.max(1, preflightMaxRounds)}`
+                      : `Round ${Math.max(1, preflightRound)}/${Math.max(1, preflightMaxRounds)}`}
+                  </div>
+                </div>
+                <div className="text-sm text-foreground whitespace-pre-wrap">
+                  {pendingPreflightQuestion.question}
+                </div>
+                {pendingPreflightQuestion.reasonSummary && (
+                  <div className="text-xs text-cyan-100/80">
+                    {pendingPreflightQuestion.reasonSummary}
+                  </div>
+                )}
+                <div className="inline-flex items-center rounded-full border border-cyan-300/35 bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-100/90">
+                  {settings.language === 'ar' ? 'المحور:' : 'Axis:'}
+                  <span className="ms-1 font-semibold">{pendingPreflightQuestion.axis}</span>
+                </div>
+                {pendingPreflightQuestion.questionQuality?.score !== undefined && (
+                  <div className="text-[11px] text-cyan-100/70">
+                    {settings.language === 'ar'
+                      ? `جودة السؤال: ${Math.round(Number(pendingPreflightQuestion.questionQuality.score) || 0)}%`
+                      : `Question quality: ${Math.round(Number(pendingPreflightQuestion.questionQuality.score) || 0)}%`}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 gap-2">
+                  {pendingPreflightQuestion.options.slice(0, 3).map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={cn(
+                        'rounded-lg border px-3 py-2 text-sm text-start transition-all',
+                        selectedPreflightOption === option.id
+                          ? 'border-primary bg-primary/10 text-primary'
+                          : 'border-border/60 bg-card/70 text-foreground hover:border-primary/40'
+                      )}
+                      onClick={() => setSelectedPreflightOption(option.id)}
+                      disabled={preflightBusy}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+
+                <Input
+                  value={preflightInput}
+                  onChange={(event) => setPreflightInput(event.target.value)}
+                  dir={settings.language === 'ar' ? 'rtl' : 'ltr'}
+                  placeholder={
+                    settings.language === 'ar'
+                      ? 'أو اكتب توضيحك الخاص (له أولوية على الاختيارات)'
+                      : 'Or type your own clarification (overrides selected option)'
+                  }
+                  disabled={preflightBusy}
+                />
+
+                <Button
+                  type="button"
+                  className="w-full"
+                  onClick={handleSubmitPreflight}
+                  disabled={!canSubmitPreflight || preflightBusy}
+                >
+                  {preflightBusy
+                    ? (settings.language === 'ar' ? 'جاري إرسال التوضيح...' : 'Submitting clarification...')
+                    : (settings.language === 'ar' ? 'إرسال التوضيح للمتابعة' : 'Submit clarification to continue')}
+                </Button>
+              </div>
+            )}
+
             {hasPendingClarification && pendingClarification && (
               <div className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 p-3 space-y-3">
                 <div className="text-sm font-semibold text-cyan-100">
@@ -1215,6 +1278,40 @@ export function ChatPanel({
                 {pendingClarification.reasonSummary && (
                   <div className="text-xs text-cyan-100/80">
                     {pendingClarification.reasonSummary}
+                  </div>
+                )}
+                {pendingClarification.decisionAxis && (
+                  <div className="inline-flex items-center rounded-full border border-cyan-300/35 bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-100/90">
+                    {settings.language === 'ar' ? 'محور القرار:' : 'Decision axis:'}
+                    <span className="ms-1 font-semibold">{pendingClarification.decisionAxis}</span>
+                  </div>
+                )}
+                {pendingClarification.affectedAgents && pendingClarification.affectedAgents.totalWindow > 0 && (
+                  <div className="text-xs text-cyan-100/75">
+                    {settings.language === 'ar'
+                      ? `متأثرون في نافذة القرار: رفض ${pendingClarification.affectedAgents.reject}، حياد ${pendingClarification.affectedAgents.neutral} من ${pendingClarification.affectedAgents.totalWindow}`
+                      : `Affected in decision window: reject ${pendingClarification.affectedAgents.reject}, neutral ${pendingClarification.affectedAgents.neutral} of ${pendingClarification.affectedAgents.totalWindow}`}
+                  </div>
+                )}
+                {pendingClarification.supportingSnippets && pendingClarification.supportingSnippets.length > 0 && (
+                  <details className="rounded-lg border border-cyan-300/25 bg-cyan-500/5 p-2">
+                    <summary className="cursor-pointer text-xs text-cyan-100/85">
+                      {settings.language === 'ar' ? 'مقتطفات داعمة' : 'Supporting snippets'}
+                    </summary>
+                    <div className="mt-2 space-y-2 text-xs text-cyan-100/80">
+                      {pendingClarification.supportingSnippets.slice(0, 3).map((snippet, idx) => (
+                        <div key={`${pendingClarification.questionId}-snippet-${idx}`} className="leading-relaxed">
+                          • {snippet}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+                {pendingClarification.questionQuality && (
+                  <div className="text-[11px] text-cyan-100/70">
+                    {settings.language === 'ar'
+                      ? `جودة السؤال: ${Math.round(pendingClarification.questionQuality.score)}%`
+                      : `Question quality: ${Math.round(pendingClarification.questionQuality.score)}%`}
                   </div>
                 )}
 
@@ -1330,7 +1427,7 @@ export function ChatPanel({
               </div>
             )}
           </div>
-        ) : activeTab === 'reasoning' ? (
+        ) : (
           /* -------------------- REASONING TAB -------------------- */
           <div className="space-y-3">
             {reasoningDebug.length > 0 && (
@@ -1390,8 +1487,22 @@ export function ChatPanel({
             ) : (
               phaseGroups.map((group) => (
                 <div key={group.phase} className="space-y-3">
-                  <div className="text-xs uppercase tracking-wide text-muted-foreground/80">
-                    {phaseLabelMap[group.phase] ?? group.phase}
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="text-xs uppercase tracking-wide text-muted-foreground/80">
+                      {phaseLabelMap[group.phase] ?? group.phase}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {Array.from(new Set(group.items.map((entry) => entry.iteration)))
+                        .sort((a, b) => a - b)
+                        .map((iter) => (
+                          <span
+                            key={`${group.phase}-${iter}`}
+                            className="text-[10px] px-2 py-0.5 rounded-full border border-primary/30 bg-primary/10 text-primary"
+                          >
+                            Iter {iter}
+                          </span>
+                        ))}
+                    </div>
                   </div>
                   {group.items.map((msg) => {
                     const idx = reasoningIndex.get(msg.id) ?? 0;
@@ -1411,11 +1522,23 @@ export function ChatPanel({
                         : 'Neutral';
                     const statusBadge =
                       opinion === 'accept'
-                        ? 'bg-success/15 text-success border-success/30'
+                        ? 'reasoning-badge-accept'
                         : opinion === 'reject'
-                        ? 'bg-destructive/15 text-destructive border-destructive/30'
-                        : 'bg-primary/10 text-primary border-primary/20';
+                        ? 'reasoning-badge-reject'
+                        : 'reasoning-badge-neutral';
                     const bubbleBg = side === 'user' ? 'bg-secondary' : 'bg-card';
+                    const reasoningBubbleToneClass =
+                      opinion === 'accept'
+                        ? 'reasoning-bubble-accept'
+                        : opinion === 'reject'
+                        ? 'reasoning-bubble-reject'
+                        : 'reasoning-bubble-neutral';
+                    const messageToneClass =
+                      opinion === 'accept'
+                        ? 'reasoning-text-accept'
+                        : opinion === 'reject'
+                        ? 'reasoning-text-reject'
+                        : 'reasoning-text-neutral';
                     const shortId = msg.agentShortId ?? msg.agentId.slice(0, 4);
                     const agentLabel = msg.agentLabel
                       || (settings.language === 'ar' ? `الوكيل ${shortId}` : `Agent ${shortId}`);
@@ -1435,11 +1558,11 @@ export function ChatPanel({
                         className={cn('message message-compact reasoning', side)}
                       >
                         <div
-                          className={cn(
-                            'bubble bubble-compact',
-                            bubbleBg,
-                            'text-foreground'
-                          )}
+                        className={cn(
+                          'bubble bubble-compact',
+                          bubbleBg,
+                          reasoningBubbleToneClass
+                        )}
                         >
                           <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
                             <div className="flex items-center gap-2 min-w-0">
@@ -1473,14 +1596,16 @@ export function ChatPanel({
                             </div>
                           </div>
 
-                          <ReadMoreText
-                            text={msg.message}
-                            collapsedLines={7}
-                            language={settings.language}
-                            expanded={Boolean(expandedTextMap[`reasoning-${msg.id}`])}
-                            onToggleExpanded={() => toggleExpandedText(`reasoning-${msg.id}`)}
-                            className="text-sm text-foreground/95"
-                          />
+                          <div className={cn('text-sm', messageToneClass)}>
+                            <ReadMoreText
+                              text={msg.message}
+                              collapsedLines={7}
+                              language={settings.language}
+                              expanded={Boolean(expandedTextMap[`reasoning-${msg.id}`])}
+                              onToggleExpanded={() => toggleExpandedText(`reasoning-${msg.id}`)}
+                              className={messageToneClass}
+                            />
+                          </div>
                           {msg.archetype && (
                             <div className="text-[11px] text-muted-foreground mt-2">
                               {msg.archetype}
@@ -1494,176 +1619,11 @@ export function ChatPanel({
               ))
             )}
           </div>
-        ) : (
-          /* -------------------- INSIGHTS TAB -------------------- */
-          <div className="space-y-4">
-            {/* ---- IDEA DETAILS ---- */}
-            <div className="p-4 rounded-lg bg-secondary/40 border border-border/40">
-              <h4 className="text-sm font-semibold text-foreground mb-2">
-                {settings.language === 'ar' ? 'تفاصيل الفكرة' : 'Idea Details'}
-              </h4>
-              <div className="text-sm text-muted-foreground space-y-1">
-                <div>
-                  {settings.language === 'ar' ? 'الفكرة:' : 'Idea:'}{' '}
-                  <span className="text-foreground">{insights?.idea || '-'}</span>
-                </div>
-                <div>
-                  {settings.language === 'ar' ? 'الموقع:' : 'Location:'}{' '}
-                  <span className="text-foreground">{insights?.location || '-'}</span>
-                </div>
-                <div>
-                  {settings.language === 'ar' ? 'الفئة:' : 'Category:'}{' '}
-                  <span className="text-foreground">{insights?.category || '-'}</span>
-                </div>
-                <div>
-                  {settings.language === 'ar' ? 'الجمهور:' : 'Audience:'}{' '}
-                  <span className="text-foreground">
-                    {(insights?.audience || []).join(', ') || '-'}
-                  </span>
-                </div>
-                <div>
-                  {settings.language === 'ar' ? 'الأهداف:' : 'Goals:'}{' '}
-                  <span className="text-foreground">
-                    {(insights?.goals || []).join(', ') || '-'}
-                  </span>
-                </div>
-                <div>
-                  {settings.language === 'ar' ? 'النضج:' : 'Maturity:'}{' '}
-                  <span className="text-foreground">{insights?.maturity || '-'}</span>
-                </div>
-                <div>
-                  {settings.language === 'ar' ? 'المخاطرة:' : 'Risk:'}{' '}
-                  <span className="text-foreground">
-                    {typeof insights?.risk === 'number' ? `${insights.risk}%` : '-'}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* ---- RESEARCH SNAPSHOT ---- */}
-            <div className="p-4 rounded-lg bg-secondary/40 border border-border/40">
-              <h4 className="text-sm font-semibold text-foreground mb-2">
-                {settings.language === 'ar' ? 'ملخص البحث والسوق' : 'Research Snapshot'}
-              </h4>
-              <div className="text-sm text-muted-foreground space-y-1">
-                <div>
-                  {settings.language === 'ar' ? 'ملخص:' : 'Summary:'}{' '}
-                  <span className="text-foreground">{research?.summary || '-'}</span>
-                </div>
-                <div>
-                  {settings.language === 'ar' ? 'إشارات السوق:' : 'Signals:'}{' '}
-                  <span className="text-foreground">
-                    {(research?.signals || []).join(settings.language === 'ar' ? '، ' : ', ') || '-'}
-                  </span>
-                </div>
-                <div>
-                  {settings.language === 'ar' ? 'المنافسة:' : 'Competition:'}{' '}
-                  <span className="text-foreground">{formatLevel(research?.competition)}</span>
-                </div>
-                <div>
-                  {settings.language === 'ar' ? 'الطلب:' : 'Demand:'}{' '}
-                  <span className="text-foreground">{formatLevel(research?.demand)}</span>
-                </div>
-                <div>
-                  {settings.language === 'ar'
-                    ? 'حساسية السعر:'
-                    : 'Price sensitivity:'}{' '}
-                  <span className="text-foreground">{formatLevel(research?.priceSensitivity)}</span>
-                </div>
-                <div>
-                  {settings.language === 'ar' ? 'المخاطر التنظيمية:' : 'Regulatory risk:'}{' '}
-                  <span className="text-foreground">{formatLevel(research?.regulatoryRisk)}</span>
-                </div>
-                <div>
-                  {settings.language === 'ar' ? 'فجوات/فرص:' : 'Gaps:'}{' '}
-                  <span className="text-foreground">
-                    {(research?.gaps || []).join(settings.language === 'ar' ? '، ' : ', ') ||
-                      '-'}
-                  </span>
-                </div>
-                <div>
-                  {settings.language === 'ar' ? 'أماكن ملحوظة:' : 'Notable locations:'}{' '}
-                  <span className="text-foreground">
-                    {(research?.notableLocations || []).join(
-                      settings.language === 'ar' ? '، ' : ', '
-                    ) || '-'}
-                  </span>
-                </div>
-                <div>
-                  {settings.language === 'ar' ? 'عدد المصادر:' : 'Sources:'}{' '}
-                  <span className="text-foreground">
-                    {typeof research?.sourcesCount === 'number'
-                      ? research.sourcesCount
-                      : '-'}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* ---- REJECT REASONS (if any) ---- */}
-            {rejectedCount > 0 && (
-              <div className="p-4 rounded-lg bg-secondary/40 border border-border/40">
-                <h4 className="text-sm font-semibold text-foreground mb-2">{rejectTitle}</h4>
-                {insights?.rejectReasons && insights.rejectReasons.length > 0 ? (
-                  <ul className="text-sm text-muted-foreground space-y-2 list-disc list-inside">
-                    {insights.rejectReasons.map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="text-sm text-muted-foreground">
-                    {settings.language === 'ar'
-                      ? 'سيظهر السبب بعد اكتمال التحليل.'
-                      : 'Reasons appear after analysis completes.'}
-                  </p>
-                )}
-              </div>
-            )}
-
-            {/* ---- DOWNLOAD REPORT ---- */}
-            {onDownloadReport && (
-              <div className="p-4 rounded-lg bg-secondary/40 border border-border/40">
-                <h4 className="text-sm font-semibold text-foreground mb-2">
-                  {settings.language === 'ar' ? 'تحليل كامل للفكرة' : 'Full Idea Analysis'}
-                </h4>
-                <p className="text-sm text-muted-foreground mb-3">
-                  {settings.language === 'ar'
-                    ? 'تحليل أعمق مرتبط بنتائج البحث والسياق.'
-                    : 'A deeper report linked to the research context.'}
-                </p>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  className="w-full justify-center"
-                  onClick={onDownloadReport}
-                  disabled={reportBusy}
-                >
-                  {reportBusy
-                    ? settings.language === 'ar'
-                      ? 'جاري تجهيز الملف...'
-                      : 'Preparing file...'
-                    : settings.language === 'ar'
-                    ? 'تحميل تقرير Word'
-                    : 'Download Word report'}
-                </Button>
-              </div>
-            )}
-
-            {/* ---- FINAL SUMMARY ---- */}
-            {insights?.summary && (
-              <div className="p-4 rounded-lg bg-secondary/40 border border-border/40">
-                <h4 className="text-sm font-semibold text-foreground mb-2">
-                  {settings.language === 'ar' ? 'الملخص النهائي' : 'Final Summary'}
-                </h4>
-                <p className="text-sm text-foreground/90 whitespace-pre-wrap">{insights.summary}</p>
-              </div>
-            )}
-          </div>
         )}
       </div>
 
       {/* -------------------- JUMP-TO-LATEST BUTTON -------------------- */}
-      {activeTab === 'chat' && !isNearBottom && (
+      {!isReasoningView && !isNearBottom && (
         <button
           type="button"
           onClick={() => {
@@ -1677,60 +1637,8 @@ export function ChatPanel({
       )}
 
       {/* -------------------- INPUT AREA (CHAT TAB) -------------------- */}
-      {activeTab === 'chat' ? (
+      {!isReasoningView ? (
         <div className="chat-input-container">
-          {primaryControl && (
-            <div className="mb-3 space-y-2">
-              <Button
-                type="button"
-                onClick={() => {
-                  primaryControl.onClick?.();
-                }}
-                disabled={primaryControl.disabled}
-                className={cn(
-                  'w-full h-12 justify-between rounded-xl border transition-all duration-300',
-                  primaryControl.tone === 'success' && 'bg-success/15 border-success/30 text-success hover:bg-success/20',
-                  primaryControl.tone === 'warning' && 'bg-warning/10 border-warning/30 text-warning hover:bg-warning/15',
-                  primaryControl.tone === 'secondary' && 'bg-secondary/70 border-border text-foreground hover:bg-secondary',
-                  (!primaryControl.tone || primaryControl.tone === 'primary') && 'bg-primary text-primary-foreground hover:bg-primary/90',
-                )}
-              >
-                <span className="flex items-center gap-2 min-w-0">
-                  {primaryControl.busy ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : primaryControl.icon === 'pause' ? (
-                    <Pause className="w-4 h-4" />
-                  ) : primaryControl.icon === 'retry' ? (
-                    <RefreshCcw className="w-4 h-4" />
-                  ) : primaryControl.icon === 'sparkles' ? (
-                    <Sparkles className="w-4 h-4" />
-                  ) : primaryControl.icon === 'reasoning' ? (
-                    <Bot className="w-4 h-4" />
-                  ) : (
-                    <Play className="w-4 h-4" />
-                  )}
-                  <span className="truncate">{primaryControl.label}</span>
-                </span>
-                {primaryControl.description && (
-                  <span className="text-xs opacity-80 truncate max-w-[50%] text-right">
-                    {primaryControl.description}
-                  </span>
-                )}
-              </Button>
-
-              {primaryControl.secondary && (
-                <Button
-                  type="button"
-                  variant="secondary"
-                  className="w-full h-10 rounded-xl"
-                  onClick={primaryControl.secondary.onClick}
-                  disabled={primaryControl.secondary.disabled}
-                >
-                  {primaryControl.secondary.label}
-                </Button>
-              )}
-            </div>
-          )}
           {/* Quick-reply chips */}
           {quickReplies && quickReplies.length > 0 && (
             <div className="quick-replies">
@@ -1747,7 +1655,12 @@ export function ChatPanel({
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="chat-input-wrapper">
+          <form ref={inputWrapperRef} onSubmit={handleSubmit} className="chat-input-wrapper relative">
+            {primaryControl && !inputValue.trim() && (
+              <div className="pointer-events-none absolute right-0 -top-8 max-w-[72%] rounded-md border border-border/50 bg-card/80 px-2 py-1 text-[11px] leading-4 text-muted-foreground truncate">
+                {primaryControl.label}
+              </div>
+            )}
             <Input
               ref={inputRef}
               value={inputValue}
@@ -1775,16 +1688,77 @@ export function ChatPanel({
               data-testid="chat-input"
             />
 
-            <Button
-              type={showRetry ? 'button' : 'submit'}
-              size="icon"
-              disabled={showRetry ? !onRetryLlm : !inputValue.trim()}
-              className={cn('send-btn', inputValue.trim() ? '' : '')}
-              data-testid={showRetry ? 'chat-retry-llm' : 'chat-send'}
-              onClick={showRetry ? onRetryLlm : undefined}
-            >
-              {showRetry ? <RefreshCcw className="w-4 h-4" /> : <Send className="w-4 h-4" />}
-            </Button>
+            <div className="relative shrink-0 flex items-center">
+              {canUseActionTrigger && !actionMenuOpen && (
+                <div className={cn(
+                  'action-trigger-indicator',
+                  settings.language === 'ar' ? 'left-0 origin-bottom-left' : 'right-0 origin-bottom-right'
+                )}>
+                  {settings.language === 'ar' ? 'خيارات التحكم' : 'Control actions'}
+                </div>
+              )}
+              {primaryControl && !inputValue.trim() && actionMenuOpen && (
+                <div className={cn('absolute z-30 grid grid-cols-2 gap-2 action-menu-from-trigger', actionMenuPositionClass)}>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={executePrimaryControl}
+                    disabled={primaryControl.disabled}
+                    className={cn(
+                      'h-11 min-w-[120px] rounded-lg border shadow-md justify-center gap-2',
+                      primaryControl.tone === 'success' && 'bg-success/15 border-success/30 text-success hover:bg-success/20',
+                      primaryControl.tone === 'warning' && 'bg-warning/10 border-warning/30 text-warning hover:bg-warning/15',
+                      primaryControl.tone === 'secondary' && 'bg-secondary/70 border-border text-foreground hover:bg-secondary',
+                      (!primaryControl.tone || primaryControl.tone === 'primary') && 'bg-primary text-primary-foreground hover:bg-primary/90',
+                    )}
+                    title={primaryControl.label}
+                  >
+                    {renderPrimaryControlIcon(primaryControl)}
+                    <span className="text-xs">{settings.language === 'ar' ? 'الأساسي' : 'Primary'}</span>
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={executeSecondaryControl}
+                    disabled={Boolean(primaryControl.secondary?.disabled)}
+                    className="h-11 min-w-[120px] rounded-lg border border-border bg-card/90 text-foreground hover:bg-card shadow-md justify-center gap-2"
+                    title={primaryControl.secondary?.label || (settings.language === 'ar' ? 'إغلاق' : 'Close')}
+                  >
+                    {primaryControl.secondary ? <RefreshCcw className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                    <span className="text-xs">{settings.language === 'ar' ? 'الثانوي' : 'Secondary'}</span>
+                  </Button>
+                </div>
+              )}
+
+              <Button
+                type="button"
+                size="icon"
+                disabled={showRetry ? !onRetryLlm : (!inputValue.trim() && !primaryControl)}
+                className={cn(
+                  'send-btn action-trigger-btn',
+                  canUseActionTrigger && 'action-trigger-btn-ready',
+                  shouldExpandTrigger && 'action-trigger-btn-expanded'
+                )}
+                style={shouldExpandTrigger ? { width: `${actionExpandedWidthPx}px` } : undefined}
+                data-testid={showRetry ? 'chat-retry-llm' : 'chat-send'}
+                onClick={handleSendButtonClick}
+                onMouseEnter={() => setActionTriggerHovered(true)}
+                onMouseLeave={() => setActionTriggerHovered(false)}
+              >
+                <span className="action-trigger-icon-wrap">
+                  {showRetry
+                    ? <RefreshCcw className="w-4 h-4" />
+                    : inputValue.trim()
+                    ? <Send className="w-4 h-4" />
+                    : renderPrimaryControlIcon(primaryControl || undefined)}
+                </span>
+                {shouldExpandTrigger && (
+                  <span className="action-trigger-label">
+                    {primaryControl?.label}
+                  </span>
+                )}
+              </Button>
+            </div>
           </form>
         </div>
       ) : (

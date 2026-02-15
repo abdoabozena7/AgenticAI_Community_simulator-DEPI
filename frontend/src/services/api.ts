@@ -22,6 +22,28 @@ const setStoredTokens = (accessToken?: string | null, refreshToken?: string | nu
 
 export const getAuthToken = () => getStoredAccessToken();
 
+const decodeJwtExp = (token: string): number | null => {
+  try {
+    const parts = token.split('.');
+    if (parts.length < 2) return null;
+    const payload = parts[1] || '';
+    const normalized = payload.padEnd(payload.length + ((4 - (payload.length % 4)) % 4), '=');
+    const jsonText = atob(normalized.replace(/-/g, '+').replace(/_/g, '/'));
+    const parsed = JSON.parse(jsonText);
+    const exp = Number(parsed?.exp);
+    return Number.isFinite(exp) ? exp : null;
+  } catch {
+    return null;
+  }
+};
+
+const isTokenExpiringSoon = (token: string, minTtlSeconds = 45): boolean => {
+  const exp = decodeJwtExp(token);
+  if (!exp) return false;
+  const now = Math.floor(Date.now() / 1000);
+  return exp <= (now + Math.max(5, minTtlSeconds));
+};
+
 export interface SimulationConfig {
   idea: string;
   category: string;
@@ -46,6 +68,11 @@ export interface SimulationConfig {
   parent_simulation_id?: string;
   followup_mode?: 'make_acceptable' | 'bring_to_world';
   seed_context?: Record<string, unknown>;
+  preflight_ready?: boolean;
+  preflight_summary?: string;
+  preflight_answers?: Record<string, unknown>;
+  preflight_clarity_score?: number;
+  preflight_assumptions?: string[];
 }
 
 export interface SimulationResponse {
@@ -94,6 +121,17 @@ export interface SimulationStateResponse {
     options: { id?: string; label?: string; text?: string; value?: string }[];
     reason_tag?: string | null;
     reason_summary?: string | null;
+    decision_axis?: string | null;
+    affected_agents?: {
+      reject?: number;
+      neutral?: number;
+      total_window?: number;
+    } | null;
+    supporting_snippets?: string[];
+    question_quality?: {
+      score?: number;
+      checks_passed?: string[];
+    } | null;
     created_at?: number | null;
     required?: boolean;
   } | null;
@@ -189,6 +227,48 @@ export interface SimulationStateResponse {
   }[];
   summary?: string;
   error?: string;
+}
+
+export interface PreflightQuestionOption {
+  id: string;
+  label: string;
+}
+
+export interface SimulationPreflightQuestion {
+  question_id: string;
+  axis: string;
+  question: string;
+  options: PreflightQuestionOption[];
+  reason_summary?: string;
+  required: true;
+  question_quality?: {
+    score?: number;
+    checks_passed?: string[];
+  };
+}
+
+export interface SimulationPreflightNextResponse {
+  ready: boolean;
+  clarity_score: number;
+  round: number;
+  max_rounds: number;
+  missing_axes: string[];
+  question?: SimulationPreflightQuestion | null;
+  normalized_context: Record<string, unknown>;
+  history?: Array<Record<string, unknown>>;
+  preflight_summary?: string;
+  assumptions?: string[];
+}
+
+export interface SimulationPreflightFinalizeResponse {
+  preflight_ready: true | boolean;
+  preflight_summary: string;
+  preflight_answers: Record<string, unknown>;
+  preflight_clarity_score: number;
+  assumptions: string[];
+  missing_axes?: string[];
+  normalized_context?: Record<string, unknown>;
+  history?: Array<Record<string, unknown>>;
 }
 
 export interface AuthResponse {
@@ -497,6 +577,18 @@ class ApiService {
     return this.refreshingPromise;
   }
 
+  async ensureAccessTokenFresh(minTtlSeconds = 45): Promise<string | null> {
+    const current = getStoredAccessToken();
+    if (current && !isTokenExpiringSoon(current, minTtlSeconds)) {
+      return current;
+    }
+    const refreshed = await this.refreshTokens();
+    if (refreshed) {
+      return getStoredAccessToken();
+    }
+    return getStoredAccessToken();
+  }
+
   private async request<T>(
     endpoint: string,
     options?: (RequestInit & { timeoutMs?: number }),
@@ -758,6 +850,45 @@ class ApiService {
     return this.request<SimulationResponse>('/simulation/start', {
       method: 'POST',
       body: JSON.stringify(config),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async simulationPreflightNext(payload: {
+    draft_context: {
+      idea: string;
+      country: string;
+      city: string;
+      category: string;
+      target_audience: string[];
+      goals: string[];
+      idea_maturity: string;
+      risk_appetite: number;
+      preflight_axis_answers?: Record<string, string>;
+    };
+    history?: Array<Record<string, unknown>>;
+    answer?: {
+      question_id: string;
+      selected_option_id?: string;
+      custom_text?: string;
+    };
+    language: 'ar' | 'en';
+  }): Promise<SimulationPreflightNextResponse> {
+    return this.request<SimulationPreflightNextResponse>('/simulation/preflight/next', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async simulationPreflightFinalize(payload: {
+    normalized_context: Record<string, unknown>;
+    history?: Array<Record<string, unknown>>;
+    language: 'ar' | 'en';
+  }): Promise<SimulationPreflightFinalizeResponse> {
+    return this.request<SimulationPreflightFinalizeResponse>('/simulation/preflight/finalize', {
+      method: 'POST',
+      body: JSON.stringify(payload),
       timeoutMs: ApiService.LONG_TIMEOUT_MS,
     });
   }

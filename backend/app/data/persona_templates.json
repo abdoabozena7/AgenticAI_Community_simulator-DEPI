@@ -1,99 +1,247 @@
 [
   {
-    "template_id": "engineer_1",
+    "template_id": "eng_optimist_1",
     "category_id": "engineers",
     "archetype_name": "Optimistic Techie",
-    "traits": {
-      "optimism": 0.9,
-      "risk_tolerance": 0.6,
-      "openness_to_change": 0.8,
-      "skepticism": 0.2,
-      "emotional_reactivity": 0.3
-    },
+    "traits": {"optimism": 0.88, "risk_tolerance": 0.62, "openness_to_change": 0.84, "skepticism": 0.22, "emotional_reactivity": 0.30},
     "decision_style": "analytical",
     "biases": ["tech_bias", "innovation_bias"],
-    "reaction_variability": 0.2,
-    "influence_susceptibility": 0.7
+    "reaction_variability": 0.22,
+    "influence_susceptibility": 0.68
   },
   {
-    "template_id": "doctor_1",
-    "category_id": "doctors",
-    "archetype_name": "Cautious Professional",
-    "traits": {
-      "optimism": 0.4,
-      "risk_tolerance": 0.2,
-      "openness_to_change": 0.3,
-      "skepticism": 0.8,
-      "emotional_reactivity": 0.5
-    },
-    "decision_style": "conservative",
-    "biases": ["health_bias", "regulation_bias"],
-    "reaction_variability": 0.1,
-    "influence_susceptibility": 0.5
-  },
-  {
-    "template_id": "business_1",
-    "category_id": "small_business",
-    "archetype_name": "Pragmatic Entrepreneur",
-    "traits": {
-      "optimism": 0.7,
-      "risk_tolerance": 0.8,
-      "openness_to_change": 0.6,
-      "skepticism": 0.4,
-      "emotional_reactivity": 0.3
-    },
-    "decision_style": "pragmatic",
-    "biases": ["profit_bias", "market_bias"],
-    "reaction_variability": 0.25,
-    "influence_susceptibility": 0.8
-  },
-    {
-    "template_id": "employee_1",
-    "category_id": "employees",
-    "archetype_name": "Steady Worker",
-    "traits": {
-      "optimism": 0.5,
-      "risk_tolerance": 0.4,
-      "openness_to_change": 0.5,
-      "skepticism": 0.5,
-      "emotional_reactivity": 0.4
-    },
-    "decision_style": "balanced",
-    "biases": ["company_loyalty_bias", "stability_bias"],
-    "reaction_variability": 0.15,
-    "influence_susceptibility": 0.6
-  },
-  {
-    "template_id": "engineer_2",
+    "template_id": "eng_skeptic_1",
     "category_id": "engineers",
     "archetype_name": "Skeptical Developer",
-    "traits": {
-      "optimism": 0.5,
-      "risk_tolerance": 0.4,
-      "openness_to_change": 0.6,
-      "skepticism": 0.7,
-      "emotional_reactivity": 0.4
-    },
+    "traits": {"optimism": 0.46, "risk_tolerance": 0.34, "openness_to_change": 0.58, "skepticism": 0.78, "emotional_reactivity": 0.38},
     "decision_style": "critical",
     "biases": ["tech_bias", "skepticism_bias"],
-    "reaction_variability": 0.3,
-    "influence_susceptibility": 0.5
+    "reaction_variability": 0.30,
+    "influence_susceptibility": 0.50
   },
   {
-    "template_id": "doctor_2",
+    "template_id": "eng_architect_1",
+    "category_id": "engineers",
+    "archetype_name": "Systems Architect",
+    "traits": {"optimism": 0.55, "risk_tolerance": 0.42, "openness_to_change": 0.63, "skepticism": 0.60, "emotional_reactivity": 0.25},
+    "decision_style": "systems_thinking",
+    "biases": ["scalability_bias", "maintainability_bias"],
+    "reaction_variability": 0.18,
+    "influence_susceptibility": 0.47
+  },
+  {
+    "template_id": "eng_ops_1",
+    "category_id": "engineers",
+    "archetype_name": "Reliability Engineer",
+    "traits": {"optimism": 0.50, "risk_tolerance": 0.30, "openness_to_change": 0.50, "skepticism": 0.72, "emotional_reactivity": 0.28},
+    "decision_style": "risk_first",
+    "biases": ["reliability_bias", "security_bias"],
+    "reaction_variability": 0.16,
+    "influence_susceptibility": 0.44
+  },
+  {
+    "template_id": "eng_product_1",
+    "category_id": "engineers",
+    "archetype_name": "Product Engineer",
+    "traits": {"optimism": 0.66, "risk_tolerance": 0.56, "openness_to_change": 0.72, "skepticism": 0.46, "emotional_reactivity": 0.34},
+    "decision_style": "user_centered",
+    "biases": ["usability_bias", "speed_bias"],
+    "reaction_variability": 0.24,
+    "influence_susceptibility": 0.62
+  },
+
+  {
+    "template_id": "doc_guardian_1",
+    "category_id": "doctors",
+    "archetype_name": "Cautious Professional",
+    "traits": {"optimism": 0.40, "risk_tolerance": 0.18, "openness_to_change": 0.32, "skepticism": 0.82, "emotional_reactivity": 0.48},
+    "decision_style": "conservative",
+    "biases": ["health_bias", "regulation_bias"],
+    "reaction_variability": 0.12,
+    "influence_susceptibility": 0.50
+  },
+  {
+    "template_id": "doc_progressive_1",
     "category_id": "doctors",
     "archetype_name": "Progressive Healer",
-    "traits": {
-      "optimism": 0.7,
-      "risk_tolerance": 0.5,
-      "openness_to_change": 0.7,
-      "skepticism": 0.4,
-      "emotional_reactivity": 0.3
-    },
+    "traits": {"optimism": 0.72, "risk_tolerance": 0.48, "openness_to_change": 0.74, "skepticism": 0.42, "emotional_reactivity": 0.32},
     "decision_style": "innovative",
-    "biases": ["health_bias", "innovation_bias"],
-    "reaction_variability": 0.2,
-    "influence_susceptibility": 0.6
-  }
+    "biases": ["patient_wellbeing_bias", "innovation_bias"],
+    "reaction_variability": 0.20,
+    "influence_susceptibility": 0.60
+  },
+  {
+    "template_id": "doc_ethics_1",
+    "category_id": "doctors",
+    "archetype_name": "Ethics Reviewer",
+    "traits": {"optimism": 0.45, "risk_tolerance": 0.20, "openness_to_change": 0.44, "skepticism": 0.76, "emotional_reactivity": 0.40},
+    "decision_style": "ethics_first",
+    "biases": ["fairness_bias", "nonmaleficence_bias"],
+    "reaction_variability": 0.14,
+    "influence_susceptibility": 0.42
+  },
+  {
+    "template_id": "doc_ops_1",
+    "category_id": "doctors",
+    "archetype_name": "Clinical Operations Lead",
+    "traits": {"optimism": 0.52, "risk_tolerance": 0.36, "openness_to_change": 0.56, "skepticism": 0.58, "emotional_reactivity": 0.30},
+    "decision_style": "practical",
+    "biases": ["workflow_bias", "safety_bias"],
+    "reaction_variability": 0.18,
+    "influence_susceptibility": 0.54
+  },
 
+  {
+    "template_id": "biz_pragmatic_1",
+    "category_id": "small_business",
+    "archetype_name": "Pragmatic Entrepreneur",
+    "traits": {"optimism": 0.74, "risk_tolerance": 0.80, "openness_to_change": 0.62, "skepticism": 0.40, "emotional_reactivity": 0.30},
+    "decision_style": "pragmatic",
+    "biases": ["profit_bias", "market_bias"],
+    "reaction_variability": 0.24,
+    "influence_susceptibility": 0.76
+  },
+  {
+    "template_id": "biz_cfo_1",
+    "category_id": "small_business",
+    "archetype_name": "Cost Controller",
+    "traits": {"optimism": 0.44, "risk_tolerance": 0.28, "openness_to_change": 0.42, "skepticism": 0.70, "emotional_reactivity": 0.26},
+    "decision_style": "cost_first",
+    "biases": ["cost_bias", "downside_bias"],
+    "reaction_variability": 0.16,
+    "influence_susceptibility": 0.46
+  },
+  {
+    "template_id": "biz_growth_1",
+    "category_id": "small_business",
+    "archetype_name": "Growth Seeker",
+    "traits": {"optimism": 0.82, "risk_tolerance": 0.74, "openness_to_change": 0.78, "skepticism": 0.34, "emotional_reactivity": 0.36},
+    "decision_style": "opportunity_driven",
+    "biases": ["growth_bias", "speed_bias"],
+    "reaction_variability": 0.28,
+    "influence_susceptibility": 0.70
+  },
+  {
+    "template_id": "biz_operator_1",
+    "category_id": "small_business",
+    "archetype_name": "Operations Owner",
+    "traits": {"optimism": 0.58, "risk_tolerance": 0.46, "openness_to_change": 0.52, "skepticism": 0.54, "emotional_reactivity": 0.32},
+    "decision_style": "execution_focused",
+    "biases": ["delivery_bias", "reliability_bias"],
+    "reaction_variability": 0.20,
+    "influence_susceptibility": 0.58
+  },
+  {
+    "template_id": "biz_compliance_1",
+    "category_id": "small_business",
+    "archetype_name": "Regulated Market Founder",
+    "traits": {"optimism": 0.56, "risk_tolerance": 0.34, "openness_to_change": 0.50, "skepticism": 0.64, "emotional_reactivity": 0.28},
+    "decision_style": "compliance_pragmatic",
+    "biases": ["regulation_bias", "reputation_bias"],
+    "reaction_variability": 0.18,
+    "influence_susceptibility": 0.52
+  },
+
+  {
+    "template_id": "emp_steady_1",
+    "category_id": "employees",
+    "archetype_name": "Steady Worker",
+    "traits": {"optimism": 0.52, "risk_tolerance": 0.40, "openness_to_change": 0.50, "skepticism": 0.50, "emotional_reactivity": 0.40},
+    "decision_style": "balanced",
+    "biases": ["stability_bias", "company_loyalty_bias"],
+    "reaction_variability": 0.15,
+    "influence_susceptibility": 0.60
+  },
+  {
+    "template_id": "emp_manager_1",
+    "category_id": "employees",
+    "archetype_name": "Team Manager",
+    "traits": {"optimism": 0.60, "risk_tolerance": 0.44, "openness_to_change": 0.58, "skepticism": 0.52, "emotional_reactivity": 0.34},
+    "decision_style": "coordination_first",
+    "biases": ["team_bias", "deadline_bias"],
+    "reaction_variability": 0.18,
+    "influence_susceptibility": 0.56
+  },
+  {
+    "template_id": "emp_risk_1",
+    "category_id": "employees",
+    "archetype_name": "Risk-Averse Specialist",
+    "traits": {"optimism": 0.42, "risk_tolerance": 0.24, "openness_to_change": 0.40, "skepticism": 0.70, "emotional_reactivity": 0.36},
+    "decision_style": "risk_averse",
+    "biases": ["job_security_bias", "error_avoidance_bias"],
+    "reaction_variability": 0.14,
+    "influence_susceptibility": 0.48
+  },
+  {
+    "template_id": "emp_adapter_1",
+    "category_id": "employees",
+    "archetype_name": "Adaptive Contributor",
+    "traits": {"optimism": 0.66, "risk_tolerance": 0.50, "openness_to_change": 0.72, "skepticism": 0.42, "emotional_reactivity": 0.30},
+    "decision_style": "adaptive",
+    "biases": ["learning_bias", "peer_bias"],
+    "reaction_variability": 0.22,
+    "influence_susceptibility": 0.64
+  },
+
+  {
+    "template_id": "stu_ambitious_1",
+    "category_id": "students",
+    "archetype_name": "Ambitious Learner",
+    "traits": {"optimism": 0.80, "risk_tolerance": 0.62, "openness_to_change": 0.86, "skepticism": 0.30, "emotional_reactivity": 0.44},
+    "decision_style": "exploratory",
+    "biases": ["novelty_bias", "peer_validation_bias"],
+    "reaction_variability": 0.30,
+    "influence_susceptibility": 0.74
+  },
+  {
+    "template_id": "stu_practical_1",
+    "category_id": "students",
+    "archetype_name": "Practical Graduate",
+    "traits": {"optimism": 0.62, "risk_tolerance": 0.46, "openness_to_change": 0.62, "skepticism": 0.52, "emotional_reactivity": 0.36},
+    "decision_style": "career_oriented",
+    "biases": ["employability_bias", "budget_bias"],
+    "reaction_variability": 0.22,
+    "influence_susceptibility": 0.62
+  },
+  {
+    "template_id": "stu_cautious_1",
+    "category_id": "students",
+    "archetype_name": "Cautious Intern",
+    "traits": {"optimism": 0.50, "risk_tolerance": 0.30, "openness_to_change": 0.54, "skepticism": 0.62, "emotional_reactivity": 0.42},
+    "decision_style": "careful",
+    "biases": ["uncertainty_bias", "reputation_bias"],
+    "reaction_variability": 0.18,
+    "influence_susceptibility": 0.58
+  },
+
+  {
+    "template_id": "eld_guardian_1",
+    "category_id": "elderly",
+    "archetype_name": "Safety-First Elder",
+    "traits": {"optimism": 0.44, "risk_tolerance": 0.18, "openness_to_change": 0.30, "skepticism": 0.74, "emotional_reactivity": 0.46},
+    "decision_style": "safety_first",
+    "biases": ["safety_bias", "trust_bias"],
+    "reaction_variability": 0.14,
+    "influence_susceptibility": 0.50
+  },
+  {
+    "template_id": "eld_pragmatic_1",
+    "category_id": "elderly",
+    "archetype_name": "Pragmatic Retiree",
+    "traits": {"optimism": 0.56, "risk_tolerance": 0.28, "openness_to_change": 0.40, "skepticism": 0.62, "emotional_reactivity": 0.34},
+    "decision_style": "practical",
+    "biases": ["cost_bias", "reliability_bias"],
+    "reaction_variability": 0.16,
+    "influence_susceptibility": 0.46
+  },
+  {
+    "template_id": "eld_community_1",
+    "category_id": "elderly",
+    "archetype_name": "Community Elder",
+    "traits": {"optimism": 0.60, "risk_tolerance": 0.26, "openness_to_change": 0.44, "skepticism": 0.54, "emotional_reactivity": 0.40},
+    "decision_style": "community_centered",
+    "biases": ["social_trust_bias", "accessibility_bias"],
+    "reaction_variability": 0.20,
+    "influence_susceptibility": 0.58
+  }
 ]

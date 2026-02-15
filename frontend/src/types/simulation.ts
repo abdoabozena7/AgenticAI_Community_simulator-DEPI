@@ -81,7 +81,7 @@ export interface ChatMessage {
   timestamp: number;
   agentId?: string;
   options?: {
-    field: 'category' | 'audience' | 'goals' | 'maturity' | 'location_choice' | 'clarification_choice';
+    field: 'category' | 'audience' | 'goals' | 'maturity' | 'location_choice' | 'clarification_choice' | 'preflight_choice';
     kind: 'single' | 'multi';
     items: { value: string; label: string; description?: string }[];
   };
@@ -98,8 +98,48 @@ export interface PendingClarification {
   options: ClarificationOption[];
   reasonTag?: string | null;
   reasonSummary?: string | null;
+  decisionAxis?: string | null;
+  affectedAgents?: {
+    reject: number;
+    neutral: number;
+    totalWindow: number;
+  } | null;
+  supportingSnippets?: string[];
+  questionQuality?: {
+    score: number;
+    checksPassed: string[];
+  } | null;
   createdAt?: number | null;
   required: true;
+}
+
+export interface PreflightQuestionOption {
+  id: string;
+  label: string;
+}
+
+export interface PreflightQuestion {
+  questionId: string;
+  axis: string;
+  question: string;
+  options: PreflightQuestionOption[];
+  reasonSummary?: string;
+  required: true;
+  questionQuality?: {
+    score?: number;
+    checksPassed?: string[];
+  } | null;
+}
+
+export interface PreflightState {
+  active: boolean;
+  round: number;
+  maxRounds: number;
+  clarityScore: number;
+  missingAxes: string[];
+  normalizedContext: Record<string, unknown>;
+  history: Array<Record<string, unknown>>;
+  question: PreflightQuestion | null;
 }
 
 export interface PendingResearchReviewCandidateUrl {

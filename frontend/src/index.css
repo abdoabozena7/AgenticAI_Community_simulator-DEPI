@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+﻿@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap');
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
 @import url('https://fonts.cdnfonts.com/css/readex-pro');
 
@@ -406,7 +406,7 @@
   }
 
   .thinking-step::before {
-    content: "→";
+    content: "â†’";
     color: hsl(var(--primary));
   }
 
@@ -657,6 +657,70 @@
     transform: translateY(-1px) scale(1.02);
     box-shadow: 0 10px 20px hsl(var(--primary) / 0.10);
   }
+
+  .action-trigger-btn {
+    overflow: hidden;
+    justify-content: flex-start;
+    gap: 8px;
+    padding-inline: 0;
+    transition:
+      width 260ms cubic-bezier(0.2, 0.9, 0.2, 1),
+      transform 180ms ease,
+      box-shadow 180ms ease;
+  }
+
+  .action-trigger-btn-ready {
+    box-shadow: 0 0 0 1px hsl(var(--border)), 0 8px 18px hsl(var(--primary) / 0.14);
+  }
+
+  .action-trigger-btn-expanded {
+    border-radius: 999px;
+    padding-inline: 10px;
+  }
+
+  .action-trigger-icon-wrap {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .action-trigger-label {
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: calc(100% - 52px);
+  }
+
+  .action-trigger-indicator {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    z-index: 15;
+    font-size: 11px;
+    line-height: 1;
+    padding: 5px 8px;
+    border-radius: 999px;
+    border: 1px solid hsl(var(--border));
+    background: hsl(var(--card) / 0.95);
+    color: hsl(var(--muted-foreground));
+    white-space: nowrap;
+    pointer-events: none;
+    animation: actionHintIn 180ms ease;
+  }
+
+  .action-menu-from-trigger {
+    transform-origin: bottom right;
+    animation: actionMenuGrow 220ms cubic-bezier(0.2, 0.9, 0.2, 1);
+  }
+
+  html[dir='rtl'] .action-menu-from-trigger {
+    transform-origin: bottom left;
+  }
 }
 
 @keyframes messageIn {
@@ -778,6 +842,55 @@
     color: hsl(var(--primary-foreground));
     border-radius: 14px 14px 6px 14px;
     box-shadow: 0 2px 10px hsl(var(--primary) / 0.14);
+  }
+
+  /* Reasoning stance colors: medium contrast, theme-safe */
+  .reasoning-bubble-neutral {
+    background: hsl(var(--card)) !important;
+    border-color: hsl(var(--border)) !important;
+    color: hsl(var(--foreground));
+  }
+
+  .reasoning-bubble-accept {
+    background: hsl(var(--success) / 0.14) !important;
+    border-color: hsl(var(--success) / 0.45) !important;
+    color: hsl(var(--success));
+  }
+
+  .reasoning-bubble-reject {
+    background: hsl(var(--destructive) / 0.14) !important;
+    border-color: hsl(var(--destructive) / 0.45) !important;
+    color: hsl(var(--destructive));
+  }
+
+  .reasoning-text-neutral {
+    color: hsl(var(--foreground) / 0.95);
+  }
+
+  .reasoning-text-accept {
+    color: hsl(var(--success));
+  }
+
+  .reasoning-text-reject {
+    color: hsl(var(--destructive));
+  }
+
+  .reasoning-badge-neutral {
+    background: hsl(var(--primary) / 0.1);
+    color: hsl(var(--primary));
+    border-color: hsl(var(--primary) / 0.2);
+  }
+
+  .reasoning-badge-accept {
+    background: hsl(var(--success) / 0.16);
+    color: hsl(var(--success));
+    border-color: hsl(var(--success) / 0.4);
+  }
+
+  .reasoning-badge-reject {
+    background: hsl(var(--destructive) / 0.16);
+    color: hsl(var(--destructive));
+    border-color: hsl(var(--destructive) / 0.4);
   }
 
   /* "ChatGPT-like" inline thinking row (no borders/boxes) */
@@ -934,228 +1047,33 @@
   @keyframes msgPop {
     to { opacity: 1; transform: translateY(0); }
   }
+
   @keyframes stepIn {
     to { opacity: 1; transform: translateY(0); }
   }
 }
-@layer components {
-  /* =========================
-     FIX WHITE ITER CARDS
-     ========================= */
 
-  /* أي عنصر داخل reasoning ما يبقاش أبيض */
-  [data-testid="reasoning-messages"] div {
-    background-color: transparent;
+@keyframes actionMenuGrow {
+  0% {
+    opacity: 0;
+    transform: scaleX(0.45) scaleY(0.3) translateY(8px);
   }
-
-  /* لو فيه card افتراضي */
-  .card {
-    background: transparent !important;
-    color: inherit !important;
-    padding: 0 !important;
-    box-shadow: none !important;
-  }
-
-  /* رسالة reasoning نفسها */
-  .message.reasoning,
-  .message.reasoning .bubble,
-  .message.reasoning .bubble-compact {
-    background: hsl(var(--card)) !important;
-    color: hsl(var(--foreground)) !important;
-    border: 1px solid hsl(var(--border));
-    border-radius: 14px;
-  }
-
-  /* لو فيه Iter label لوحده */
-  .iteration-card,
-  .iter-card,
-  .iteration {
-    background: hsl(var(--card)) !important;
-    color: hsl(var(--muted-foreground)) !important;
-    border: 1px solid hsl(var(--border));
-    border-radius: 12px;
-    padding: 8px 10px;
-    text-align: center;
-    font-size: 12px;
+  100% {
+    opacity: 1;
+    transform: scaleX(1) scaleY(1) translateY(0);
   }
 }
-/* ------------------------------------------------------------------
-   POP‑UP ACTIONS (search‑timeout / retry actions)
-   ------------------------------------------------------------------ */
 
-/* ------------------------------------------------------------------
-   1️⃣  POSITIONING – attach the pop‑up to the *button* that opens it.
-   ------------------------------------------------------------------ */
-.action-pop-wrapper {
-  /* the wrapper is the element that contains the button + the pop‑up */
-  position: relative;               /* needed for absolute child positioning */
-}
-
-/* ------------------------------------------------------------------
-   2️⃣  POP‑UP PANEL – transparent background, thin border,
-        and appear **above** the button.
-   ------------------------------------------------------------------ */
-.action-pop {
-  position: absolute;
-  bottom: 100%;                     /* place it *above* the button */
-  right: 0;                         /* align to the right edge of the button */
-  margin-bottom: 6px;               /* tiny gap between button & panel */
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 8px;
-  border-radius: 12px;
-  background: transparent;          /* <‑‑ fully transparent */
-  border: 1px solid hsla(var(--border), 0.3);  /* faint border so the panel is still visible */
-  box-shadow: 0 6px 14px hsla(var(--foreground), 0.07);
-  transform-origin: bottom right;
-  opacity: 0;
-  transform: translateY(8px) scale(0.96);
-  animation: popOpen 180ms cubic-bezier(0.2, 0.9, 0.2, 1) forwards;
-  z-index: 20;
-}
-
-/* closing animation (used when the user clicks outside) */
-.action-pop.closing {
-  animation: popClose 140ms ease forwards;
-}
-
-/* ------------------------------------------------------------------
-   3️⃣  POP‑UP ITEM (each button inside the panel)
-   ------------------------------------------------------------------ */
-.action-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 8px;
-  border-radius: 10px;
-  background: transparent;
-  transition: background 160ms ease, transform 160ms ease;
-  cursor: pointer;
-}
-
-/* hover effect – a subtle primary‑tint */
-.action-item:hover {
-  background: hsla(var(--primary), 0.06);
-  transform: translateY(-1px);
-}
-
-/* ------------------------------------------------------------------
-   4️⃣  ICON (left side of each item)
-   ------------------------------------------------------------------ */
-.action-ico {
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
-  background: hsla(var(--secondary), 0.2);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-/* ------------------------------------------------------------------
-   5️⃣  TITLE & VERY SHORT DESCRIPTION
-   ------------------------------------------------------------------ */
-.action-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: hsla(var(--foreground));
-  line-height: 1.3;
-  white-space: normal;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-
-/* Description is now limited to **one‑or‑two words**.
-   We use `max-width: 8rem` (≈ 2‑Word width) and truncate the rest. */
-.action-sub {
-  font-size: 12px;
-  color: hsla(var(--muted-foreground));
-  line-height: 1.3;
-  white-space: normal;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  max-width: none;
-}
-
-/* ------------------------------------------------------------------
-   6️⃣  ANIMATIONS
-   ------------------------------------------------------------------ */
-@keyframes popOpen {
-  to {
+@keyframes actionHintIn {
+  0% {
+    opacity: 0;
+    transform: translateY(4px) scale(0.96);
+  }
+  100% {
     opacity: 1;
     transform: translateY(0) scale(1);
   }
 }
-@keyframes popClose {
-  to {
-    opacity: 0;
-    transform: translateY(8px) scale(0.96);
-  }
-}
-/* ────────────────────────────────────────────────────────────────
-   POP‑UP ACTIONS – HORIZONTAL MIRROR (icon on the right,
-   text on the left)
-   ──────────────────────────────────────────────────────────────── */
-
-/* 1️⃣  Put the whole panel in RTL mode so its children start
-    from the right edge.  This does **not** affect the overall
-    layout of the chat – only the pop‑up itself. */
-.action-pop {
-  direction: rtl;               /* flip the reading direction */
-}
-
-/* 2️⃣  Reverse the flex order of each action item.
-    .action-item is already `display:flex; align-items:center;`
-    – we only need to flip the axis. */
-.action-item {
-  flex-direction: row-reverse; /* icon → right, text → left */
-}
-
-/* 3️⃣  The text container (`.min-w-0`) must stay left‑aligned,
-    otherwise it would become right‑aligned in RTL mode. */
-.action-item .min-w-0 {
-  text-align: left;            /* keep title / subtitle left‑aligned */
-}
-
-/* 4️⃣  Give a little gap *after* the icon (now on the right). */
-.action-ico {
-  margin-left: 0;               /* remove any left margin */
-  margin-right: 8px;           /* space between icon and the text */
-}
-
-/* 5️⃣  Ensure the one‑line‑only, ellipsis behaviour still works
-    (the rules you already had are kept, we just repeat them for
-    safety). */
-.action-title,
-.action-sub {
-  font-size: 12px;
-  color: hsla(var(--muted-foreground));
-  line-height: 1.3;
-  white-space: normal;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  max-width: none;
-}
-
-/* ---------------------------------------------------------------
-   OPTIONAL: If you ever need the original LTR layout for a
-   specific locale, just wrap the panel with a container that forces
-   LTR again, e.g.:
-
-   <div class="action-pop ltr"> … </div>
-
-   and add:
-
-   .ltr { direction: ltr; }
-   --------------------------------------------------------------- */
 
 @layer utilities {
   .font-display {

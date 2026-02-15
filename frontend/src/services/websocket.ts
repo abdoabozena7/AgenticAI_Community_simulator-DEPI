@@ -129,6 +129,17 @@ export interface ClarificationRequestEvent {
   options: { id?: string; label?: string; text?: string; value?: string }[];
   reason_tag?: string | null;
   reason_summary?: string | null;
+  decision_axis?: string | null;
+  affected_agents?: {
+    reject?: number;
+    neutral?: number;
+    total_window?: number;
+  } | null;
+  supporting_snippets?: string[];
+  question_quality?: {
+    score?: number;
+    checks_passed?: string[];
+  } | null;
   created_at?: number;
   required?: boolean;
 }
@@ -174,9 +185,11 @@ class WebSocketService {
   private maxReconnectAttempts = 5;
   private reconnectDelay = 1000;
   private currentSimulationId: string | null = null;
+  private allowReconnect = true;
 
   connect(url: string): Promise<void> {
     this.url = url;
+    this.allowReconnect = true;
     
     return new Promise((resolve, reject) => {
       try {
@@ -205,8 +218,14 @@ class WebSocketService {
           reject(error);
         };
 
-        this.ws.onclose = () => {
-          console.log('WebSocket closed');
+        this.ws.onclose = (event) => {
+          console.log(`WebSocket closed (code=${event.code}, reason=${event.reason || 'n/a'})`);
+          if (!this.allowReconnect) return;
+          if (event.code === 1008) {
+            // Policy/auth close; avoid blind reconnect storm with same stale token.
+            console.warn('WebSocket closed due to authorization/policy (1008). Skipping auto-reconnect.');
+            return;
+          }
           this.attemptReconnect();
         };
       } catch (error) {
@@ -273,6 +292,7 @@ class WebSocketService {
   }
 
   disconnect() {
+    this.allowReconnect = false;
     if (this.ws) {
       this.ws.close();
       this.ws = null;

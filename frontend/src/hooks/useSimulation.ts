@@ -1,6 +1,6 @@
 ﻿import { useState, useCallback, useEffect, useReducer, useRef } from 'react';
 import { websocketService, WebSocketEvent, MetricsEvent, ReasoningStepEvent, ReasoningDebugEvent, AgentsEvent } from '@/services/websocket';
-import { apiService, SimulationConfig, SimulationStateResponse, getAuthToken } from '@/services/api';
+import { apiService, SimulationConfig, SimulationStateResponse } from '@/services/api';
 import { Agent, ReasoningMessage, ReasoningDebug, SimulationMetrics, SimulationStatus, SimulationChatEvent, PendingClarification, PendingResearchReview } from '@/types/simulation';
 
 interface SimulationState {
@@ -592,7 +592,7 @@ export function useSimulation(options?: UseSimulationOptions) {
     const wsBase = (import.meta.env.VITE_WS_URL as string | undefined)
       || apiBase
       || 'http://localhost:8000';
-    const token = getAuthToken();
+    const token = await apiService.ensureAccessTokenFresh(45);
     const wsUrl = wsBase
       .replace(/^http/, 'ws')
       .replace(/\/$/, '') + `/ws/simulation${token ? `?token=${encodeURIComponent(token)}` : ''}`;
@@ -730,6 +730,27 @@ export function useSimulation(options?: UseSimulationOptions) {
               : [],
             reasonTag: pendingClarificationRaw.reason_tag ?? null,
             reasonSummary: pendingClarificationRaw.reason_summary ?? null,
+            decisionAxis: pendingClarificationRaw.decision_axis ?? null,
+            affectedAgents: pendingClarificationRaw.affected_agents && typeof pendingClarificationRaw.affected_agents === 'object'
+              ? {
+                  reject: Number((pendingClarificationRaw.affected_agents as { reject?: number }).reject || 0),
+                  neutral: Number((pendingClarificationRaw.affected_agents as { neutral?: number }).neutral || 0),
+                  totalWindow: Number((pendingClarificationRaw.affected_agents as { total_window?: number }).total_window || 0),
+                }
+              : null,
+            supportingSnippets: Array.isArray(pendingClarificationRaw.supporting_snippets)
+              ? pendingClarificationRaw.supporting_snippets.map((snippet) => String(snippet || '').trim()).filter(Boolean).slice(0, 3)
+              : [],
+            questionQuality: pendingClarificationRaw.question_quality && typeof pendingClarificationRaw.question_quality === 'object'
+              ? {
+                  score: Number((pendingClarificationRaw.question_quality as { score?: number }).score || 0),
+                  checksPassed: Array.isArray((pendingClarificationRaw.question_quality as { checks_passed?: unknown[] }).checks_passed)
+                    ? ((pendingClarificationRaw.question_quality as { checks_passed?: unknown[] }).checks_passed || [])
+                        .map((item) => String(item || '').trim())
+                        .filter(Boolean)
+                    : [],
+                }
+              : null,
             createdAt: typeof pendingClarificationRaw.created_at === 'number' ? pendingClarificationRaw.created_at : null,
             required: true,
           }
@@ -1046,6 +1067,25 @@ export function useSimulation(options?: UseSimulationOptions) {
               options: mappedOptions,
               reasonTag: event.reason_tag ?? null,
               reasonSummary: event.reason_summary ?? null,
+              decisionAxis: event.decision_axis ?? null,
+              affectedAgents: event.affected_agents && typeof event.affected_agents === 'object'
+                ? {
+                    reject: Number(event.affected_agents.reject || 0),
+                    neutral: Number(event.affected_agents.neutral || 0),
+                    totalWindow: Number(event.affected_agents.total_window || 0),
+                  }
+                : null,
+              supportingSnippets: Array.isArray(event.supporting_snippets)
+                ? event.supporting_snippets.map((snippet) => String(snippet || '').trim()).filter(Boolean).slice(0, 3)
+                : [],
+              questionQuality: event.question_quality && typeof event.question_quality === 'object'
+                ? {
+                    score: Number(event.question_quality.score || 0),
+                    checksPassed: Array.isArray(event.question_quality.checks_passed)
+                      ? event.question_quality.checks_passed.map((item: unknown) => String(item || '').trim()).filter(Boolean)
+                      : [],
+                  }
+                : null,
               createdAt: typeof event.created_at === 'number' ? event.created_at : null,
               required: true,
             },

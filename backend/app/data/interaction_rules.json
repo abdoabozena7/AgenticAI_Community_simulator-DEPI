@@ -1,33 +1,43 @@
 [
-  {
-    "from_category": "engineers",
-    "to_category": "engineers",
-    "influence_multiplier": 1.0,
-    "notes": "Peer engineers strongly influence each other"
-  },
-  {
-    "from_category": "engineers",
-    "to_category": "doctors",
-    "influence_multiplier": 0.6,
-    "notes": "Engineers moderately influence doctors"
-  },
-  {
-    "from_category": "small_business",
-    "to_category": "employees",
-    "influence_multiplier": 0.8,
-    "notes": "Entrepreneurs influence employees on market trends"
-  },
-  {
-    "from_category": "doctors",
-    "to_category": "small_business",
-    "influence_multiplier": 0.5,
-    "notes": "Doctors have limited influence on business owners"
-  },
-  {
-    "from_category": "employees",
-    "to_category": "engineers",
-    "influence_multiplier": 0.4,
-    "notes": "Employees have low influence on engineers"
-  }
+  {"from_category":"engineers","to_category":"engineers","influence_multiplier":1.05,"notes":"Peers align on implementation realities"},
+  {"from_category":"engineers","to_category":"doctors","influence_multiplier":0.74,"notes":"Technical influence moderated by clinical risk concerns"},
+  {"from_category":"engineers","to_category":"small_business","influence_multiplier":0.82,"notes":"Implementation detail influences feasibility and cost planning"},
+  {"from_category":"engineers","to_category":"employees","influence_multiplier":0.76,"notes":"Engineering decisions shape operational confidence"},
+  {"from_category":"engineers","to_category":"students","influence_multiplier":0.72,"notes":"Students are influenced by technical credibility"},
+  {"from_category":"engineers","to_category":"elderly","influence_multiplier":0.62,"notes":"Influence exists but trust/safety barriers remain"},
 
+  {"from_category":"doctors","to_category":"engineers","influence_multiplier":0.78,"notes":"Clinical constraints strongly affect system design"},
+  {"from_category":"doctors","to_category":"doctors","influence_multiplier":1.08,"notes":"Clinical peers align on safety and ethics"},
+  {"from_category":"doctors","to_category":"small_business","influence_multiplier":0.70,"notes":"Medical risk framing influences go/no-go decisions"},
+  {"from_category":"doctors","to_category":"employees","influence_multiplier":0.74,"notes":"Safety arguments affect execution preference"},
+  {"from_category":"doctors","to_category":"students","influence_multiplier":0.69,"notes":"Ethics signals shape student stance"},
+  {"from_category":"doctors","to_category":"elderly","influence_multiplier":0.92,"notes":"Elderly trust health-oriented perspectives"},
+
+  {"from_category":"small_business","to_category":"engineers","influence_multiplier":0.80,"notes":"Budget and timeline pressure influence technical tradeoffs"},
+  {"from_category":"small_business","to_category":"doctors","influence_multiplier":0.64,"notes":"Commercial framing has limited effect on clinical decisions"},
+  {"from_category":"small_business","to_category":"small_business","influence_multiplier":1.12,"notes":"Founders strongly influence each other on market logic"},
+  {"from_category":"small_business","to_category":"employees","influence_multiplier":0.88,"notes":"Business priorities strongly impact employees"},
+  {"from_category":"small_business","to_category":"students","influence_multiplier":0.78,"notes":"Career and opportunity framing influences students"},
+  {"from_category":"small_business","to_category":"elderly","influence_multiplier":0.60,"notes":"Commercial framing has weak effect without trust"},
+
+  {"from_category":"employees","to_category":"engineers","influence_multiplier":0.66,"notes":"Operational feedback influences engineering choices"},
+  {"from_category":"employees","to_category":"doctors","influence_multiplier":0.62,"notes":"Execution realities provide moderate influence"},
+  {"from_category":"employees","to_category":"small_business","influence_multiplier":0.76,"notes":"Operational burden affects founder expectations"},
+  {"from_category":"employees","to_category":"employees","influence_multiplier":0.96,"notes":"Peer operations concerns spread quickly"},
+  {"from_category":"employees","to_category":"students","influence_multiplier":0.72,"notes":"Workplace practicality influences student stance"},
+  {"from_category":"employees","to_category":"elderly","influence_multiplier":0.64,"notes":"Service reliability concerns moderately persuasive"},
+
+  {"from_category":"students","to_category":"engineers","influence_multiplier":0.58,"notes":"Fresh perspective but lower authority"},
+  {"from_category":"students","to_category":"doctors","influence_multiplier":0.56,"notes":"Influence limited by domain maturity"},
+  {"from_category":"students","to_category":"small_business","influence_multiplier":0.66,"notes":"Trend sensitivity can influence market experimentation"},
+  {"from_category":"students","to_category":"employees","influence_multiplier":0.62,"notes":"Adoption enthusiasm moderately influences teams"},
+  {"from_category":"students","to_category":"students","influence_multiplier":1.00,"notes":"Peer influence is strong among students"},
+  {"from_category":"students","to_category":"elderly","influence_multiplier":0.50,"notes":"Limited influence unless trust is established"},
+
+  {"from_category":"elderly","to_category":"engineers","influence_multiplier":0.70,"notes":"Accessibility concerns influence design choices"},
+  {"from_category":"elderly","to_category":"doctors","influence_multiplier":0.88,"notes":"Patient lived experience strongly influences clinicians"},
+  {"from_category":"elderly","to_category":"small_business","influence_multiplier":0.68,"notes":"Trust and usability concerns affect business viability"},
+  {"from_category":"elderly","to_category":"employees","influence_multiplier":0.72,"notes":"Reliability concerns influence service workflows"},
+  {"from_category":"elderly","to_category":"students","influence_multiplier":0.60,"notes":"Conservative experience tempers student optimism"},
+  {"from_category":"elderly","to_category":"elderly","influence_multiplier":1.04,"notes":"Peers align on trust, safety, and accessibility"}
 ]

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+﻿import type { ReactNode } from 'react';
 import { Users, CheckCircle, XCircle, MinusCircle, TrendingUp, Activity } from 'lucide-react';
 import { Progress } from '@/components/ui/progress';
 import { SimulationMetrics } from '@/types/simulation';

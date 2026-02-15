@@ -23,6 +23,7 @@ from fastapi import APIRouter, HTTPException, status, Header
 from ..core.dataset_loader import Dataset
 from ..core import auth as auth_core
 from ..simulation.engine import SimulationEngine, ClarificationNeeded
+from ..simulation.preflight import preflight_next, preflight_finalize
 from ..core.ollama_client import generate_ollama
 from ..core.context_store import save_context
 from ..core.web_search import search_web
@@ -57,6 +58,10 @@ def _auth_required() -> bool:
     return os.getenv("AUTH_REQUIRED", "false").lower() in {"1", "true", "yes"}
 
 
+def _preflight_required() -> bool:
+    return os.getenv("SIM_PREFLIGHT_REQUIRED", "0").lower() in {"1", "true", "yes", "on"}
+
+
 async def _resolve_user(authorization: Optional[str], require: bool = False) -> Optional[Dict[str, Any]]:
     if not authorization or not authorization.lower().startswith("bearer "):
         if require:
@@ -80,6 +85,106 @@ async def _ensure_simulation_access(simulation_id: str, user: Dict[str, Any]) ->
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Simulation not found")
     if int(owner_id) != int(user.get("id") or 0):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+
+
+def _normalize_clarification_options(raw_options: Any) -> List[Dict[str, str]]:
+    options: List[Dict[str, str]] = []
+    if isinstance(raw_options, list):
+        for item in raw_options:
+            label = ""
+            option_id = ""
+            if isinstance(item, str):
+                label = item.strip()
+            elif isinstance(item, dict):
+                label = str(item.get("label") or item.get("text") or item.get("value") or "").strip()
+                option_id = str(item.get("id") or item.get("option_id") or "").strip()
+            if not label:
+                continue
+            normalized = " ".join(label.lower().split())
+            if normalized in {"option 1", "option 2", "option 3", "اختيار 1", "اختيار 2", "اختيار 3"}:
+                continue
+            if any(" ".join(existing["label"].lower().split()) == normalized for existing in options):
+                continue
+            options.append({"id": option_id or f"opt_{len(options) + 1}", "label": label[:220]})
+            if len(options) >= 3:
+                break
+    return options
+
+
+def _clarification_fallback_template(reason_tag: str, language: str, reason_summary: str) -> Dict[str, Any]:
+    is_ar = str(language or "en").lower() == "ar"
+    templates: Dict[str, Dict[str, Any]] = {
+        "privacy_surveillance": {
+            "decision_axis": "privacy_scope",
+            "question_ar": "في فكرتك الحالية، ما الحدّ المقبول لجمع البيانات قبل الانتقال للمرحلة التالية؟",
+            "question_en": "For this idea, what data-collection boundary should be enforced before continuing?",
+            "options_ar": [
+                "نكتفي ببيانات يقدّمها المستخدم بنفسه فقط",
+                "نستخدم بيانات عامة فقط بعد موافقة صريحة موثقة",
+                "نضيف بيانات إضافية لكن مع مراجعة بشرية إلزامية",
+            ],
+            "options_en": [
+                "Only use data explicitly provided by the user",
+                "Use public data only with explicit documented consent",
+                "Allow extended data only with mandatory human review",
+            ],
+        },
+        "legal_compliance": {
+            "decision_axis": "compliance_boundary",
+            "question_ar": "ما مستوى الامتثال القانوني المطلوب قبل إطلاق النسخة القادمة من الفكرة؟",
+            "question_en": "What legal-compliance threshold must be met before the next rollout step?",
+            "options_ar": [
+                "امتثال كامل قبل أي إطلاق",
+                "Pilot محدود مع موافقات صريحة وتدقيق شهري",
+                "تجميد أي قرار مؤثر حتى اكتمال الامتثال",
+            ],
+            "options_en": [
+                "Full compliance before any launch",
+                "Limited pilot with explicit consent and monthly audits",
+                "Freeze high-impact decisions until compliance is complete",
+            ],
+        },
+        "unclear_value": {
+            "decision_axis": "value_proposition",
+            "question_ar": "ما القيمة الأوضح التي تريد أن يحسم الوكلاء النقاش بناءً عليها؟",
+            "question_en": "Which value promise should agents use as the primary decision criterion?",
+            "options_ar": [
+                "توفير تكلفة مباشر وقابل للقياس",
+                "رفع الجودة/الدقة بشكل واضح",
+                "تقليل المخاطر والامتثال كأولوية",
+            ],
+            "options_en": [
+                "Measurable direct cost savings",
+                "Clear quality and accuracy uplift",
+                "Risk reduction and compliance confidence first",
+            ],
+        },
+        "evidence_gap": {
+            "decision_axis": "evidence_priority",
+            "question_ar": "أي نوع دليل نحتاجه أولًا حتى يقرر الوكلاء دون بقاء حياد مرتفع؟",
+            "question_en": "Which evidence should be prioritized first so agents can decide without staying neutral?",
+            "options_ar": [
+                "دليل سوق وتسعير من مصادر موثوقة",
+                "دليل قانوني/تنظيمي مباشر",
+                "دليل استخدام فعلي من Pilot محدود",
+            ],
+            "options_en": [
+                "Market and pricing proof from trusted sources",
+                "Direct legal and regulatory evidence",
+                "Real usage evidence from a limited pilot",
+            ],
+        },
+    }
+    template = templates.get(reason_tag) or templates["evidence_gap"]
+    question = template["question_ar"] if is_ar else template["question_en"]
+    options_seed = template["options_ar"] if is_ar else template["options_en"]
+    options = [{"id": f"opt_{idx + 1}", "label": str(label)} for idx, label in enumerate(options_seed[:3])]
+    return {
+        "question": question,
+        "options": options,
+        "decision_axis": template.get("decision_axis") or "evidence_priority",
+        "reason_summary": reason_summary,
+    }
 
 
 def _init_state(simulation_id: str, user_id: Optional[int] = None) -> None:
@@ -111,6 +216,79 @@ def _init_state(simulation_id: str, user_id: Optional[int] = None) -> None:
         "can_answer_clarification": False,
         "pending_research_review": None,
     }
+
+
+@router.post("/preflight/next")
+async def simulation_preflight_next(payload: Dict[str, Any], authorization: str = Header(None)) -> Dict[str, Any]:
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if user and not auth_core.has_permission(user, "simulation:run"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+
+    draft_context = payload.get("draft_context")
+    if not isinstance(draft_context, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="draft_context object is required")
+
+    history = payload.get("history")
+    if history is not None and not isinstance(history, list):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="history must be an array")
+
+    answer = payload.get("answer")
+    if answer is not None and not isinstance(answer, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="answer must be an object")
+
+    language = "ar" if str(payload.get("language") or "en").lower().startswith("ar") else "en"
+    try:
+        max_rounds = int(payload.get("max_rounds") or os.getenv("SIM_PREFLIGHT_MAX_ROUNDS", "3"))
+    except Exception:
+        max_rounds = 3
+    max_rounds = max(1, min(5, max_rounds))
+    try:
+        threshold = float(payload.get("threshold") or os.getenv("SIM_PREFLIGHT_THRESHOLD", "0.78"))
+    except Exception:
+        threshold = 0.78
+    threshold = max(0.50, min(0.95, threshold))
+
+    result = await preflight_next(
+        draft_context=draft_context,
+        history=history if isinstance(history, list) else None,
+        answer=answer if isinstance(answer, dict) else None,
+        language=language,
+        max_rounds=max_rounds,
+        threshold=threshold,
+    )
+    return result
+
+
+@router.post("/preflight/finalize")
+async def simulation_preflight_finalize(payload: Dict[str, Any], authorization: str = Header(None)) -> Dict[str, Any]:
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if user and not auth_core.has_permission(user, "simulation:run"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+
+    normalized_context = payload.get("normalized_context")
+    if not isinstance(normalized_context, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="normalized_context object is required")
+
+    history = payload.get("history")
+    if history is not None and not isinstance(history, list):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="history must be an array")
+
+    language = "ar" if str(payload.get("language") or "en").lower().startswith("ar") else "en"
+    try:
+        threshold = float(payload.get("threshold") or os.getenv("SIM_PREFLIGHT_THRESHOLD", "0.78"))
+    except Exception:
+        threshold = 0.78
+    threshold = max(0.50, min(0.95, threshold))
+
+    result = preflight_finalize(
+        normalized_context=normalized_context,
+        history=history if isinstance(history, list) else None,
+        language=language,
+        threshold=threshold,
+    )
+    return result
 
 
 def _store_event(simulation_id: str, event_type: str, data: Dict[str, Any]) -> None:
@@ -221,6 +399,10 @@ def _store_event(simulation_id: str, event_type: str, data: Dict[str, Any]) -> N
             "options": data.get("options") or [],
             "reason_tag": data.get("reason_tag"),
             "reason_summary": data.get("reason_summary"),
+            "decision_axis": data.get("decision_axis"),
+            "affected_agents": data.get("affected_agents"),
+            "supporting_snippets": data.get("supporting_snippets") or [],
+            "question_quality": data.get("question_quality"),
             "created_at": data.get("created_at"),
             "required": True,
         }
@@ -1820,7 +2002,7 @@ async def _start_background_simulation(
 
             if not bool(checkpoint_meta.get("clarification_notice_sent")):
                 notice_text = (
-                    "طھظ†ط¨ظٹظ‡: ط£ط«ظ†ط§ط، ط§ظ„طھظپظƒظٹط±طŒ ظ…ظ…ظƒظ† ط§ظ„ظˆظƒظ„ط§ط، ظٹط·ظ„ط¨ظˆط§ طھظˆط¶ظٹط­ ظ…ظ†ظƒ. ط®ظ„ظٹ ط¬ظ‡ط§ط²ظƒ ظ‚ط±ظٹط¨."
+                    "تنبيه: أثناء التفكير، ممكن الوكلاء يطلبوا توضيح منك. خليك قريب من الجهاز."
                     if str(user_context.get("language") or "en").lower() == "ar"
                     else "Heads-up: during reasoning, agents may pause and ask for clarification. Stay near your device."
                 )
@@ -1905,37 +2087,59 @@ async def _start_background_simulation(
             reason_tag = str(payload.get("reason_tag") or "evidence_gap")
             reason_summary = str(payload.get("reason_summary") or "Clarification required before continuing.").strip()
             question_text = str(payload.get("question") or "").strip()
-            options_raw = payload.get("options")
-            options: List[Dict[str, str]] = []
-            if isinstance(options_raw, list):
-                for idx, item in enumerate(options_raw):
-                    label = ""
-                    option_id = ""
-                    if isinstance(item, str):
-                        label = item.strip()
-                    elif isinstance(item, dict):
-                        label = str(item.get("label") or item.get("text") or item.get("value") or "").strip()
-                        option_id = str(item.get("id") or item.get("option_id") or "").strip()
-                    if not label:
-                        continue
-                    options.append({"id": option_id or f"opt_{idx + 1}", "label": label[:220]})
-                    if len(options) >= 3:
-                        break
-            while len(options) < 3:
-                options.append({"id": f"opt_{len(options) + 1}", "label": f"Option {len(options) + 1}"})
+            language_code = str(user_context.get("language") or "en").lower()
+            fallback_template = _clarification_fallback_template(reason_tag, language_code, reason_summary)
+            options = _normalize_clarification_options(payload.get("options"))
+            if len(options) < 3:
+                options = _normalize_clarification_options(fallback_template.get("options"))
+            decision_axis = str(
+                payload.get("decision_axis")
+                or fallback_template.get("decision_axis")
+                or "evidence_priority"
+            ).strip()
+            supporting_snippets_raw = payload.get("supporting_snippets")
+            supporting_snippets: List[str] = []
+            if isinstance(supporting_snippets_raw, list):
+                supporting_snippets = [
+                    str(item).strip()[:240]
+                    for item in supporting_snippets_raw
+                    if str(item).strip()
+                ][:3]
+            affected_agents_raw = payload.get("affected_agents")
+            affected_agents: Dict[str, int] | None = None
+            if isinstance(affected_agents_raw, dict):
+                affected_agents = {
+                    "reject": int(affected_agents_raw.get("reject") or 0),
+                    "neutral": int(affected_agents_raw.get("neutral") or 0),
+                    "total_window": int(affected_agents_raw.get("total_window") or 0),
+                }
+            question_quality_raw = payload.get("question_quality")
+            question_quality: Dict[str, Any] | None = None
+            if isinstance(question_quality_raw, dict):
+                checks_passed_raw = question_quality_raw.get("checks_passed")
+                question_quality = {
+                    "score": float(question_quality_raw.get("score") or 0.0),
+                    "checks_passed": [
+                        str(item).strip()
+                        for item in (checks_passed_raw if isinstance(checks_passed_raw, list) else [])
+                        if str(item).strip()
+                    ],
+                }
+            if not question_text:
+                question_text = str(fallback_template.get("question") or "").strip()
             question_id = str(payload.get("question_id") or uuid.uuid4().hex[:12])
             created_at = int(payload.get("created_at") or int(datetime.utcnow().timestamp() * 1000))
             clarification_data = {
                 "event_seq": _next_event_seq(simulation_id),
                 "question_id": question_id,
-                "question": question_text or (
-                    "Please clarify the key ambiguity before we continue."
-                    if str(user_context.get("language") or "en").lower() != "ar"
-                    else "نحتاج توضيح نقطة غامضة أساسية قبل المتابعة."
-                ),
+                "question": question_text,
                 "options": options,
                 "reason_tag": reason_tag,
                 "reason_summary": reason_summary,
+                "decision_axis": decision_axis,
+                "affected_agents": affected_agents,
+                "supporting_snippets": supporting_snippets,
+                "question_quality": question_quality,
                 "created_at": created_at,
                 "required": True,
             }
@@ -1954,6 +2158,10 @@ async def _start_background_simulation(
                 "options": options,
                 "reason_tag": reason_tag,
                 "reason_summary": reason_summary,
+                "decision_axis": decision_axis,
+                "affected_agents": affected_agents,
+                "supporting_snippets": supporting_snippets,
+                "question_quality": question_quality,
                 "created_at": created_at,
                 "required": True,
             }
@@ -1968,6 +2176,7 @@ async def _start_background_simulation(
                     "question_id": question_id,
                     "reason_tag": reason_tag,
                     "reason_summary": reason_summary,
+                    "decision_axis": decision_axis,
                     "created_at": created_at,
                 }
             )
@@ -2005,6 +2214,10 @@ async def _start_background_simulation(
                     "required": True,
                     "reason_tag": reason_tag,
                     "reason_summary": reason_summary,
+                    "decision_axis": decision_axis,
+                    "affected_agents": affected_agents,
+                    "supporting_snippets": supporting_snippets,
+                    "question_quality": question_quality,
                     "options": {
                         "field": "clarification_choice",
                         "kind": "single",
@@ -2137,6 +2350,23 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
     # Generate a unique ID for this simulation
     simulation_id = str(uuid.uuid4())
     run_mode = str(user_context.get("run_mode") or "normal").strip().lower() or "normal"
+    preflight_ready = bool(user_context.get("preflight_ready"))
+    preflight_summary = str(user_context.get("preflight_summary") or "").strip()
+    preflight_answers = user_context.get("preflight_answers")
+    preflight_assumptions = user_context.get("preflight_assumptions")
+    try:
+        preflight_clarity_score = float(user_context.get("preflight_clarity_score")) if user_context.get("preflight_clarity_score") is not None else None
+    except Exception:
+        preflight_clarity_score = None
+    if _preflight_required() and not preflight_ready:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Preflight clarification is required before simulation start.",
+        )
+    if not isinstance(preflight_answers, dict):
+        preflight_answers = {}
+    if not isinstance(preflight_assumptions, list):
+        preflight_assumptions = []
     try:
         neutral_cap_pct = float(user_context.get("neutral_cap_pct") if user_context.get("neutral_cap_pct") is not None else 0.30)
     except Exception:
@@ -2146,6 +2376,11 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
     user_context["run_mode"] = run_mode
     user_context["neutral_cap_pct"] = neutral_cap_pct
     user_context["neutral_enforcement"] = neutral_enforcement
+    user_context["preflight_ready"] = preflight_ready
+    user_context["preflight_summary"] = preflight_summary
+    user_context["preflight_answers"] = preflight_answers
+    user_context["preflight_clarity_score"] = preflight_clarity_score
+    user_context["preflight_assumptions"] = [str(item).strip() for item in preflight_assumptions if str(item).strip()][:8]
     _init_state(simulation_id, user_id=user_id)
     _simulation_state[simulation_id]["current_phase_key"] = "search_bootstrap"
     _simulation_state[simulation_id]["phase_progress_pct"] = 0.0
@@ -2197,6 +2432,8 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
                     "research_cycle_index": 0,
                     "last_research_quality": None,
                     "last_research_gaps": [],
+                    "preflight_ready": preflight_ready,
+                    "preflight_clarity_score": preflight_clarity_score,
                 },
             },
             status="running",
