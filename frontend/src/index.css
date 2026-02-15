@@ -658,49 +658,17 @@
     box-shadow: 0 10px 20px hsl(var(--primary) / 0.10);
   }
 
-  .action-trigger-btn {
-    overflow: hidden;
-    justify-content: flex-start;
+  .control-trigger-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
     gap: 8px;
-    padding-inline: 0;
-    transition:
-      width 260ms cubic-bezier(0.2, 0.9, 0.2, 1),
-      transform 180ms ease,
-      box-shadow 180ms ease;
-  }
-
-  .action-trigger-btn-ready {
-    box-shadow: 0 0 0 1px hsl(var(--border)), 0 8px 18px hsl(var(--primary) / 0.14);
-  }
-
-  .action-trigger-btn-expanded {
-    border-radius: 999px;
-    padding-inline: 10px;
-  }
-
-  .action-trigger-icon-wrap {
-    width: 44px;
     min-width: 44px;
-    height: 44px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+    max-width: 75%;
   }
 
-  .action-trigger-label {
-    font-size: 12px;
-    font-weight: 600;
-    line-height: 1.1;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: calc(100% - 52px);
-  }
-
-  .action-trigger-indicator {
-    position: absolute;
-    bottom: calc(100% + 6px);
-    z-index: 15;
+  .control-trigger-hint {
+    max-width: min(220px, 75vw);
     font-size: 11px;
     line-height: 1;
     padding: 5px 8px;
@@ -709,17 +677,136 @@
     background: hsl(var(--card) / 0.95);
     color: hsl(var(--muted-foreground));
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     pointer-events: none;
     animation: actionHintIn 180ms ease;
   }
 
-  .action-menu-from-trigger {
-    transform-origin: bottom right;
-    animation: actionMenuGrow 220ms cubic-bezier(0.2, 0.9, 0.2, 1);
+  .control-trigger-btn {
+    width: 44px;
+    overflow: hidden;
+    justify-content: flex-start;
+    gap: 8px;
+    padding-inline: 0;
+    border-radius: 999px;
+    transition:
+      width 300ms cubic-bezier(0.28, 1.22, 0.38, 1),
+      transform 160ms ease,
+      box-shadow 160ms ease;
   }
 
-  html[dir='rtl'] .action-menu-from-trigger {
-    transform-origin: bottom left;
+  .control-trigger-btn.is-ready {
+    box-shadow: 0 0 0 1px hsl(var(--border)), 0 8px 18px hsl(var(--primary) / 0.14);
+  }
+
+  .control-trigger-btn.is-expanded {
+    padding-inline: 10px;
+    box-shadow: 0 0 0 1px hsl(var(--primary) / 0.24), 0 12px 24px hsl(var(--primary) / 0.2);
+  }
+
+  .control-trigger-btn.is-menu-open {
+    transform: translateY(-1px);
+  }
+
+  .control-trigger-icon-wrap {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .control-trigger-label {
+    opacity: 0;
+    transform: translateX(6px);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: calc(100% - 52px);
+    transition: opacity 180ms ease, transform 220ms ease;
+  }
+
+  .control-trigger-btn.is-expanded .control-trigger-label {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  html[dir='rtl'] .control-trigger-btn .control-trigger-label {
+    transform: translateX(-6px);
+  }
+
+  html[dir='rtl'] .control-trigger-btn.is-expanded .control-trigger-label {
+    transform: translateX(0);
+  }
+
+  .control-menu-reserved {
+    width: 100%;
+    max-height: 0;
+    opacity: 0;
+    overflow: hidden;
+    transform-origin: bottom;
+    transition: max-height 220ms cubic-bezier(0.2, 0.9, 0.2, 1), opacity 140ms ease;
+  }
+
+  .control-menu-reserved.is-mounted {
+    max-height: 92px;
+    opacity: 1;
+  }
+
+  .control-menu-reserved.is-closing {
+    max-height: 0;
+    opacity: 0;
+  }
+
+  .control-menu-shell {
+    width: 100%;
+    border-radius: 12px;
+    border: 1px solid hsl(var(--border));
+    background: hsl(var(--card) / 0.95);
+    box-shadow: 0 12px 28px hsl(0 0% 0% / 0.32);
+    padding: 6px;
+    transform-origin: bottom;
+    animation: controlMenuBlossom 240ms cubic-bezier(0.24, 1.18, 0.42, 1);
+  }
+
+  .control-menu-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .control-menu-item {
+    width: 100%;
+    min-width: 0;
+    height: 42px;
+    border-radius: 10px;
+    justify-content: flex-start;
+    padding-inline: 10px;
+    gap: 6px;
+    animation: controlMenuItemIn 220ms ease both;
+  }
+
+  .control-menu-item-primary {
+    animation-delay: 45ms;
+  }
+
+  .control-menu-item-secondary {
+    animation-delay: 95ms;
+  }
+
+  .control-menu-item-label {
+    min-width: 0;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 }
 
@@ -953,83 +1040,6 @@
     50% { box-shadow: 0 0 0 5px hsl(var(--primary) / 0.18), 0 14px 34px -12px hsl(var(--primary) / 0.28); }
   }
 
-  .action-pop {
-    position: absolute;
-    bottom: 56px;
-    right: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding: 10px;
-    border-radius: 16px;
-    background: hsl(var(--card));
-    box-shadow: 0 18px 50px hsl(0 0% 0% / 0.35);
-    transform-origin: bottom right;
-    opacity: 0;
-    transform: translateY(8px) scale(0.96);
-    animation: popOpen 180ms cubic-bezier(0.2, 0.9, 0.2, 1) forwards;
-    z-index: 20;
-    min-width: 240px;
-  }
-
-  .action-pop.closing {
-    animation: popClose 140ms ease forwards;
-  }
-
-  @keyframes popOpen {
-    to { opacity: 1; transform: translateY(0) scale(1); }
-  }
-  @keyframes popClose {
-    to { opacity: 0; transform: translateY(10px) scale(0.96); }
-  }
-
-  .action-item {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 6px 8px;
-    border-radius: 14px;
-    background: transparent;
-    transition: background 160ms ease, transform 160ms ease;
-    text-align: start;
-  }
-  .action-item:hover {
-    background: hsl(var(--primary) / 0.06);
-    transform: translateY(-1px);
-  }
-  .action-ico {
-    width: 44px;
-    height: 44px;
-    border-radius: 14px;
-    background: hsl(var(--secondary));
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-  }
-  .action-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: hsla(var(--foreground));
-  line-height: 1.3;
-  white-space: normal;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-  .action-sub {
-  font-size: 12px;
-  color: hsla(var(--muted-foreground));
-  line-height: 1.3;
-  white-space: normal;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  max-width: none;
-}
-
   /* Read more */
   .readmore {
     margin-top: 8px;
@@ -1053,14 +1063,29 @@
   }
 }
 
-@keyframes actionMenuGrow {
+@keyframes controlMenuBlossom {
   0% {
     opacity: 0;
-    transform: scaleX(0.45) scaleY(0.3) translateY(8px);
+    transform: scaleX(0.3) scaleY(0.35) translateY(8px);
+  }
+  55% {
+    opacity: 1;
+    transform: scaleX(1.03) scaleY(0.86) translateY(0);
   }
   100% {
     opacity: 1;
     transform: scaleX(1) scaleY(1) translateY(0);
+  }
+}
+
+@keyframes controlMenuItemIn {
+  0% {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
 }
 
@@ -1072,6 +1097,18 @@
   100% {
     opacity: 1;
     transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .control-trigger-btn,
+  .control-trigger-label,
+  .control-menu-reserved,
+  .control-menu-shell,
+  .control-menu-item,
+  .control-trigger-hint {
+    animation: none !important;
+    transition-duration: 0ms !important;
   }
 }
 

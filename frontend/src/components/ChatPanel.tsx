@@ -1,4 +1,4 @@
-﻿import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+﻿import { useState, useRef, useEffect, useMemo, useCallback, type CSSProperties } from 'react';
 import {
   Send,
   Bot,
@@ -330,9 +330,13 @@ export function ChatPanel({
   const [previewUrl, setPreviewUrl] = useState<string>('');
   const [expandedTextMap, setExpandedTextMap] = useState<Record<string, boolean>>({});
   const [brokenFaviconMap, setBrokenFaviconMap] = useState<Record<string, boolean>>({});
-  const [actionMenuOpen, setActionMenuOpen] = useState(false);
-  const [actionTriggerHovered, setActionTriggerHovered] = useState(false);
+  const [actionTriggerState, setActionTriggerState] = useState<'idle_closed' | 'hover_expanded' | 'collapsing_for_open' | 'menu_open' | 'menu_closing'>('idle_closed');
+  const [actionMenuRendered, setActionMenuRendered] = useState(false);
+  const [actionPending, setActionPending] = useState<'primary' | 'secondary' | null>(null);
   const [actionExpandedWidthPx, setActionExpandedWidthPx] = useState(44);
+  const actionOpenTimerRef = useRef<number | null>(null);
+  const actionCloseTimerRef = useRef<number | null>(null);
+  const actionPendingResetTimerRef = useRef<number | null>(null);
 
   const isSimulationDone =
     simulationStatus === 'completed' ||
@@ -341,7 +345,11 @@ export function ChatPanel({
   const reasoningUnavailable = !hasReasoningContent && !reasoningActive && isSimulationDone;
   const isReasoningView = viewMode === 'reasoning';
   const canUseActionTrigger = Boolean(primaryControl && !inputValue.trim() && !showRetry);
-  const shouldExpandTrigger = canUseActionTrigger && actionTriggerHovered && !actionMenuOpen;
+  const isActionMenuOpen = actionTriggerState === 'menu_open';
+  const shouldExpandTrigger = canUseActionTrigger && actionTriggerState === 'hover_expanded';
+  const showClosedHint = canUseActionTrigger && actionTriggerState === 'idle_closed';
+  const keepTriggerWide = shouldExpandTrigger
+    || actionTriggerState === 'collapsing_for_open';
   const hasPendingPreflight = Boolean(
     pendingPreflightQuestion
     && pendingPreflightQuestion.questionId
@@ -405,12 +413,18 @@ export function ChatPanel({
   const acceptancePctValue = Number.isFinite(finalAcceptancePct)
     ? Math.max(0, Math.min(100, finalAcceptancePct as number))
     : null;
-  const actionMenuPositionClass = settings.language === 'ar'
-    ? 'left-0 bottom-[calc(100%+10px)]'
-    : 'right-0 bottom-[calc(100%+10px)]';
   const toggleExpandedText = useCallback((key: string) => {
     setExpandedTextMap((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
+  const controlTriggerStackStyle = useMemo<CSSProperties | undefined>(() => {
+    if (!canUseActionTrigger) return undefined;
+    if (!keepTriggerWide) return undefined;
+    return { width: `${actionExpandedWidthPx}px` };
+  }, [actionExpandedWidthPx, canUseActionTrigger, keepTriggerWide]);
+  const controlMenuReservedStyle = useMemo<CSSProperties | undefined>(() => {
+    if (!actionMenuRendered) return undefined;
+    return { width: `${Math.max(220, actionExpandedWidthPx)}px` };
+  }, [actionExpandedWidthPx, actionMenuRendered]);
 
   useEffect(() => {
     const node = inputWrapperRef.current;
@@ -418,7 +432,7 @@ export function ChatPanel({
 
     const update = () => {
       const width = node.getBoundingClientRect().width;
-      setActionExpandedWidthPx(Math.max(44, Math.round(width * 0.25)));
+      setActionExpandedWidthPx(Math.max(44, Math.round(width * 0.75)));
     };
 
     update();
@@ -505,15 +519,24 @@ export function ChatPanel({
 
   useEffect(() => {
     if (!primaryControl) {
-      setActionMenuOpen(false);
+      setActionMenuRendered(false);
+      setActionTriggerState('idle_closed');
     }
   }, [primaryControl?.key, primaryControl]);
 
   useEffect(() => {
     if (inputValue.trim().length > 0) {
-      setActionMenuOpen(false);
+      setActionMenuRendered(false);
+      setActionTriggerState('idle_closed');
     }
   }, [inputValue]);
+
+  useEffect(() => {
+    if (!canUseActionTrigger) {
+      setActionMenuRendered(false);
+      setActionTriggerState('idle_closed');
+    }
+  }, [canUseActionTrigger]);
 
   // Keep scroll locked to bottom when we are near the bottom
   useEffect(() => {
@@ -538,6 +561,14 @@ export function ChatPanel({
       window.clearTimeout(timerId);
     });
     hideTimersRef.current = {};
+    if (actionOpenTimerRef.current) {
+      window.clearTimeout(actionOpenTimerRef.current);
+      actionOpenTimerRef.current = null;
+    }
+    if (actionCloseTimerRef.current) {
+      window.clearTimeout(actionCloseTimerRef.current);
+      actionCloseTimerRef.current = null;
+    }
   }, []);
 
   const scheduleHideOptions = (messageId: string) => {
@@ -572,23 +603,70 @@ export function ChatPanel({
     return <Play className="w-4 h-4" />;
   }, []);
 
+  const beginCloseActionMenu = useCallback(() => {
+    if (actionOpenTimerRef.current) {
+      window.clearTimeout(actionOpenTimerRef.current);
+      actionOpenTimerRef.current = null;
+    }
+    if (!actionMenuRendered) {
+      setActionTriggerState('idle_closed');
+      return;
+    }
+    setActionTriggerState('menu_closing');
+    if (actionCloseTimerRef.current) {
+      window.clearTimeout(actionCloseTimerRef.current);
+    }
+    actionCloseTimerRef.current = window.setTimeout(() => {
+      setActionMenuRendered(false);
+      setActionTriggerState('idle_closed');
+      actionCloseTimerRef.current = null;
+    }, 170);
+  }, [actionMenuRendered]);
+
+  const beginOpenActionMenu = useCallback(() => {
+    if (!canUseActionTrigger) return;
+    if (actionCloseTimerRef.current) {
+      window.clearTimeout(actionCloseTimerRef.current);
+      actionCloseTimerRef.current = null;
+    }
+    setActionTriggerState('collapsing_for_open');
+    if (actionOpenTimerRef.current) {
+      window.clearTimeout(actionOpenTimerRef.current);
+    }
+    actionOpenTimerRef.current = window.setTimeout(() => {
+      setActionMenuRendered(true);
+      setActionTriggerState('menu_open');
+      actionOpenTimerRef.current = null;
+    }, 95);
+  }, [canUseActionTrigger]);
+
+  const handleTriggerMouseEnter = useCallback(() => {
+    if (!canUseActionTrigger) return;
+    if (actionTriggerState === 'menu_open' || actionTriggerState === 'menu_closing' || actionTriggerState === 'collapsing_for_open') return;
+    setActionTriggerState('hover_expanded');
+  }, [actionTriggerState, canUseActionTrigger]);
+
+  const handleTriggerMouseLeave = useCallback(() => {
+    if (!canUseActionTrigger) return;
+    if (actionTriggerState === 'hover_expanded') {
+      setActionTriggerState('idle_closed');
+    }
+  }, [actionTriggerState, canUseActionTrigger]);
+
   const executePrimaryControl = useCallback(() => {
     if (!primaryControl || primaryControl.disabled) return;
     primaryControl.onClick?.();
-    setActionMenuOpen(false);
-  }, [primaryControl]);
+    beginCloseActionMenu();
+  }, [beginCloseActionMenu, primaryControl]);
 
   const executeSecondaryControl = useCallback(() => {
     if (primaryControl?.secondary?.onClick && !primaryControl.secondary.disabled) {
       primaryControl.secondary.onClick();
-    } else {
-      setActionMenuOpen(false);
     }
-    setActionMenuOpen(false);
-  }, [primaryControl]);
+    beginCloseActionMenu();
+  }, [beginCloseActionMenu, primaryControl]);
 
   const handleSendButtonClick = useCallback(() => {
-    setActionTriggerHovered(false);
     if (showRetry) {
       onRetryLlm?.();
       return;
@@ -602,9 +680,24 @@ export function ChatPanel({
       return;
     }
     if (primaryControl) {
-      setActionMenuOpen((prev) => !prev);
+      if (isActionMenuOpen || actionTriggerState === 'menu_closing') {
+        beginCloseActionMenu();
+      } else {
+        beginOpenActionMenu();
+      }
     }
-  }, [inputValue, onRetryLlm, onSendMessage, primaryControl, settings.autoFocusInput, showRetry]);
+  }, [
+    actionTriggerState,
+    beginCloseActionMenu,
+    beginOpenActionMenu,
+    inputValue,
+    isActionMenuOpen,
+    onRetryLlm,
+    onSendMessage,
+    primaryControl,
+    settings.autoFocusInput,
+    showRetry,
+  ]);
 
   const statusLabel = reasoningActive
     ? settings.language === 'ar'
@@ -1657,7 +1750,7 @@ export function ChatPanel({
 
           <form ref={inputWrapperRef} onSubmit={handleSubmit} className="chat-input-wrapper relative">
             {primaryControl && !inputValue.trim() && (
-              <div className="pointer-events-none absolute right-0 -top-8 max-w-[72%] rounded-md border border-border/50 bg-card/80 px-2 py-1 text-[11px] leading-4 text-muted-foreground truncate">
+              <div className="pointer-events-none absolute top-[-30px] max-w-[72%] rounded-md border border-border/50 bg-card/80 px-2 py-1 text-[11px] leading-4 text-muted-foreground truncate [inset-inline-end:0]">
                 {primaryControl.label}
               </div>
             )}
@@ -1688,75 +1781,84 @@ export function ChatPanel({
               data-testid="chat-input"
             />
 
-            <div className="relative shrink-0 flex items-center">
-              {canUseActionTrigger && !actionMenuOpen && (
-                <div className={cn(
-                  'action-trigger-indicator',
-                  settings.language === 'ar' ? 'left-0 origin-bottom-left' : 'right-0 origin-bottom-right'
-                )}>
+            <div className="control-trigger-stack shrink-0" style={controlTriggerStackStyle}>
+              {showClosedHint && (
+                <div className="control-trigger-hint">
                   {settings.language === 'ar' ? 'خيارات التحكم' : 'Control actions'}
                 </div>
               )}
-              {primaryControl && !inputValue.trim() && actionMenuOpen && (
-                <div className={cn('absolute z-30 grid grid-cols-2 gap-2 action-menu-from-trigger', actionMenuPositionClass)}>
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={executePrimaryControl}
-                    disabled={primaryControl.disabled}
-                    className={cn(
-                      'h-11 min-w-[120px] rounded-lg border shadow-md justify-center gap-2',
-                      primaryControl.tone === 'success' && 'bg-success/15 border-success/30 text-success hover:bg-success/20',
-                      primaryControl.tone === 'warning' && 'bg-warning/10 border-warning/30 text-warning hover:bg-warning/15',
-                      primaryControl.tone === 'secondary' && 'bg-secondary/70 border-border text-foreground hover:bg-secondary',
-                      (!primaryControl.tone || primaryControl.tone === 'primary') && 'bg-primary text-primary-foreground hover:bg-primary/90',
-                    )}
-                    title={primaryControl.label}
-                  >
-                    {renderPrimaryControlIcon(primaryControl)}
-                    <span className="text-xs">{settings.language === 'ar' ? 'الأساسي' : 'Primary'}</span>
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={executeSecondaryControl}
-                    disabled={Boolean(primaryControl.secondary?.disabled)}
-                    className="h-11 min-w-[120px] rounded-lg border border-border bg-card/90 text-foreground hover:bg-card shadow-md justify-center gap-2"
-                    title={primaryControl.secondary?.label || (settings.language === 'ar' ? 'إغلاق' : 'Close')}
-                  >
-                    {primaryControl.secondary ? <RefreshCcw className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                    <span className="text-xs">{settings.language === 'ar' ? 'الثانوي' : 'Secondary'}</span>
-                  </Button>
-                </div>
-              )}
+              <div
+                className={cn(
+                  'control-menu-reserved',
+                  actionMenuRendered && 'is-mounted',
+                  actionTriggerState === 'menu_open' && 'is-open',
+                  actionTriggerState === 'menu_closing' && 'is-closing'
+                )}
+              >
+                {primaryControl && !inputValue.trim() && actionMenuRendered && (
+                  <div className="control-menu-shell">
+                    <div className="control-menu-grid">
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={executePrimaryControl}
+                        disabled={primaryControl.disabled}
+                        className={cn(
+                          'control-menu-item control-menu-item-primary',
+                          primaryControl.tone === 'success' && 'bg-success/15 border-success/30 text-success hover:bg-success/20',
+                          primaryControl.tone === 'warning' && 'bg-warning/10 border-warning/30 text-warning hover:bg-warning/15',
+                          primaryControl.tone === 'secondary' && 'bg-secondary/70 border-border text-foreground hover:bg-secondary',
+                          (!primaryControl.tone || primaryControl.tone === 'primary') && 'bg-primary text-primary-foreground hover:bg-primary/90',
+                        )}
+                        title={primaryControl.label}
+                      >
+                        {renderPrimaryControlIcon(primaryControl)}
+                        <span className="control-menu-item-label">{primaryControl.label}</span>
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={executeSecondaryControl}
+                        disabled={Boolean(primaryControl.secondary?.disabled)}
+                        className="control-menu-item control-menu-item-secondary border border-border bg-card/90 text-foreground hover:bg-card"
+                        title={primaryControl.secondary?.label || (settings.language === 'ar' ? 'إغلاق' : 'Close')}
+                      >
+                        {primaryControl.secondary ? <RefreshCcw className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                        <span className="control-menu-item-label">
+                          {primaryControl.secondary?.label || (settings.language === 'ar' ? 'إغلاق' : 'Close')}
+                        </span>
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
 
               <Button
                 type="button"
                 size="icon"
                 disabled={showRetry ? !onRetryLlm : (!inputValue.trim() && !primaryControl)}
                 className={cn(
-                  'send-btn action-trigger-btn',
-                  canUseActionTrigger && 'action-trigger-btn-ready',
-                  shouldExpandTrigger && 'action-trigger-btn-expanded'
+                  'send-btn control-trigger-btn',
+                  canUseActionTrigger && 'is-ready',
+                  shouldExpandTrigger && 'is-expanded',
+                  isActionMenuOpen && 'is-menu-open'
                 )}
                 style={shouldExpandTrigger ? { width: `${actionExpandedWidthPx}px` } : undefined}
                 data-testid={showRetry ? 'chat-retry-llm' : 'chat-send'}
                 onClick={handleSendButtonClick}
-                onMouseEnter={() => setActionTriggerHovered(true)}
-                onMouseLeave={() => setActionTriggerHovered(false)}
+                onMouseEnter={handleTriggerMouseEnter}
+                onMouseLeave={handleTriggerMouseLeave}
               >
-                <span className="action-trigger-icon-wrap">
+                <span className="control-trigger-icon-wrap">
                   {showRetry
                     ? <RefreshCcw className="w-4 h-4" />
                     : inputValue.trim()
                     ? <Send className="w-4 h-4" />
                     : renderPrimaryControlIcon(primaryControl || undefined)}
                 </span>
-                {shouldExpandTrigger && (
-                  <span className="action-trigger-label">
-                    {primaryControl?.label}
-                  </span>
-                )}
+                <span className="control-trigger-label">
+                  {primaryControl?.label || (settings.language === 'ar' ? 'خيارات التحكم' : 'Control actions')}
+                </span>
               </Button>
             </div>
           </form>
@@ -1776,4 +1878,5 @@ export function ChatPanel({
     </div>
   );
 }
+
 
