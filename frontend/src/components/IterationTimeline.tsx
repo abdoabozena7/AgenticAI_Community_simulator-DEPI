@@ -10,61 +10,45 @@ interface IterationTimelineProps {
 }
 
 type CanonicalPhaseKey =
-  | 'intake'
-  | 'research_digest'
-  | 'agent_init'
-  | 'deliberation'
-  | 'convergence'
-  | 'verdict'
-  | 'summary'
-  | 'completed';
+  | 'individual_opinions'
+  | 'discussion'
+  | 'neutrality_reduction'
+  | 'final_convergence';
 
 const PHASE_ORDER: CanonicalPhaseKey[] = [
-  'intake',
-  'research_digest',
-  'agent_init',
-  'deliberation',
-  'convergence',
-  'verdict',
-  'summary',
-  'completed',
+  'individual_opinions',
+  'discussion',
+  'neutrality_reduction',
+  'final_convergence',
 ];
 
 const LEGACY_TO_CANONICAL: Record<string, CanonicalPhaseKey> = {
-  intake: 'intake',
-  search_bootstrap: 'research_digest',
-  evidence_map: 'research_digest',
-  research_digest: 'research_digest',
-  agent_init: 'agent_init',
-  debate: 'deliberation',
-  deliberation: 'deliberation',
-  convergence: 'convergence',
-  resolution: 'verdict',
-  verdict: 'verdict',
-  summary: 'summary',
-  completed: 'completed',
+  intake: 'individual_opinions',
+  search_bootstrap: 'individual_opinions',
+  evidence_map: 'individual_opinions',
+  research_digest: 'individual_opinions',
+  agent_init: 'individual_opinions',
+  debate: 'discussion',
+  deliberation: 'discussion',
+  convergence: 'neutrality_reduction',
+  resolution: 'final_convergence',
+  verdict: 'final_convergence',
+  summary: 'final_convergence',
+  completed: 'final_convergence',
 };
 
 const phaseLabel = (key: CanonicalPhaseKey, language: 'ar' | 'en') => {
   const labelsAr: Record<CanonicalPhaseKey, string> = {
-    intake: 'تهيئة',
-    research_digest: 'بحث/أدلة',
-    agent_init: 'تجهيز الوكلاء',
-    deliberation: 'نقاش',
-    convergence: 'تقليل الحياد',
-    verdict: 'حسم',
-    summary: 'ملخص',
-    completed: 'اكتمل',
+    individual_opinions: 'الآراء الفردية',
+    discussion: 'النقاش',
+    neutrality_reduction: 'تقليل الحياد',
+    final_convergence: 'التقارب النهائي',
   };
   const labelsEn: Record<CanonicalPhaseKey, string> = {
-    intake: 'Intake',
-    research_digest: 'Research',
-    agent_init: 'Agent Init',
-    deliberation: 'Deliberation',
-    convergence: 'Convergence',
-    verdict: 'Verdict',
-    summary: 'Summary',
-    completed: 'Done',
+    individual_opinions: 'Individual Opinions',
+    discussion: 'Discussion',
+    neutrality_reduction: 'Neutrality Reduction',
+    final_convergence: 'Final Convergence',
   };
   return language === 'ar' ? labelsAr[key] : labelsEn[key];
 };
@@ -93,9 +77,7 @@ export function IterationTimeline({
   const phaseRatio = safePct(phaseProgressPct) / 100;
 
   const phaseDrivenProgress = phaseIndex >= 0
-    ? normalizedPhase === 'completed'
-      ? 100
-      : ((phaseIndex + phaseRatio) / (PHASE_ORDER.length - 1)) * 100
+    ? ((phaseIndex + phaseRatio) / (PHASE_ORDER.length - 1)) * 100
     : 0;
 
   const iterationDrivenProgress = totalIterations > 0
@@ -154,8 +136,8 @@ export function IterationTimeline({
           </div>
           <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5">
             {PHASE_ORDER.map((phase, index) => {
-              const passed = phaseIndex > index || normalizedPhase === 'completed';
-              const active = phaseIndex === index && normalizedPhase !== 'completed';
+              const passed = phaseIndex > index;
+              const active = phaseIndex === index;
               return (
                 <div
                   key={phase}

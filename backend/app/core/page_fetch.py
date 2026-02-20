@@ -115,5 +115,12 @@ def _fetch_page_sync(url: str, timeout: int = 12) -> Dict[str, Any]:
 async def fetch_page(url: str, timeout: int = 12) -> Dict[str, Any]:
     import asyncio
 
-    return await asyncio.to_thread(_fetch_page_sync, url, timeout)
-
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_fetch_page_sync, url, timeout),
+            timeout=max(4, int(timeout) + 2),
+        )
+    except asyncio.TimeoutError:
+        return {"ok": False, "error": "Fetch timed out"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}

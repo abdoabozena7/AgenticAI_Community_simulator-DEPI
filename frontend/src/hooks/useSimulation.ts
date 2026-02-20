@@ -1,6 +1,6 @@
 ﻿import { useState, useCallback, useEffect, useReducer, useRef } from 'react';
 import { websocketService, WebSocketEvent, MetricsEvent, ReasoningStepEvent, ReasoningDebugEvent, AgentsEvent } from '@/services/websocket';
-import { apiService, SimulationConfig, SimulationStateResponse } from '@/services/api';
+import { apiService, clearAuthTokens, SimulationConfig, SimulationStateResponse } from '@/services/api';
 import { Agent, ReasoningMessage, ReasoningDebug, SimulationMetrics, SimulationStatus, SimulationChatEvent, PendingClarification, PendingResearchReview } from '@/types/simulation';
 
 interface SimulationState {
@@ -46,6 +46,9 @@ interface SimulationState {
   pendingClarification: PendingClarification | null;
   canAnswerClarification: boolean;
   pendingResearchReview: PendingResearchReview | null;
+  researchGate: 'none' | 'prestart_review' | 'runtime_review';
+  researchGateCycleId: string | null;
+  researchGateVersion: number | null;
   activePulses: { from: string; to: string; active: boolean; pulseProgress: number }[];
 }
 
@@ -69,6 +72,7 @@ type SimulationAction =
   | { type: 'SET_RESUME_META'; payload: { canResume: boolean; resumeReason: string | null } }
   | { type: 'SET_CLARIFICATION'; payload: { pendingClarification: PendingClarification | null; canAnswerClarification: boolean } }
   | { type: 'SET_RESEARCH_REVIEW'; payload: PendingResearchReview | null }
+  | { type: 'SET_RESEARCH_GATE'; payload: { gate: SimulationState['researchGate']; cycleId: string | null; version: number | null } }
   | { type: 'SET_PULSES'; payload: { from: string; to: string; active: boolean; pulseProgress: number }[] }
   | { type: 'ADD_PULSES'; payload: { from: string; to: string; active: boolean; pulseProgress: number }[] }
   | { type: 'RESET' };
@@ -107,6 +111,9 @@ const initialState: SimulationState = {
   pendingClarification: null,
   canAnswerClarification: false,
   pendingResearchReview: null,
+  researchGate: 'none',
+  researchGateCycleId: null,
+  researchGateVersion: null,
   activePulses: [],
 };
 
@@ -443,6 +450,15 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
       };
     }
 
+    case 'SET_RESEARCH_GATE': {
+      return {
+        ...state,
+        researchGate: action.payload.gate,
+        researchGateCycleId: action.payload.cycleId,
+        researchGateVersion: action.payload.version,
+      };
+    }
+
     case 'SET_PULSES': {
       return {
         ...state,
@@ -473,7 +489,7 @@ export function useSimulation(options?: UseSimulationOptions) {
   const suppressAutoRestore = Boolean(options?.suppressAutoRestore);
   const [state, dispatch] = useReducer(simulationReducer, initialState);
   const [error, setError] = useState<string | null>(null);
-  const [pollTask, setPollTask] = useState<number | null>(null);
+  const pollTaskRef = useRef<number | null>(null);
   const stateRef = useRef(state);
   const requestEpochRef = useRef(0);
   const pollInFlightRef = useRef(false);
@@ -581,11 +597,33 @@ export function useSimulation(options?: UseSimulationOptions) {
   }, [applyIterationOffset]);
 
   const clearPolling = useCallback(() => {
-    if (pollTask) {
-      window.clearInterval(pollTask);
-      setPollTask(null);
+    if (pollTaskRef.current !== null) {
+      window.clearInterval(pollTaskRef.current);
+      pollTaskRef.current = null;
     }
-  }, [pollTask]);
+  }, []);
+
+  const handleUnauthorizedState = useCallback(() => {
+    requestEpochRef.current += 1;
+    clearPolling();
+    websocketService.setSimulationSubscription(null);
+    websocketService.disconnect();
+    clearAuthTokens();
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem(ACTIVE_SIMULATION_KEY);
+    }
+    dispatch({ type: 'RESET' });
+    setError('Session expired. Please log in again.');
+    dispatch({ type: 'SET_STATUS', payload: 'error' });
+    dispatch({ type: 'SET_STATUS_REASON', payload: 'error' });
+    dispatch({
+      type: 'SET_RESUME_META',
+      payload: {
+        canResume: false,
+        resumeReason: 'Session expired. Please log in again.',
+      },
+    });
+  }, [clearPolling]);
 
   const ensureSocketConnection = useCallback(async () => {
     const apiBase = (import.meta.env.VITE_API_URL || '') as string;
@@ -593,13 +631,38 @@ export function useSimulation(options?: UseSimulationOptions) {
       || apiBase
       || 'http://localhost:8000';
     const token = await apiService.ensureAccessTokenFresh(45);
+    if (!token) {
+      handleUnauthorizedState();
+      throw new Error('Unauthorized');
+    }
     const wsUrl = wsBase
       .replace(/^http/, 'ws')
       .replace(/\/$/, '') + `/ws/simulation${token ? `?token=${encodeURIComponent(token)}` : ''}`;
     if (!websocketService.isConnected()) {
-      await websocketService.connect(wsUrl);
+      try {
+        await websocketService.connect(wsUrl);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err || '');
+        if (/401|unauthorized|1008/i.test(message)) {
+          handleUnauthorizedState();
+        }
+        throw err;
+      }
     }
-  }, []);
+  }, [handleUnauthorizedState]);
+
+  const fetchSimulationStateSafe = useCallback(async (simulationId: string) => {
+    try {
+      return await apiService.getSimulationState(simulationId);
+    } catch (err) {
+      const status = (err as Error & { status?: number }).status;
+      if (status === 401) {
+        handleUnauthorizedState();
+        return null;
+      }
+      throw err;
+    }
+  }, [handleUnauthorizedState]);
 
   const applyStateResponse = useCallback((stateResponse: SimulationStateResponse, options?: { appendReasoning?: boolean }) => {
     if (typeof stateResponse.event_seq === 'number' && stateResponse.event_seq < stateRef.current.lastEventSeq) {
@@ -810,6 +873,27 @@ export function useSimulation(options?: UseSimulationOptions) {
       type: 'SET_RESEARCH_REVIEW',
       payload: mappedPendingResearch && mappedPendingResearch.cycleId ? mappedPendingResearch : null,
     });
+    const rawGate = String(stateResponse.research_gate || '').trim().toLowerCase();
+    const normalizedGate: SimulationState['researchGate'] =
+      rawGate === 'runtime_review'
+        ? 'runtime_review'
+        : rawGate === 'prestart_review'
+          ? 'prestart_review'
+          : (mappedPendingResearch ? 'runtime_review' : 'none');
+    const gateCycleId = typeof stateResponse.research_gate_cycle_id === 'string' && stateResponse.research_gate_cycle_id.trim()
+      ? stateResponse.research_gate_cycle_id.trim()
+      : (mappedPendingResearch?.cycleId || null);
+    const gateVersion = typeof stateResponse.research_gate_version === 'number'
+      ? stateResponse.research_gate_version
+      : null;
+    dispatch({
+      type: 'SET_RESEARCH_GATE',
+      payload: {
+        gate: normalizedGate,
+        cycleId: gateCycleId,
+        version: gateVersion,
+      },
+    });
     dispatch({
       type: 'SET_STATUS_REASON',
       payload: stateResponse.status_reason
@@ -859,7 +943,17 @@ export function useSimulation(options?: UseSimulationOptions) {
       const now = Date.now();
       if (now < pollCooldownUntilRef.current) return;
       pollInFlightRef.current = true;
-      const stateResponse = await apiService.getSimulationState(simulationId).catch(() => null);
+      let stateResponse: SimulationStateResponse | null = null;
+      try {
+        stateResponse = await apiService.getSimulationState(simulationId);
+      } catch (err) {
+        const status = (err as Error & { status?: number }).status;
+        if (status === 401) {
+          handleUnauthorizedState();
+          return;
+        }
+        stateResponse = null;
+      }
       try {
         if (requestEpochRef.current !== requestEpoch) return;
         if (stateResponse?.simulation_id && stateResponse.simulation_id !== simulationId) return;
@@ -891,8 +985,8 @@ export function useSimulation(options?: UseSimulationOptions) {
         pollInFlightRef.current = false;
       }
     }, pollIntervalMs);
-    setPollTask(intervalId);
-  }, [applyStateResponse, clearPolling, mapBackendStatus]);
+    pollTaskRef.current = intervalId;
+  }, [applyStateResponse, clearPolling, handleUnauthorizedState, mapBackendStatus]);
 
   const handleWebSocketEvent = useCallback((event: WebSocketEvent) => {
     const activeSimulationId = stateRef.current.simulationId;
@@ -908,7 +1002,7 @@ export function useSimulation(options?: UseSimulationOptions) {
       dispatch({ type: 'SET_LAST_EVENT_SEQ', payload: eventSeq });
     }
     switch (event.type) {
-      case 'metrics':
+      case 'metrics': {
         if (shouldSkipInitial(event.iteration)) return;
         const adjustedMetricsEvent = applyMetricsOffset(event);
         if ((adjustedMetricsEvent.iteration ?? 0) < (stateRef.current.metrics.currentIteration ?? 0)) return;
@@ -918,6 +1012,7 @@ export function useSimulation(options?: UseSimulationOptions) {
         dispatch({ type: 'SET_RESUME_META', payload: { canResume: false, resumeReason: null } });
         dispatch({ type: 'SET_STATUS_REASON', payload: 'running' });
         break;
+      }
       case 'reasoning_step':
         dispatch({
           type: 'ADD_REASONING',
@@ -1023,6 +1118,14 @@ export function useSimulation(options?: UseSimulationOptions) {
             required: true,
           };
           dispatch({ type: 'SET_RESEARCH_REVIEW', payload: pendingReview.cycleId ? pendingReview : null });
+          dispatch({
+            type: 'SET_RESEARCH_GATE',
+            payload: {
+              gate: pendingReview.cycleId ? 'runtime_review' : 'none',
+              cycleId: pendingReview.cycleId || null,
+              version: null,
+            },
+          });
           dispatch({ type: 'SET_STATUS', payload: 'paused' });
           dispatch({ type: 'SET_STATUS_REASON', payload: 'paused_research_review' });
           dispatch({ type: 'SET_RESUME_META', payload: { canResume: false, resumeReason: event.error ?? event.snippet ?? null } });
@@ -1038,6 +1141,7 @@ export function useSimulation(options?: UseSimulationOptions) {
           'research_done',
         ].includes(event.action)) {
           dispatch({ type: 'SET_RESEARCH_REVIEW', payload: null });
+          dispatch({ type: 'SET_RESEARCH_GATE', payload: { gate: 'none', cycleId: null, version: null } });
           dispatch({ type: 'SET_STATUS', payload: 'running' });
           dispatch({ type: 'SET_STATUS_REASON', payload: 'running' });
         }
@@ -1146,14 +1250,15 @@ export function useSimulation(options?: UseSimulationOptions) {
     await ensureSocketConnection();
     if (requestEpochRef.current !== opEpoch) return;
     websocketService.setSimulationSubscription(simulationId);
-    const stateResponse = await apiService.getSimulationState(simulationId);
+    const stateResponse = await fetchSimulationStateSafe(simulationId);
+    if (!stateResponse) return;
     if (requestEpochRef.current !== opEpoch) return;
     if (stateResponse.simulation_id && stateResponse.simulation_id !== simulationId) return;
     applyStateResponse(stateResponse);
     const mapped = mapBackendStatus(stateResponse.status);
     if (mapped === 'running') beginPolling(simulationId, opEpoch);
     else clearPolling();
-  }, [applyStateResponse, beginPolling, clearPolling, ensureSocketConnection, mapBackendStatus]);
+  }, [applyStateResponse, beginPolling, clearPolling, ensureSocketConnection, fetchSimulationStateSafe, mapBackendStatus]);
 
   const startSimulation = useCallback(async (config: SimulationConfig, options?: { carryOver?: boolean; throwOnError?: boolean }) => {
     try {
@@ -1212,7 +1317,7 @@ export function useSimulation(options?: UseSimulationOptions) {
         });
       }
 
-      const prime = await apiService.getSimulationState(response.simulation_id).catch(() => null);
+      const prime = await fetchSimulationStateSafe(response.simulation_id).catch(() => null);
       if (prime && requestEpochRef.current === opEpoch && (!prime.simulation_id || prime.simulation_id === response.simulation_id)) {
         applyStateResponse(prime, { appendReasoning: carryOverRef.current.active });
       }
@@ -1231,7 +1336,7 @@ export function useSimulation(options?: UseSimulationOptions) {
         throw err;
       }
     }
-  }, [applyStateResponse, beginPolling, clearPolling, ensureSocketConnection]);
+  }, [applyStateResponse, beginPolling, clearPolling, ensureSocketConnection, fetchSimulationStateSafe]);
 
   const resumeSimulation = useCallback(async (simulationId: string) => {
     if (!simulationId) return null;
@@ -1247,7 +1352,7 @@ export function useSimulation(options?: UseSimulationOptions) {
     websocketService.setSimulationSubscription(simulationId);
     const response = await apiService.resumeSimulation(simulationId);
     if (requestEpochRef.current !== opEpoch) return response;
-    const snapshot = await apiService.getSimulationState(simulationId).catch(() => null);
+    const snapshot = await fetchSimulationStateSafe(simulationId).catch(() => null);
     if (snapshot && (!snapshot.simulation_id || snapshot.simulation_id === simulationId)) {
       applyStateResponse(snapshot);
     } else {
@@ -1260,12 +1365,12 @@ export function useSimulation(options?: UseSimulationOptions) {
       clearPolling();
     }
     return response;
-  }, [applyStateResponse, beginPolling, clearPolling, ensureSocketConnection, mapBackendStatus]);
+  }, [applyStateResponse, beginPolling, clearPolling, ensureSocketConnection, fetchSimulationStateSafe, mapBackendStatus]);
 
   const pauseSimulation = useCallback(async (simulationId: string, reason?: string) => {
     if (!simulationId) return null;
     const response = await apiService.pauseSimulation(simulationId, reason);
-    const snapshot = await apiService.getSimulationState(simulationId).catch(() => null);
+    const snapshot = await fetchSimulationStateSafe(simulationId).catch(() => null);
     if (snapshot && (!snapshot.simulation_id || snapshot.simulation_id === simulationId)) {
       applyStateResponse(snapshot);
     } else {
@@ -1274,7 +1379,7 @@ export function useSimulation(options?: UseSimulationOptions) {
     }
     clearPolling();
     return response;
-  }, [applyStateResponse, clearPolling, mapBackendStatus]);
+  }, [applyStateResponse, clearPolling, fetchSimulationStateSafe, mapBackendStatus]);
 
   const submitResearchAction = useCallback(async (payload: {
     simulationId: string;
@@ -1283,6 +1388,7 @@ export function useSimulation(options?: UseSimulationOptions) {
     selectedUrlIds?: string[];
     addedUrls?: string[];
     queryRefinement?: string;
+    researchGateVersion?: number;
   }) => {
     const simulationId = payload.simulationId?.trim();
     if (!simulationId) return null;
@@ -1300,9 +1406,10 @@ export function useSimulation(options?: UseSimulationOptions) {
       selected_url_ids: payload.selectedUrlIds,
       added_urls: payload.addedUrls,
       query_refinement: payload.queryRefinement,
+      research_gate_version: payload.researchGateVersion,
     });
     if (requestEpochRef.current !== opEpoch) return response;
-    const snapshot = await apiService.getSimulationState(simulationId).catch(() => null);
+    const snapshot = await fetchSimulationStateSafe(simulationId).catch(() => null);
     if (snapshot && (!snapshot.simulation_id || snapshot.simulation_id === simulationId)) {
       applyStateResponse(snapshot);
       if (snapshot.status === 'running') beginPolling(simulationId, opEpoch);
@@ -1314,7 +1421,7 @@ export function useSimulation(options?: UseSimulationOptions) {
       else clearPolling();
     }
     return response;
-  }, [applyStateResponse, beginPolling, clearPolling, ensureSocketConnection, mapBackendStatus]);
+  }, [applyStateResponse, beginPolling, clearPolling, ensureSocketConnection, fetchSimulationStateSafe, mapBackendStatus]);
 
   const submitClarificationAnswer = useCallback(async (payload: {
     simulationId: string;
@@ -1347,13 +1454,13 @@ export function useSimulation(options?: UseSimulationOptions) {
     await ensureSocketConnection();
     if (requestEpochRef.current !== opEpoch) return response;
     websocketService.setSimulationSubscription(simulationId);
-    const snapshot = await apiService.getSimulationState(simulationId).catch(() => null);
+    const snapshot = await fetchSimulationStateSafe(simulationId).catch(() => null);
     if (snapshot && (!snapshot.simulation_id || snapshot.simulation_id === simulationId)) {
       applyStateResponse(snapshot);
     }
     beginPolling(simulationId, opEpoch);
     return response;
-  }, [applyStateResponse, beginPolling, ensureSocketConnection]);
+  }, [applyStateResponse, beginPolling, ensureSocketConnection, fetchSimulationStateSafe]);
 
   const stopSimulation = useCallback(() => {
     requestEpochRef.current += 1;

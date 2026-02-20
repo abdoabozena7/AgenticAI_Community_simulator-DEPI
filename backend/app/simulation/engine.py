@@ -2165,24 +2165,18 @@ class SimulationEngine:
             if demand in {"high", "strong"} and agent.current_opinion == "reject":
                 agent.confidence = max(0.2, agent.confidence - (0.04 * positive_scale))
 
-        # Dialogue orchestration (formal state machine)
+        # Dialogue orchestration (formal state machine / fixed 4 user-facing stages)
         phase_order = [
-            "Intake",
-            "Research Digest",
-            "Agent Init",
-            "Deliberation",
-            "Convergence",
-            "Verdict",
-            "Summary",
+            "Individual Opinions",
+            "Discussion",
+            "Neutrality Reduction",
+            "Final Convergence",
         ]
         phase_key_map = {
-            "Intake": "intake",
-            "Research Digest": "research_digest",
-            "Agent Init": "agent_init",
-            "Deliberation": "deliberation",
-            "Convergence": "convergence",
-            "Verdict": "verdict",
-            "Summary": "summary",
+            "Individual Opinions": "intake",
+            "Discussion": "deliberation",
+            "Neutrality Reduction": "convergence",
+            "Final Convergence": "verdict",
         }
 
         def _build_evidence_cards() -> List[str]:
@@ -3316,7 +3310,7 @@ class SimulationEngine:
                 and bool(resume_tasks_payload)
             )
 
-            reasoning_phase = phase_key in {"deliberation", "convergence"}
+            reasoning_phase = phase_key in {"intake", "deliberation", "convergence", "verdict"}
 
             if not reasoning_phase:
                 # Non-dialogue phases: emit entry + completion checkpoints and move on.
@@ -3400,7 +3394,7 @@ class SimulationEngine:
                 else:
                     base_speakers = int(math.ceil(0.12 * max(1, num_agents)))
                     dynamic_speakers = min(80, max(24, base_speakers))
-                    if phase_label in {"Deliberation", "Convergence"}:
+                    if phase_label in {"Discussion", "Neutrality Reduction", "Final Convergence"}:
                         dynamic_speakers = min(num_agents, max(dynamic_speakers, 36))
                     speakers = _select_speakers(min(num_agents, dynamic_speakers))
                 speaker_ids = {agent.agent_id for agent in speakers}

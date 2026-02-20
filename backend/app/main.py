@@ -67,6 +67,7 @@ def create_app() -> FastAPI:
 
     # Register API routers
     app.include_router(simulation_routes.router)
+    app.include_router(simulation_routes.society_router)
     app.include_router(websocket_module.router)
     app.include_router(llm_routes.router)
     app.include_router(search_routes.router)

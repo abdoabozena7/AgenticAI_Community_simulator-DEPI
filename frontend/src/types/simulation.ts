@@ -118,6 +118,62 @@ export interface PreflightQuestionOption {
   label: string;
 }
 
+export interface UnderstandingQuestion {
+  id: string;
+  axis: string;
+  question: string;
+  options: PreflightQuestionOption[];
+  required: boolean;
+  reasonSummary?: string;
+  generationMode?: 'llm' | 'fallback';
+  questionQuality?: {
+    score?: number;
+    checksPassed?: string[];
+  } | null;
+}
+
+export interface UnderstandingBatchAnswer {
+  questionId: string;
+  axis: string;
+  selectedOptionId?: string;
+  customText?: string;
+}
+
+export interface PreferredIdeaConfirmationState {
+  description: string;
+  summary?: string;
+  clarityScore?: number;
+}
+
+export interface SocietyCatalogItem {
+  categoryId: string;
+  description: string;
+  templateCount: number;
+  sampleArchetypes: string[];
+}
+
+export interface SocietyCustomSpec {
+  profileName?: string;
+  profileId?: string;
+  agentCount: number;
+  distribution: {
+    skepticRatio: number;
+    optimistRatio: number;
+    pragmaticRatio: number;
+    policyGuardRatio: number;
+  };
+  controls: {
+    diversity: number;
+    innovationBias: number;
+    riskSensitivity: number;
+    strictPolicy: boolean;
+    humanDebateStyle: boolean;
+    personaHint?: string;
+  };
+}
+
+export type StartPathChoice = 'inspect_default' | 'build_custom' | 'start_default';
+
 export interface PreflightQuestion {
   questionId: string;
   axis: string;
@@ -140,6 +196,12 @@ export interface PreflightState {
   normalizedContext: Record<string, unknown>;
   history: Array<Record<string, unknown>>;
   question: PreflightQuestion | null;
+}
+
+export interface PendingIdeaConfirmation {
+  description: string;
+  summary?: string;
+  clarityScore?: number;
 }
 
 export interface PendingResearchReviewCandidateUrl {
@@ -181,3 +243,5 @@ export interface UserInput {
 }
 
 export type SimulationStatus = 'idle' | 'configuring' | 'running' | 'paused' | 'completed' | 'error';
+
+export type ResearchGateMode = 'none' | 'prestart_review' | 'runtime_review';

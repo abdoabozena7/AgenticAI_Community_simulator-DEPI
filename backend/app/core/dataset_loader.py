@@ -62,7 +62,10 @@ def _load_json_file(path: str) -> List[Dict]:
         FileNotFoundError: If the file does not exist.
         json.JSONDecodeError: If the file is not valid JSON.
     """
-    with open(path, "r", encoding="utf-8") as f:
+    # Accept UTF-8 files with or without BOM.
+    # Some Windows editors/tooling may write a BOM, which breaks json.load
+    # when decoding with plain "utf-8".
+    with open(path, "r", encoding="utf-8-sig") as f:
         return json.load(f)
 
 

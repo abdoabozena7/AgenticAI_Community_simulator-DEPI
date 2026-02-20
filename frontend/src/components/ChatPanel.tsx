@@ -4,6 +4,8 @@ import {
   Bot,
   Sparkles,
   ChevronDown,
+  Check,
+  X,
   Play,
   Pause,
   RefreshCcw,
@@ -12,7 +14,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { ChatMessage, PendingClarification, PendingResearchReview, PreflightQuestion, ReasoningMessage, SimulationStatus } from '@/types/simulation';
+import { ChatMessage, PendingClarification, PendingIdeaConfirmation, PendingResearchReview, PreflightQuestion, ReasoningMessage, SimulationStatus } from '@/types/simulation';
 import { cn } from '@/lib/utils';
 
 /* ------------------------------------------------------------------
@@ -118,6 +120,8 @@ interface ChatPanelProps {
     selectedOptionId?: string;
     customText?: string;
   }) => void;
+  pendingIdeaConfirmation?: PendingIdeaConfirmation | null;
+  onConfirmIdeaForStart?: () => void;
   pendingResearchReview?: PendingResearchReview | null;
   researchReviewBusy?: boolean;
   onSubmitResearchReviewAction?: (payload: {
@@ -299,6 +303,8 @@ export function ChatPanel({
   preflightMaxRounds = 3,
   preflightBusy = false,
   onSubmitPreflight,
+  pendingIdeaConfirmation = null,
+  onConfirmIdeaForStart,
   pendingResearchReview = null,
   researchReviewBusy = false,
   onSubmitResearchReviewAction,
@@ -327,6 +333,9 @@ export function ChatPanel({
   const [selectedResearchUrlIds, setSelectedResearchUrlIds] = useState<string[]>([]);
   const [addedResearchUrlsInput, setAddedResearchUrlsInput] = useState('');
   const [researchRefinementInput, setResearchRefinementInput] = useState('');
+  const [researchActionMode, setResearchActionMode] = useState<'scrape_selected' | 'continue_search' | 'cancel_review'>('scrape_selected');
+  const [showAdvancedResearchActions, setShowAdvancedResearchActions] = useState(false);
+  const [researchActionStatusLine, setResearchActionStatusLine] = useState('');
   const [previewUrl, setPreviewUrl] = useState<string>('');
   const [expandedTextMap, setExpandedTextMap] = useState<Record<string, boolean>>({});
   const [brokenFaviconMap, setBrokenFaviconMap] = useState<Record<string, boolean>>({});
@@ -344,7 +353,26 @@ export function ChatPanel({
   const hasReasoningContent = reasoningFeed.length > 0;
   const reasoningUnavailable = !hasReasoningContent && !reasoningActive && isSimulationDone;
   const isReasoningView = viewMode === 'reasoning';
-  const canUseActionTrigger = Boolean(primaryControl && !inputValue.trim() && !showRetry);
+  const actionChoiceCount = primaryControl ? (1 + (primaryControl.secondary ? 1 : 0)) : 0;
+  const showBinaryDecisionBar = Boolean(
+    primaryControl
+    && primaryControl.secondary
+    && actionChoiceCount === 2
+    && !inputValue.trim()
+    && !showRetry
+  );
+  const canUseActionTrigger = Boolean(
+    primaryControl
+    && actionChoiceCount >= 3
+    && !inputValue.trim()
+    && !showRetry
+  );
+  const showSingleActionControl = Boolean(
+    primaryControl
+    && actionChoiceCount === 1
+    && !inputValue.trim()
+    && !showRetry
+  );
   const isActionMenuOpen = actionTriggerState === 'menu_open';
   const shouldExpandTrigger = canUseActionTrigger && actionTriggerState === 'hover_expanded';
   const showClosedHint = canUseActionTrigger && actionTriggerState === 'idle_closed';
@@ -354,6 +382,10 @@ export function ChatPanel({
     pendingPreflightQuestion
     && pendingPreflightQuestion.questionId
     && pendingPreflightQuestion.required
+  );
+  const hasPendingIdeaConfirmation = Boolean(
+    pendingIdeaConfirmation
+    && String(pendingIdeaConfirmation.description || '').trim()
   );
   const hasPendingClarification = Boolean(
     canAnswerClarification
@@ -372,36 +404,75 @@ export function ChatPanel({
       .reverse(),
     [researchSourcesLive]
   );
+  const RESEARCH_AUTO_TIMEOUT_MS = 180000;
+  const [researchClockMs, setResearchClockMs] = useState(() => Date.now());
+  const activeResearchStartedAt = useMemo(() => {
+    const ordered = [...researchSourcesLive].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    let startedAt: number | null = null;
+    for (const item of ordered) {
+      const action = String(item.action || '').trim();
+      if (action === 'research_started') {
+        startedAt = typeof item.timestamp === 'number' ? item.timestamp : Date.now();
+      } else if (action === 'research_done' || action === 'research_failed') {
+        startedAt = null;
+      }
+    }
+    return startedAt;
+  }, [researchSourcesLive]);
+  const researchTimeoutRemainingMs = useMemo(() => {
+    if (!activeResearchStartedAt) return null;
+    return Math.max(0, RESEARCH_AUTO_TIMEOUT_MS - (researchClockMs - activeResearchStartedAt));
+  }, [activeResearchStartedAt, researchClockMs]);
+  const researchTimeoutProgressPct = useMemo(() => {
+    if (!activeResearchStartedAt) return 0;
+    const elapsed = Math.max(0, researchClockMs - activeResearchStartedAt);
+    return Math.max(0, Math.min(100, (elapsed / RESEARCH_AUTO_TIMEOUT_MS) * 100));
+  }, [activeResearchStartedAt, researchClockMs]);
+  const researchTimeoutLabel = useMemo(() => {
+    if (researchTimeoutRemainingMs === null) return '';
+    const totalSec = Math.max(0, Math.ceil(researchTimeoutRemainingMs / 1000));
+    const minutes = Math.floor(totalSec / 60);
+    const seconds = totalSec % 60;
+    const mmss = `${minutes}:${String(seconds).padStart(2, '0')}`;
+    if (researchTimeoutRemainingMs <= 0) {
+      return settings.language === 'ar'
+        ? 'تم تجاوز مهلة البحث. سيتم بدء المحاكاة تلقائيًا الآن...'
+        : 'Research timeout reached. Starting simulation automatically now...';
+    }
+    return settings.language === 'ar'
+      ? `جاري البحث... بدء المحاكاة تلقائيًا بعد ${mmss} إذا استمر التأخير.`
+      : `Research in progress... auto-starting simulation in ${mmss} if delays continue.`;
+  }, [researchTimeoutRemainingMs, settings.language]);
   const phaseLabel = useMemo(() => {
     const key = phaseState?.currentPhaseKey?.trim();
     if (!key) return null;
     const labelsAr: Record<string, string> = {
-      intake: 'التهيئة',
-      research_digest: 'تلخيص الأدلة',
-      agent_init: 'تهيئة الوكلاء',
+      intake: 'الآراء الفردية',
+      search_bootstrap: 'الآراء الفردية',
+      evidence_map: 'الآراء الفردية',
+      research_digest: 'الآراء الفردية',
+      agent_init: 'الآراء الفردية',
+      debate: 'النقاش',
       deliberation: 'النقاش',
       convergence: 'تقليل الحياد',
-      verdict: 'الحسم',
-      summary: 'الملخص',
-      search_bootstrap: 'البحث الأولي',
-      evidence_map: 'جمع الأدلة',
-      debate: 'النقاش',
-      resolution: 'الحسم',
-      completed: 'مكتمل',
+      resolution: 'التقارب النهائي',
+      verdict: 'التقارب النهائي',
+      summary: 'التقارب النهائي',
+      completed: 'التقارب النهائي',
     };
     const labelsEn: Record<string, string> = {
-      intake: 'Intake',
-      research_digest: 'Research Digest',
-      agent_init: 'Agent Init',
-      deliberation: 'Deliberation',
-      convergence: 'Convergence',
-      verdict: 'Verdict',
-      summary: 'Summary',
-      search_bootstrap: 'Search Bootstrap',
-      evidence_map: 'Evidence Mapping',
-      debate: 'Debate',
-      resolution: 'Resolution',
-      completed: 'Completed',
+      intake: 'Individual Opinions',
+      search_bootstrap: 'Individual Opinions',
+      evidence_map: 'Individual Opinions',
+      research_digest: 'Individual Opinions',
+      agent_init: 'Individual Opinions',
+      debate: 'Discussion',
+      deliberation: 'Discussion',
+      convergence: 'Neutrality Reduction',
+      resolution: 'Final Convergence',
+      verdict: 'Final Convergence',
+      summary: 'Final Convergence',
+      completed: 'Final Convergence',
     };
     return settings.language === 'ar'
       ? (labelsAr[key] || key)
@@ -425,6 +496,15 @@ export function ChatPanel({
     if (!actionMenuRendered) return undefined;
     return { width: `${Math.max(220, actionExpandedWidthPx)}px` };
   }, [actionExpandedWidthPx, actionMenuRendered]);
+  const singleActionWidthPx = useMemo(
+    () => Math.max(150, Math.min(260, Math.round(actionExpandedWidthPx * 0.45))),
+    [actionExpandedWidthPx]
+  );
+  const controlTriggerButtonStyle = useMemo<CSSProperties | undefined>(() => {
+    if (shouldExpandTrigger) return { width: `${actionExpandedWidthPx}px` };
+    if (showSingleActionControl) return { width: `${singleActionWidthPx}px` };
+    return undefined;
+  }, [actionExpandedWidthPx, shouldExpandTrigger, showSingleActionControl, singleActionWidthPx]);
 
   useEffect(() => {
     const node = inputWrapperRef.current;
@@ -472,6 +552,17 @@ export function ChatPanel({
 
     return `Search quality is below the required threshold. Usable sources: ${usableCurrent}/${usableRequired}, domains: ${domainsCurrent}/${domainsRequired}, max extracted content: ${charsCurrent}/${charsRequired} chars, extraction success: ${(extractionRate * 100).toFixed(0)}%.`;
   }, [settings.language]);
+
+  const decodeResearchSnippet = useCallback((value?: string | null): string => {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    if (!/%[0-9A-Fa-f]{2}/.test(raw)) return raw;
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  }, []);
 
   const toSafeHttpUrl = useCallback((value?: string | null): string | null => {
     const raw = String(value || '').trim();
@@ -538,6 +629,15 @@ export function ChatPanel({
     }
   }, [canUseActionTrigger]);
 
+  useEffect(() => {
+    if (!activeResearchStartedAt) return;
+    setResearchClockMs(Date.now());
+    const timerId = window.setInterval(() => {
+      setResearchClockMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timerId);
+  }, [activeResearchStartedAt]);
+
   // Keep scroll locked to bottom when we are near the bottom
   useEffect(() => {
     if (scrollRef.current && isNearBottom) {
@@ -569,7 +669,23 @@ export function ChatPanel({
       window.clearTimeout(actionCloseTimerRef.current);
       actionCloseTimerRef.current = null;
     }
+    if (actionPendingResetTimerRef.current) {
+      window.clearTimeout(actionPendingResetTimerRef.current);
+      actionPendingResetTimerRef.current = null;
+    }
   }, []);
+
+  useEffect(() => {
+    if (!actionPending) return;
+    if (actionPending === 'primary' && primaryControl?.busy) return;
+    if (actionPendingResetTimerRef.current) {
+      window.clearTimeout(actionPendingResetTimerRef.current);
+    }
+    actionPendingResetTimerRef.current = window.setTimeout(() => {
+      setActionPending(null);
+      actionPendingResetTimerRef.current = null;
+    }, 700);
+  }, [actionPending, primaryControl?.busy]);
 
   const scheduleHideOptions = (messageId: string) => {
     if (hideTimersRef.current[messageId]) return;
@@ -601,6 +717,12 @@ export function ChatPanel({
     if (control.icon === 'sparkles') return <Sparkles className="w-4 h-4" />;
     if (control.icon === 'reasoning') return <Bot className="w-4 h-4" />;
     return <Play className="w-4 h-4" />;
+  }, []);
+
+  const compactControlLabel = useCallback((label: string, fallback: string) => {
+    const clean = String(label || '').trim();
+    if (!clean) return fallback;
+    return clean;
   }, []);
 
   const beginCloseActionMenu = useCallback(() => {
@@ -655,12 +777,14 @@ export function ChatPanel({
 
   const executePrimaryControl = useCallback(() => {
     if (!primaryControl || primaryControl.disabled) return;
+    setActionPending('primary');
     primaryControl.onClick?.();
     beginCloseActionMenu();
   }, [beginCloseActionMenu, primaryControl]);
 
   const executeSecondaryControl = useCallback(() => {
     if (primaryControl?.secondary?.onClick && !primaryControl.secondary.disabled) {
+      setActionPending('secondary');
       primaryControl.secondary.onClick();
     }
     beginCloseActionMenu();
@@ -668,10 +792,12 @@ export function ChatPanel({
 
   const handleSendButtonClick = useCallback(() => {
     if (showRetry) {
+      setActionPending(null);
       onRetryLlm?.();
       return;
     }
     if (inputValue.trim()) {
+      setActionPending(null);
       onSendMessage(inputValue);
       setInputValue('');
       if (settings.autoFocusInput) {
@@ -680,6 +806,13 @@ export function ChatPanel({
       return;
     }
     if (primaryControl) {
+      if (showBinaryDecisionBar) {
+        return;
+      }
+      if (!canUseActionTrigger) {
+        executePrimaryControl();
+        return;
+      }
       if (isActionMenuOpen || actionTriggerState === 'menu_closing') {
         beginCloseActionMenu();
       } else {
@@ -692,9 +825,12 @@ export function ChatPanel({
     beginOpenActionMenu,
     inputValue,
     isActionMenuOpen,
+    canUseActionTrigger,
+    showBinaryDecisionBar,
     onRetryLlm,
     onSendMessage,
     primaryControl,
+    executePrimaryControl,
     settings.autoFocusInput,
     showRetry,
   ]);
@@ -753,11 +889,16 @@ export function ChatPanel({
     : [];
 
   const phaseLabelMap = useMemo(() => ({
-    'Information Shock': 'الصدمة المعلوماتية (Information Shock)',
-    'Polarization Phase': 'الاستقطاب (Polarization Phase)',
-    'Clash of Values': 'صدام القيم (Clash of Values)',
-    'Resolution Pressure': 'ضغط الحسم (Resolution Pressure)',
-  }), []);
+    'Information Shock': settings.language === 'ar' ? 'الآراء الفردية' : 'Individual Opinions',
+    'Polarization Phase': settings.language === 'ar' ? 'النقاش' : 'Discussion',
+    'Clash of Values': settings.language === 'ar' ? 'تقليل الحياد' : 'Neutrality Reduction',
+    'Resolution Pressure': settings.language === 'ar' ? 'التقارب النهائي' : 'Final Convergence',
+    'Individual Opinions': settings.language === 'ar' ? 'الآراء الفردية' : 'Individual Opinions',
+    Discussion: settings.language === 'ar' ? 'النقاش' : 'Discussion',
+    'Neutrality Reduction': settings.language === 'ar' ? 'تقليل الحياد' : 'Neutrality Reduction',
+    'Final Convergence': settings.language === 'ar' ? 'التقارب النهائي' : 'Final Convergence',
+    Convergence: settings.language === 'ar' ? 'التقارب النهائي' : 'Final Convergence',
+  }), [settings.language]);
 
   const phaseGroups = useMemo(() => {
     const groups: { phase: string; items: ReasoningMessage[] }[] = [];
@@ -830,6 +971,9 @@ export function ChatPanel({
       setSelectedResearchUrlIds([]);
       setAddedResearchUrlsInput('');
       setResearchRefinementInput('');
+      setResearchActionMode('scrape_selected');
+      setShowAdvancedResearchActions(false);
+      setResearchActionStatusLine('');
       setBrokenFaviconMap({});
       return;
     }
@@ -841,6 +985,9 @@ export function ChatPanel({
       || '';
     setSelectedResearchUrlIds(defaults);
     setPreviewUrl(initialPreview);
+    setResearchActionMode('scrape_selected');
+    setShowAdvancedResearchActions(false);
+    setResearchActionStatusLine('');
     setBrokenFaviconMap({});
   }, [hasPendingResearchReview, pendingResearchReview, toSafeHttpUrl]);
 
@@ -862,6 +1009,11 @@ export function ChatPanel({
 
   const handleScrapeSelected = useCallback(() => {
     if (!hasPendingResearchReview || !pendingResearchReview || !onSubmitResearchReviewAction) return;
+    setResearchActionStatusLine(
+      settings.language === 'ar'
+        ? 'جاري تنفيذ: استخراج الروابط المحددة...'
+        : 'Applying: scrape selected links...'
+    );
     onSubmitResearchReviewAction({
       cycleId: pendingResearchReview.cycleId,
       action: 'scrape_selected',
@@ -876,10 +1028,16 @@ export function ChatPanel({
     pendingResearchReview,
     researchRefinementInput,
     selectedResearchUrlIds,
+    settings.language,
   ]);
 
   const handleContinueSearch = useCallback(() => {
     if (!hasPendingResearchReview || !pendingResearchReview || !onSubmitResearchReviewAction) return;
+    setResearchActionStatusLine(
+      settings.language === 'ar'
+        ? 'جاري تنفيذ: متابعة البحث...'
+        : 'Applying: continue search...'
+    );
     onSubmitResearchReviewAction({
       cycleId: pendingResearchReview.cycleId,
       action: 'continue_search',
@@ -890,23 +1048,41 @@ export function ChatPanel({
     onSubmitResearchReviewAction,
     pendingResearchReview,
     researchRefinementInput,
+    settings.language,
   ]);
 
   const handleCancelReview = useCallback(() => {
     if (!hasPendingResearchReview || !pendingResearchReview || !onSubmitResearchReviewAction) return;
+    setResearchActionStatusLine(
+      settings.language === 'ar'
+        ? 'جاري تنفيذ: إبقاء الإيقاف...'
+        : 'Applying: keep paused...'
+    );
     onSubmitResearchReviewAction({
       cycleId: pendingResearchReview.cycleId,
       action: 'cancel_review',
     });
-  }, [hasPendingResearchReview, onSubmitResearchReviewAction, pendingResearchReview]);
+  }, [hasPendingResearchReview, onSubmitResearchReviewAction, pendingResearchReview, settings.language]);
+
+  const handleApplyResearchAction = useCallback(() => {
+    if (researchActionMode === 'continue_search') {
+      handleContinueSearch();
+      return;
+    }
+    if (researchActionMode === 'cancel_review') {
+      handleCancelReview();
+      return;
+    }
+    handleScrapeSelected();
+  }, [handleCancelReview, handleContinueSearch, handleScrapeSelected, researchActionMode]);
 
   const previewFallbackText = useMemo(() => {
     if (!previewUrl) return '';
     const fromPending = pendingResearchReview?.candidateUrls.find((item) => item.url === previewUrl);
-    if (fromPending?.snippet) return fromPending.snippet;
+    if (fromPending?.snippet) return decodeResearchSnippet(fromPending.snippet);
     const fromTimeline = researchSourcesLive.find((item) => item.url === previewUrl);
-    return String(fromTimeline?.snippet || '');
-  }, [pendingResearchReview?.candidateUrls, previewUrl, researchSourcesLive]);
+    return decodeResearchSnippet(fromTimeline?.snippet);
+  }, [decodeResearchSnippet, pendingResearchReview?.candidateUrls, previewUrl, researchSourcesLive]);
   const safePreviewUrl = useMemo(() => toSafeHttpUrl(previewUrl), [previewUrl, toSafeHttpUrl]);
 
   return (
@@ -1025,6 +1201,20 @@ export function ChatPanel({
                     <div className="text-xs text-muted-foreground">
                       {settings.language === 'ar' ? 'مصادر البحث المباشرة' : 'Live research sources'}
                     </div>
+                    {activeResearchStartedAt && (
+                      <div className="rounded-md border border-primary/30 bg-primary/10 px-2 py-2 space-y-1">
+                        <div className="text-[11px] text-primary inline-flex items-center gap-1.5">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          {researchTimeoutLabel}
+                        </div>
+                        <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
+                          <div
+                            className="h-full bg-primary transition-all duration-700"
+                            style={{ width: `${researchTimeoutProgressPct}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
                     {(() => {
                       const actionAr: Record<string, string> = {
                         research_started: 'بدء البحث',
@@ -1077,11 +1267,27 @@ export function ChatPanel({
                         failed: 'Failed',
                       };
                       return recentResearchSources.map((item, idx) => (
+                        (() => {
+                          const nowTs = researchClockMs || Date.now();
+                          const rawStatus = String(item.status || '').trim().toLowerCase();
+                          const isStaleRunning = (
+                            rawStatus === 'running'
+                            && simulationStatus !== 'running'
+                            && typeof item.timestamp === 'number'
+                            && (nowTs - item.timestamp) > 12000
+                          );
+                          const displayStatus = isStaleRunning ? 'failed' : rawStatus;
+                          const displayError = isStaleRunning
+                            ? (settings.language === 'ar'
+                              ? 'انتهت مهلة الخطوة أو انقطعت الجلسة. تم تحديث الحالة تلقائيًا.'
+                              : 'Step timed out or session changed. State was refreshed automatically.')
+                            : item.error;
+                          return (
                         <div
                           key={`${item.eventSeq ?? 'x'}-${item.timestamp ?? 0}-${item.url ?? ''}-${item.action ?? ''}`}
                           className={cn(
                             'search-trace-card rounded-lg border border-border/40 px-2.5 py-2 text-xs space-y-1.5 transition-all',
-                            item.status === 'running' && 'bg-primary/5 border-primary/30 animate-pulse'
+                            displayStatus === 'running' && 'bg-primary/5 border-primary/30 animate-pulse'
                           )}
                           style={{ animationDelay: `${Math.min(idx * 70, 350)}ms` }}
                         >
@@ -1110,7 +1316,10 @@ export function ChatPanel({
                                 );
                               })()}
                               <div className="min-w-0">
-                                <div className="text-foreground truncate font-medium">
+                                <div className="text-foreground truncate font-medium inline-flex items-center gap-1.5">
+                                  {displayStatus === 'running' && (
+                                    <Loader2 className="w-3 h-3 animate-spin text-primary shrink-0" />
+                                  )}
                                   {settings.language === 'ar'
                                     ? (actionAr[item.action || ''] || item.action || 'حدث بحث')
                                     : (actionEn[item.action || ''] || item.action || 'Research event')}
@@ -1122,18 +1331,19 @@ export function ChatPanel({
                                 )}
                               </div>
                             </div>
-                            <span className="text-[10px] px-2 py-0.5 rounded-full border border-border/50 text-muted-foreground whitespace-nowrap">
+                            <span className="text-[10px] px-2 py-0.5 rounded-full border border-border/50 text-muted-foreground whitespace-nowrap inline-flex items-center gap-1">
+                              {displayStatus === 'running' && <Loader2 className="w-2.5 h-2.5 animate-spin" />}
                               {settings.language === 'ar'
-                                ? (statusAr[item.status || ''] || item.status || '')
-                                : (statusEn[item.status || ''] || item.status || '')}
+                                ? (statusAr[displayStatus] || displayStatus || '')
+                                : (statusEn[displayStatus] || displayStatus || '')}
                             </span>
                           </div>
                           {item.title && (
                             <div className="text-foreground/90 line-clamp-1">{item.title}</div>
                           )}
-                          {(item.snippet || item.error) && (
+                          {(item.snippet || displayError) && (
                             <div className="text-muted-foreground line-clamp-2">
-                              {item.error ? formatResearchError(item.error) : item.snippet}
+                              {displayError ? formatResearchError(displayError) : decodeResearchSnippet(item.snippet)}
                             </div>
                           )}
                           <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
@@ -1141,7 +1351,7 @@ export function ChatPanel({
                             {typeof item.contentChars === 'number' && <span>{item.contentChars} ch</span>}
                             {typeof item.relevanceScore === 'number' && <span>rel {item.relevanceScore.toFixed(2)}</span>}
                           </div>
-                          {typeof item.progressPct === 'number' && (
+                          {displayStatus === 'running' && typeof item.progressPct === 'number' && (
                             <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
                               <div
                                 className="h-full bg-primary transition-all duration-500"
@@ -1150,6 +1360,8 @@ export function ChatPanel({
                             </div>
                           )}
                         </div>
+                          );
+                        })()
                       ));
                     })()}
                   </div>
@@ -1220,33 +1432,72 @@ export function ChatPanel({
                   disabled={researchReviewBusy}
                 />
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <div className="space-y-2">
                   <Button
                     type="button"
-                    onClick={handleScrapeSelected}
-                    disabled={researchReviewBusy || (!selectedResearchUrlIds.length && !parsedAddedUrls.length)}
+                    onClick={handleApplyResearchAction}
+                    disabled={
+                      researchReviewBusy
+                      || (
+                        researchActionMode === 'scrape_selected'
+                        && (!selectedResearchUrlIds.length && !parsedAddedUrls.length)
+                      )
+                    }
                     className="w-full"
                   >
-                    {settings.language === 'ar' ? 'استخراج المحدد' : 'Scrape selected'}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    onClick={handleContinueSearch}
-                    disabled={researchReviewBusy}
-                    className="w-full"
-                  >
-                    {settings.language === 'ar' ? 'متابعة البحث' : 'Continue search'}
+                    {researchReviewBusy
+                      ? (settings.language === 'ar' ? 'جاري التنفيذ...' : 'Applying...')
+                      : researchActionMode === 'continue_search'
+                      ? (settings.language === 'ar' ? 'متابعة البحث' : 'Continue search')
+                      : researchActionMode === 'cancel_review'
+                      ? (settings.language === 'ar' ? 'إبقاء الإيقاف' : 'Keep paused')
+                      : (settings.language === 'ar' ? 'استخراج المحدد' : 'Scrape selected')}
                   </Button>
                   <Button
                     type="button"
                     variant="outline"
-                    onClick={handleCancelReview}
+                    onClick={() => setShowAdvancedResearchActions((prev) => !prev)}
                     disabled={researchReviewBusy}
                     className="w-full"
                   >
-                    {settings.language === 'ar' ? 'إبقاء الإيقاف' : 'Keep paused'}
+                    {showAdvancedResearchActions
+                      ? (settings.language === 'ar' ? 'إخفاء الخيارات المتقدمة' : 'Hide advanced actions')
+                      : (settings.language === 'ar' ? 'خيارات متقدمة' : 'Advanced actions')}
                   </Button>
+                  {showAdvancedResearchActions && (
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <Button
+                        type="button"
+                        variant={researchActionMode === 'scrape_selected' ? 'default' : 'secondary'}
+                        onClick={() => setResearchActionMode('scrape_selected')}
+                        disabled={researchReviewBusy}
+                        className="w-full"
+                      >
+                        {settings.language === 'ar' ? 'استخراج المحدد' : 'Scrape selected'}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={researchActionMode === 'continue_search' ? 'default' : 'secondary'}
+                        onClick={() => setResearchActionMode('continue_search')}
+                        disabled={researchReviewBusy}
+                        className="w-full"
+                      >
+                        {settings.language === 'ar' ? 'متابعة البحث' : 'Continue search'}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={researchActionMode === 'cancel_review' ? 'default' : 'outline'}
+                        onClick={() => setResearchActionMode('cancel_review')}
+                        disabled={researchReviewBusy}
+                        className="w-full"
+                      >
+                        {settings.language === 'ar' ? 'إبقاء الإيقاف' : 'Keep paused'}
+                      </Button>
+                    </div>
+                  )}
+                  {researchActionStatusLine && (
+                    <div className="text-[11px] text-cyan-100/80">{researchActionStatusLine}</div>
+                  )}
                 </div>
 
                 {previewUrl && (
@@ -1354,6 +1605,52 @@ export function ChatPanel({
                   {preflightBusy
                     ? (settings.language === 'ar' ? 'جاري إرسال التوضيح...' : 'Submitting clarification...')
                     : (settings.language === 'ar' ? 'إرسال التوضيح للمتابعة' : 'Submit clarification to continue')}
+                </Button>
+              </div>
+            )}
+
+            {!hasPendingPreflight && hasPendingIdeaConfirmation && pendingIdeaConfirmation && (
+              <div className="rounded-xl border border-emerald-400/30 bg-emerald-500/10 p-3 space-y-3">
+                <div className="text-sm font-semibold text-emerald-100">
+                  {settings.language === 'ar'
+                    ? 'الوصف المقترح لفكرتك قبل البدء'
+                    : 'Proposed idea description before execution'}
+                </div>
+                <ReadMoreText
+                  text={pendingIdeaConfirmation.description}
+                  collapsedLines={5}
+                  language={settings.language}
+                  expanded={Boolean(expandedTextMap['preflight-idea-confirm'])}
+                  onToggleExpanded={() => toggleExpandedText('preflight-idea-confirm')}
+                  className="text-sm text-foreground"
+                />
+                {pendingIdeaConfirmation.summary && (
+                  <details className="rounded-lg border border-emerald-300/25 bg-emerald-500/5 p-2">
+                    <summary className="cursor-pointer text-xs text-emerald-100/85">
+                      {settings.language === 'ar' ? 'تفاصيل التوضيح' : 'Clarification details'}
+                    </summary>
+                    <div className="mt-2 text-xs text-emerald-100/75 whitespace-pre-wrap">
+                      {pendingIdeaConfirmation.summary}
+                    </div>
+                  </details>
+                )}
+                {typeof pendingIdeaConfirmation.clarityScore === 'number' && (
+                  <div className="text-[11px] text-emerald-100/75">
+                    {settings.language === 'ar'
+                      ? `مؤشر الوضوح: ${Math.round(pendingIdeaConfirmation.clarityScore * 100)}%`
+                      : `Clarity score: ${Math.round(pendingIdeaConfirmation.clarityScore * 100)}%`}
+                  </div>
+                )}
+                <Button
+                  type="button"
+                  className="w-full bg-emerald-500/80 hover:bg-emerald-500 text-white"
+                  onClick={onConfirmIdeaForStart}
+                  disabled={preflightBusy || !onConfirmIdeaForStart}
+                >
+                  <Check className="w-4 h-4 mr-1" />
+                  {settings.language === 'ar'
+                    ? 'تأكيد الوصف وبدء التنفيذ'
+                    : 'Confirm description and start execution'}
                 </Button>
               </div>
             )}
@@ -1748,10 +2045,37 @@ export function ChatPanel({
             </div>
           )}
 
+          {showBinaryDecisionBar && primaryControl?.secondary && (
+            <div className="mb-2 grid grid-cols-2 gap-2">
+              <Button
+                type="button"
+                onClick={executePrimaryControl}
+                disabled={Boolean(primaryControl.disabled) || actionPending !== null}
+                className="h-10 w-full justify-center rounded-lg bg-emerald-600/85 hover:bg-emerald-600 text-white"
+              >
+                {actionPending === 'primary'
+                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                  : <Check className="w-4 h-4" />}
+                <span className="text-xs ms-1">{compactControlLabel(primaryControl.label, settings.language === 'ar' ? 'قبول' : 'Accept')}</span>
+              </Button>
+              <Button
+                type="button"
+                onClick={executeSecondaryControl}
+                disabled={Boolean(primaryControl.secondary.disabled) || actionPending !== null}
+                className="h-10 w-full justify-center rounded-lg bg-red-600/85 hover:bg-red-600 text-white"
+              >
+                {actionPending === 'secondary'
+                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                  : <X className="w-4 h-4" />}
+                <span className="text-xs ms-1">{compactControlLabel(primaryControl.secondary.label, settings.language === 'ar' ? 'رفض' : 'Reject')}</span>
+              </Button>
+            </div>
+          )}
+
           <form ref={inputWrapperRef} onSubmit={handleSubmit} className="chat-input-wrapper relative">
             {primaryControl && !inputValue.trim() && (
               <div className="pointer-events-none absolute top-[-30px] max-w-[72%] rounded-md border border-border/50 bg-card/80 px-2 py-1 text-[11px] leading-4 text-muted-foreground truncate [inset-inline-end:0]">
-                {primaryControl.label}
+                {primaryControl.description || primaryControl.label}
               </div>
             )}
             <Input
@@ -1794,6 +2118,7 @@ export function ChatPanel({
                   actionTriggerState === 'menu_open' && 'is-open',
                   actionTriggerState === 'menu_closing' && 'is-closing'
                 )}
+                style={controlMenuReservedStyle}
               >
                 {primaryControl && !inputValue.trim() && actionMenuRendered && (
                   <div className="control-menu-shell">
@@ -1802,7 +2127,7 @@ export function ChatPanel({
                         type="button"
                         size="sm"
                         onClick={executePrimaryControl}
-                        disabled={primaryControl.disabled}
+                        disabled={primaryControl.disabled || actionPending !== null}
                         className={cn(
                           'control-menu-item control-menu-item-primary',
                           primaryControl.tone === 'success' && 'bg-success/15 border-success/30 text-success hover:bg-success/20',
@@ -1812,20 +2137,29 @@ export function ChatPanel({
                         )}
                         title={primaryControl.label}
                       >
-                        {renderPrimaryControlIcon(primaryControl)}
-                        <span className="control-menu-item-label">{primaryControl.label}</span>
+                        {(actionPending === 'primary' || primaryControl.busy)
+                          ? <Loader2 className="w-4 h-4 animate-spin" />
+                          : renderPrimaryControlIcon(primaryControl)}
+                        <span className="control-menu-item-label">
+                          {compactControlLabel(primaryControl.label, settings.language === 'ar' ? 'تنفيذ' : 'Run')}
+                        </span>
                       </Button>
                       <Button
                         type="button"
                         size="sm"
                         onClick={executeSecondaryControl}
-                        disabled={Boolean(primaryControl.secondary?.disabled)}
+                        disabled={Boolean(primaryControl.secondary?.disabled) || actionPending !== null}
                         className="control-menu-item control-menu-item-secondary border border-border bg-card/90 text-foreground hover:bg-card"
                         title={primaryControl.secondary?.label || (settings.language === 'ar' ? 'إغلاق' : 'Close')}
                       >
-                        {primaryControl.secondary ? <RefreshCcw className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                        {actionPending === 'secondary'
+                          ? <Loader2 className="w-4 h-4 animate-spin" />
+                          : (primaryControl.secondary ? <RefreshCcw className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />)}
                         <span className="control-menu-item-label">
-                          {primaryControl.secondary?.label || (settings.language === 'ar' ? 'إغلاق' : 'Close')}
+                          {compactControlLabel(
+                            primaryControl.secondary?.label || (settings.language === 'ar' ? 'إغلاق' : 'Close'),
+                            settings.language === 'ar' ? 'إغلاق' : 'Close',
+                          )}
                         </span>
                       </Button>
                     </div>
@@ -1836,14 +2170,15 @@ export function ChatPanel({
               <Button
                 type="button"
                 size="icon"
-                disabled={showRetry ? !onRetryLlm : (!inputValue.trim() && !primaryControl)}
+                disabled={showRetry ? !onRetryLlm : (!inputValue.trim() && (!primaryControl || showBinaryDecisionBar))}
                 className={cn(
                   'send-btn control-trigger-btn',
                   canUseActionTrigger && 'is-ready',
                   shouldExpandTrigger && 'is-expanded',
+                  showSingleActionControl && 'is-single-action',
                   isActionMenuOpen && 'is-menu-open'
                 )}
-                style={shouldExpandTrigger ? { width: `${actionExpandedWidthPx}px` } : undefined}
+                style={controlTriggerButtonStyle}
                 data-testid={showRetry ? 'chat-retry-llm' : 'chat-send'}
                 onClick={handleSendButtonClick}
                 onMouseEnter={handleTriggerMouseEnter}
@@ -1852,6 +2187,8 @@ export function ChatPanel({
                 <span className="control-trigger-icon-wrap">
                   {showRetry
                     ? <RefreshCcw className="w-4 h-4" />
+                    : actionPending
+                    ? <Loader2 className="w-4 h-4 animate-spin" />
                     : inputValue.trim()
                     ? <Send className="w-4 h-4" />
                     : renderPrimaryControlIcon(primaryControl || undefined)}

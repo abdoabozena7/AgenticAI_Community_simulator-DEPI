@@ -1,6 +1,12 @@
 const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 const ACCESS_TOKEN_KEY = 'agentic_access_token';
 const REFRESH_TOKEN_KEY = 'agentic_refresh_token';
+export const AUTH_CHANGED_EVENT = 'agentic-auth-changed';
+
+const emitAuthChanged = () => {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new Event(AUTH_CHANGED_EVENT));
+};
 
 const getStoredAccessToken = () => {
   if (typeof window === 'undefined') return null;
@@ -14,13 +20,21 @@ const getStoredRefreshToken = () => {
 
 const setStoredTokens = (accessToken?: string | null, refreshToken?: string | null) => {
   if (typeof window === 'undefined') return;
+  const prevAccess = localStorage.getItem(ACCESS_TOKEN_KEY);
+  const prevRefresh = localStorage.getItem(REFRESH_TOKEN_KEY);
   if (accessToken) localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
   else localStorage.removeItem(ACCESS_TOKEN_KEY);
   if (refreshToken) localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
   else localStorage.removeItem(REFRESH_TOKEN_KEY);
+  const nextAccess = localStorage.getItem(ACCESS_TOKEN_KEY);
+  const nextRefresh = localStorage.getItem(REFRESH_TOKEN_KEY);
+  if (prevAccess !== nextAccess || prevRefresh !== nextRefresh) {
+    emitAuthChanged();
+  }
 };
 
 export const getAuthToken = () => getStoredAccessToken();
+export const clearAuthTokens = () => setStoredTokens(null, null);
 
 const decodeJwtExp = (token: string): number | null => {
   try {
@@ -68,6 +82,10 @@ export interface SimulationConfig {
   parent_simulation_id?: string;
   followup_mode?: 'make_acceptable' | 'bring_to_world';
   seed_context?: Record<string, unknown>;
+  society_mode?: 'default' | 'custom';
+  society_profile_id?: string;
+  society_custom_spec?: Record<string, unknown>;
+  start_path?: 'inspect_default' | 'build_custom' | 'start_default';
   preflight_ready?: boolean;
   preflight_summary?: string;
   preflight_answers?: Record<string, unknown>;
@@ -158,6 +176,9 @@ export interface SimulationStateResponse {
     suggested_queries?: string[];
     required?: boolean;
   } | null;
+  research_gate?: 'none' | 'prestart_review' | 'runtime_review';
+  research_gate_cycle_id?: string | null;
+  research_gate_version?: number | null;
   metrics?: {
     total_agents?: number;
     accepted: number;
@@ -257,18 +278,98 @@ export interface SimulationPreflightNextResponse {
   normalized_context: Record<string, unknown>;
   history?: Array<Record<string, unknown>>;
   preflight_summary?: string;
+  preferred_idea_description?: string;
   assumptions?: string[];
 }
 
 export interface SimulationPreflightFinalizeResponse {
   preflight_ready: true | boolean;
   preflight_summary: string;
+  preferred_idea_description?: string;
   preflight_answers: Record<string, unknown>;
   preflight_clarity_score: number;
   assumptions: string[];
   missing_axes?: string[];
   normalized_context?: Record<string, unknown>;
   history?: Array<Record<string, unknown>>;
+}
+
+export interface UnderstandingQuestion {
+  id: string;
+  axis: string;
+  question: string;
+  options: Array<{ id: string; label: string }>;
+  required: boolean;
+  reason_summary?: string;
+  generation_mode?: 'llm' | 'fallback';
+  question_quality?: {
+    score?: number;
+    checks_passed?: string[];
+  };
+}
+
+export interface UnderstandingAnalyzeResponse {
+  clear_enough: boolean;
+  clarity_score: number;
+  missing_axes: string[];
+  questions: UnderstandingQuestion[];
+  generation_mode?: 'llm' | 'fallback';
+  generated_at?: string;
+  questions_meta?: Array<{
+    axis: string;
+    generation_mode: 'llm' | 'fallback';
+    quality_score?: number;
+  }>;
+  attempt_id?: string;
+  batch_required: true;
+  preferred_idea_description?: string;
+  summary?: string;
+}
+
+export interface UnderstandingSubmitResponse {
+  preferred_idea_description: string;
+  summary: string;
+  confirm_required: true;
+  preflight_ready: boolean;
+  preflight_answers: Record<string, unknown>;
+  preflight_clarity_score: number;
+  assumptions: string[];
+  missing_axes: string[];
+}
+
+export interface PrestartResearchResponse {
+  summary: string;
+  highlights: string[];
+  gaps: string[];
+  confirm_start_required: true;
+  provider?: string;
+  is_live?: boolean;
+  results?: SearchResult[];
+  structured?: SearchStructured;
+}
+
+export interface SocietyCatalogResponse {
+  total_templates: number;
+  categories: Array<{
+    category_id: string;
+    description: string;
+    template_count: number;
+    sample_archetypes: string[];
+  }>;
+}
+
+export interface SocietyCustomBuildResponse {
+  society_profile_id: string;
+  computed_personas: Array<{
+    template_id: string;
+    category_id: string;
+    archetype_name: string;
+    bucket: string;
+  }>;
+}
+
+export interface SocietyAssistantResponse {
+  answer: string;
 }
 
 export interface AuthResponse {
@@ -383,9 +484,21 @@ export interface SimulationPauseResponse {
 
 export interface SimulationResearchActionResponse {
   ok: boolean;
+  action_applied?: boolean;
+  conflict_reason?: 'already_running' | 'stale_cycle' | 'no_pending_review';
   simulation_id: string;
   status: 'running' | 'paused' | 'completed' | 'error';
   status_reason?: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_research_review' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'error' | 'completed';
+  pending_research_review?: SimulationStateResponse['pending_research_review'];
+  state_snapshot?: {
+    status?: 'running' | 'paused' | 'completed' | 'error';
+    status_reason?: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_research_review' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'error' | 'completed';
+    phase_key?: string | null;
+    phase_progress_pct?: number | null;
+  };
+  research_gate?: 'none' | 'prestart_review' | 'runtime_review';
+  research_gate_cycle_id?: string | null;
+  research_gate_version?: number | null;
 }
 
 export interface SimulationChatEventResponse {
@@ -549,17 +662,21 @@ class ApiService {
   private refreshingPromise: Promise<boolean> | null = null;
   private static readonly DEFAULT_TIMEOUT_MS = 30000;
   private static readonly LONG_TIMEOUT_MS = 120000;
+  private static readonly AUTH_TIMEOUT_MS = 12000;
 
   private async refreshTokens(): Promise<boolean> {
     const refreshToken = getStoredRefreshToken();
     if (!refreshToken) return false;
     if (this.refreshingPromise) return this.refreshingPromise;
     this.refreshingPromise = (async () => {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), ApiService.AUTH_TIMEOUT_MS);
       try {
         const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ refresh_token: refreshToken }),
+          signal: controller.signal,
         });
         if (!response.ok) {
           setStoredTokens(null, null);
@@ -569,8 +686,10 @@ class ApiService {
         setStoredTokens(data.access_token, data.refresh_token);
         return true;
       } catch {
+        setStoredTokens(null, null);
         return false;
       } finally {
+        window.clearTimeout(timer);
         this.refreshingPromise = null;
       }
     })();
@@ -597,8 +716,12 @@ class ApiService {
     const { timeoutMs = ApiService.DEFAULT_TIMEOUT_MS, ...requestInit } = options || {};
     const token = getStoredAccessToken();
     const authHeader = token ? { Authorization: `Bearer ${token}` } : {};
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    const timeoutController = new AbortController();
+    const timer = window.setTimeout(() => timeoutController.abort(), timeoutMs);
+    const externalSignal = requestInit.signal;
+    const signal = externalSignal
+      ? AbortSignal.any([timeoutController.signal, externalSignal])
+      : timeoutController.signal;
 
     try {
       const response = await fetch(`${API_BASE_URL}${endpoint}`, {
@@ -608,7 +731,7 @@ class ApiService {
           ...authHeader,
           ...requestInit?.headers,
         },
-        signal: controller.signal,
+        signal,
       });
 
       if (!response.ok) {
@@ -617,6 +740,9 @@ class ApiService {
           if (refreshed) {
             return this.request<T>(endpoint, options, false);
           }
+          setStoredTokens(null, null);
+        }
+        if (response.status === 401) {
           setStoredTokens(null, null);
         }
         const error = await response.json().catch(() => ({ message: 'Request failed' }));
@@ -641,6 +767,7 @@ class ApiService {
     const res = await this.request<AuthResponse>('/auth/register', {
       method: 'POST',
       body: JSON.stringify({ username, email, password }),
+      timeoutMs: ApiService.AUTH_TIMEOUT_MS,
     });
     if (res?.access_token) setStoredTokens(res.access_token, res.refresh_token);
     return res;
@@ -650,6 +777,7 @@ class ApiService {
     const res = await this.request<AuthResponse>('/auth/login', {
       method: 'POST',
       body: JSON.stringify({ username, password }),
+      timeoutMs: ApiService.AUTH_TIMEOUT_MS,
     });
     if (res?.access_token) setStoredTokens(res.access_token, res.refresh_token);
     return res;
@@ -659,6 +787,7 @@ class ApiService {
     const res = await this.request<AuthResponse>('/auth/google', {
       method: 'POST',
       body: JSON.stringify(payload),
+      timeoutMs: ApiService.AUTH_TIMEOUT_MS,
     });
     if (res?.access_token) setStoredTokens(res.access_token, res.refresh_token);
     return res;
@@ -689,7 +818,7 @@ class ApiService {
     }
   }
 
-  async getMe(options?: RequestInit): Promise<UserMe> {
+  async getMe(options?: (RequestInit & { timeoutMs?: number })): Promise<UserMe> {
     return this.request<UserMe>('/auth/me', options);
   }
 
@@ -893,6 +1022,114 @@ class ApiService {
     });
   }
 
+  async analyzeIdeaUnderstanding(payload: {
+    idea: string;
+    context: {
+      category?: string;
+      target_audience?: string[];
+      goals?: string[];
+      country?: string;
+      city?: string;
+      idea_maturity?: string;
+      risk_appetite?: number;
+      language?: 'ar' | 'en';
+    };
+    threshold?: number;
+    attempt_id?: string;
+  }): Promise<UnderstandingAnalyzeResponse> {
+    return this.request<UnderstandingAnalyzeResponse>('/simulation/understanding/analyze', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async submitIdeaUnderstanding(payload: {
+    draft_context: {
+      idea: string;
+      category?: string;
+      target_audience?: string[];
+      goals?: string[];
+      country?: string;
+      city?: string;
+      idea_maturity?: string;
+      risk_appetite?: number;
+    };
+    answers: Array<{
+      question_id: string;
+      axis?: string;
+      selected_option_id?: string;
+      selected_option_ids?: string[];
+      custom_text?: string;
+    }>;
+    language: 'ar' | 'en';
+    threshold?: number;
+  }): Promise<UnderstandingSubmitResponse> {
+    return this.request<UnderstandingSubmitResponse>('/simulation/understanding/submit', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async runPrestartResearch(payload: {
+    idea: string;
+    category?: string;
+    country?: string;
+    city?: string;
+    language: 'ar' | 'en';
+  }): Promise<PrestartResearchResponse> {
+    return this.request<PrestartResearchResponse>('/simulation/research/prestart', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async getSocietyCatalog(): Promise<SocietyCatalogResponse> {
+    return this.request<SocietyCatalogResponse>('/society/catalog', {
+      method: 'GET',
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async buildCustomSociety(payload: {
+    profile_name: string;
+    agent_count: number;
+    distribution: {
+      skeptic_ratio: number;
+      optimist_ratio: number;
+      pragmatic_ratio: number;
+      policy_guard_ratio: number;
+    };
+    controls: {
+      diversity: number;
+      innovation_bias: number;
+      risk_sensitivity: number;
+      strict_policy: boolean;
+      human_debate_style: boolean;
+      persona_hint?: string;
+    };
+  }): Promise<SocietyCustomBuildResponse> {
+    return this.request<SocietyCustomBuildResponse>('/society/custom/build', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async askSocietyAssistant(payload: {
+    question: string;
+    spec?: Record<string, unknown>;
+    language: 'ar' | 'en';
+  }): Promise<SocietyAssistantResponse> {
+    return this.request<SocietyAssistantResponse>('/society/custom/assistant', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
   async resumeSimulation(simulationId: string): Promise<SimulationResumeResponse> {
     return this.request<SimulationResumeResponse>('/simulation/resume', {
       method: 'POST',
@@ -916,6 +1153,7 @@ class ApiService {
     selected_url_ids?: string[];
     added_urls?: string[];
     query_refinement?: string;
+    research_gate_version?: number;
   }): Promise<SimulationResearchActionResponse> {
     return this.request<SimulationResearchActionResponse>('/simulation/research/action', {
       method: 'POST',

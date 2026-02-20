@@ -10,6 +10,7 @@ an access token when AUTH_REQUIRED is enabled.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Dict, Optional, Set
 import json
 import os
@@ -26,6 +27,7 @@ class ConnectionInfo:
         self.user_id = user_id
         self.is_admin = is_admin
         self.subscriptions: Set[str] = set()
+        self.send_lock = asyncio.Lock()
 
 
 class ConnectionManager:
@@ -54,16 +56,33 @@ class ConnectionManager:
     async def broadcast_json(self, message: dict) -> None:
         """Send a JSON-serialisable message to subscribed connections."""
         simulation_id = message.get("simulation_id")
+        try:
+            send_timeout = float(os.getenv("WS_SEND_TIMEOUT_SEC", "1.5") or 1.5)
+        except Exception:
+            send_timeout = 1.5
+        send_timeout = max(0.25, send_timeout)
+
+        targets: list[tuple[WebSocket, ConnectionInfo]] = []
         for connection, info in list(self.active_connections.items()):
-            if simulation_id:
-                if info.is_admin:
-                    pass
-                elif simulation_id not in info.subscriptions:
-                    continue
+            if simulation_id and not info.is_admin and simulation_id not in info.subscriptions:
+                continue
+            targets.append((connection, info))
+
+        async def _send_one(connection: WebSocket, info: ConnectionInfo) -> bool:
             try:
-                await connection.send_json(message)
+                async with info.send_lock:
+                    await asyncio.wait_for(connection.send_json(message), timeout=send_timeout)
+                return True
             except Exception:
-                self.disconnect(connection)
+                return False
+
+        if not targets:
+            return
+
+        results = await asyncio.gather(*[_send_one(connection, info) for connection, info in targets], return_exceptions=False)
+        for idx, ok in enumerate(results):
+            if not ok:
+                self.disconnect(targets[idx][0])
 
 
 router = APIRouter()

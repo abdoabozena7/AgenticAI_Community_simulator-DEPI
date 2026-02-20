@@ -736,6 +736,16 @@
     transform: translateX(0);
   }
 
+  .control-trigger-btn.is-single-action {
+    padding-inline: 10px;
+    box-shadow: 0 0 0 1px hsl(var(--primary) / 0.22), 0 10px 22px hsl(var(--primary) / 0.16);
+  }
+
+  .control-trigger-btn.is-single-action .control-trigger-label {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
   html[dir='rtl'] .control-trigger-btn .control-trigger-label {
     transform: translateX(-6px);
   }

@@ -21,7 +21,7 @@ import SettingsPage from "./pages/SettingsPage";
 import VerifyEmailPage from "./pages/VerifyEmailPage";
 import ResetPasswordPage from "./pages/ResetPasswordPage";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
-import { apiService, getAuthToken } from "@/services/api";
+import { apiService, AUTH_CHANGED_EVENT, getAuthToken } from "@/services/api";
 import { ThemeProvider } from "@/contexts/ThemeContext";
 import { LanguageProvider } from "@/contexts/LanguageContext";
 import { PageTransition } from "@/components/PageTransition";
@@ -42,20 +42,29 @@ const applyLanguageSettings = (language?: string | null) => {
 const useAuthStatus = () => {
   const [status, setStatus] = useState<'checking' | 'authed' | 'guest'>('checking');
   const [role, setRole] = useState<string | null>(null);
-  const token = getAuthToken();
+  const [token, setToken] = useState<string | null>(() => getAuthToken());
+
+  useEffect(() => {
+    const syncToken = () => setToken(getAuthToken());
+    window.addEventListener('storage', syncToken);
+    window.addEventListener(AUTH_CHANGED_EVENT, syncToken as EventListener);
+    return () => {
+      window.removeEventListener('storage', syncToken);
+      window.removeEventListener(AUTH_CHANGED_EVENT, syncToken as EventListener);
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
     if (!token) {
+      setRole(null);
       setStatus('guest');
       return () => { active = false; };
     }
-
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 4000);
+    setStatus('checking');
 
     apiService
-      .getMe({ signal: controller.signal })
+      .getMe({ timeoutMs: 4000 })
       .then((me) => {
         if (!active) return;
         setRole(me?.role || null);
@@ -67,14 +76,10 @@ const useAuthStatus = () => {
           setStatus('guest');
         }
       })
-      .finally(() => {
-        window.clearTimeout(timer);
-      });
+      .finally(() => undefined);
 
     return () => {
       active = false;
-      controller.abort();
-      window.clearTimeout(timer);
     };
   }, [token]);
 

@@ -6,12 +6,13 @@
   "scripts": {
     "start": "vite",
     "dev": "vite",
-    "build": "vite build",
+    "build": "npm run check:utf8 && vite build",
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "check:utf8": "node scripts/check-utf8.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

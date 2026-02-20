@@ -8,14 +8,14 @@ import {
   MATURITY_LEVELS,
 } from '@/components/TopBar';
 import { ChatPanel } from '@/components/ChatPanel';
-import { ConfigPanel } from '@/components/ConfigPanel';
+import { ConfigPanel, SocietyControls } from '@/components/ConfigPanel';
 import { SimulationArena } from '@/components/SimulationArena';
 import { MetricsPanel } from '@/components/MetricsPanel';
 import { IterationTimeline } from '@/components/IterationTimeline';
 import { useSimulation } from '@/hooks/useSimulation';
-import { ChatMessage, PreflightQuestion, UserInput } from '@/types/simulation';
+import { ChatMessage, PendingIdeaConfirmation, PreflightQuestion, UserInput } from '@/types/simulation';
 import { websocketService } from '@/services/websocket';
-import { apiService, SearchResponse, SimulationConfig, SimulationPreflightNextResponse, UserMe } from '@/services/api';
+import { apiService, SearchResponse, SimulationConfig, SimulationPreflightNextResponse, SocietyCatalogResponse, UserMe } from '@/services/api';
 import { cn } from '@/lib/utils';
 import { addIdeaLogEntry, updateIdeaLogEntry } from '@/lib/ideaLog';
 
@@ -234,6 +234,7 @@ const Index = () => {
   const summaryRef = useRef<string | null>(null);
   const lastPhaseMarkerRef = useRef<string | null>(null);
   const lastIterationMarkerRef = useRef<number>(0);
+  const messageIdCounterRef = useRef(0);
   const searchPromptedRef = useRef(false);
   const searchAttemptRef = useRef(0);
   const [settings, setSettings] = useState({
@@ -263,8 +264,30 @@ const Index = () => {
   const [preflightClarityScore, setPreflightClarityScore] = useState(0);
   const [preflightMissingAxes, setPreflightMissingAxes] = useState<string[]>([]);
   const [preflightHistory, setPreflightHistory] = useState<Array<Record<string, unknown>>>([]);
+  const [understandingQueue, setUnderstandingQueue] = useState<PreflightQuestion[]>([]);
+  const [understandingAnswers, setUnderstandingAnswers] = useState<Array<{
+    questionId: string;
+    axis: string;
+    selectedOptionId?: string;
+    customText?: string;
+  }>>([]);
   const [preflightNormalizedContext, setPreflightNormalizedContext] = useState<Record<string, unknown> | null>(null);
   const [preflightSummary, setPreflightSummary] = useState<string>('');
+  const [pendingIdeaConfirmation, setPendingIdeaConfirmation] = useState<PendingIdeaConfirmation | null>(null);
+  const [startChoiceModalOpen, setStartChoiceModalOpen] = useState(false);
+  const [selectedStartPath, setSelectedStartPath] = useState<'default_start' | 'custom_build' | null>(null);
+  const [showSocietyBuilder, setShowSocietyBuilder] = useState(false);
+  const [societyCatalog, setSocietyCatalog] = useState<SocietyCatalogResponse | null>(null);
+  const [societyControls, setSocietyControls] = useState<SocietyControls>({
+    diversity: 60,
+    skepticRatio: 35,
+    innovationBias: 55,
+    strictPolicy: true,
+    humanDebate: true,
+    personaHint: '',
+  });
+  const [societyAssistantBusy, setSocietyAssistantBusy] = useState(false);
+  const [societyAssistantAnswer, setSocietyAssistantAnswer] = useState('');
   const [postActionBusy, setPostActionBusy] = useState<'make_acceptable' | 'bring_to_world' | null>(null);
   const [postActionResult, setPostActionResult] = useState<{
     action: 'make_acceptable' | 'bring_to_world';
@@ -317,9 +340,15 @@ const Index = () => {
   const persistedChatKeysRef = useRef<Set<string>>(new Set());
   const persistChatBusyRef = useRef(false);
   const preflightResolvedKeyRef = useRef('');
+  const preflightConfirmedKeyRef = useRef('');
+  const understandingAttemptRef = useRef('');
+  const researchReviewedKeyRef = useRef('');
+  const lastResearchGateKeyRef = useRef('');
+  const startChoiceResolvedKeyRef = useRef('');
   const preflightStartPayloadRef = useRef<{
     preflight_ready: boolean;
     preflight_summary: string;
+    preferred_idea_description?: string;
     preflight_answers: Record<string, unknown>;
     preflight_clarity_score: number;
     preflight_assumptions: string[];
@@ -391,12 +420,14 @@ const Index = () => {
     options?: ChatMessage['options'],
     mode: 'replace_previous_system' | 'append' = 'replace_previous_system'
   ) => {
+    messageIdCounterRef.current += 1;
+    const baseTs = Date.now();
     const cleanedContent = normalizeAssistantText(content);
     const message: ChatMessage = {
-      id: `sys-${Date.now()}`,
+      id: `sys-${baseTs}-${messageIdCounterRef.current}`,
       type: 'system',
       content: cleanedContent,
-      timestamp: Date.now(),
+      timestamp: baseTs,
       options,
     };
     setChatMessages((prev) => {
@@ -419,13 +450,15 @@ const Index = () => {
         );
         if (alreadyExists) return prev;
       }
+      messageIdCounterRef.current += 1;
+      const baseTs = Date.now();
       const next = [
         ...prev,
         {
-          id: `user-${Date.now()}`,
+          id: `user-${baseTs}-${messageIdCounterRef.current}`,
           type: 'user' as const,
           content: trimmed,
-          timestamp: Date.now(),
+          timestamp: baseTs,
         },
       ];
       if (next.length <= MAX_CHAT_MESSAGES) return next;
@@ -499,6 +532,13 @@ const Index = () => {
   }, [simulation.chatEvents, simulation.simulationId]);
 
   useEffect(() => {
+    const errorText = String(simulation.error || '').toLowerCase();
+    if (!errorText) return;
+    if (!errorText.includes('session expired') && !errorText.includes('unauthorized')) return;
+    navigate('/?auth=login', { replace: true });
+  }, [navigate, simulation.error]);
+
+  useEffect(() => {
     const simulationId = simulation.simulationId?.trim();
     if (!simulationId) return;
     if (persistChatBusyRef.current) return;
@@ -567,6 +607,30 @@ const Index = () => {
       ? `النتيجة النهائية: قبول ${simulation.metrics.accepted} | رفض ${simulation.metrics.rejected} | محايد ${simulation.metrics.neutral} | نسبة القبول ${acceptancePct.toFixed(0)}%.`
       : `Final outcome: accepted ${simulation.metrics.accepted} | rejected ${simulation.metrics.rejected} | neutral ${simulation.metrics.neutral} | acceptance ${acceptancePct.toFixed(0)}%.`;
     addSystemMessage(`${statsLine}\n${recommendation}`, undefined, 'append');
+    const actionPlan = settings.language === 'ar'
+      ? acceptancePct >= 60
+        ? [
+            'خطوات التنفيذ: 1) أطلق Pilot مدفوع صغير خلال 30 يومًا.',
+            'خطوات التحقق: 2) راقب KPI أساسي (تحويل/احتفاظ/تكلفة اكتساب).',
+            'خطوات تحقيق الدخل: 3) ثبّت نموذج التسعير ثم وسّع السوق تدريجيًا.',
+          ]
+        : [
+            'خطوات التحسين: 1) عالج سببَي الرفض الأعلى أولًا.',
+            'خطوات التحقق: 2) اختبر فرضية القيمة مع عينة مستخدمين واضحة.',
+            'خطوات تحقيق الدخل: 3) عدّل التسعير/النموذج الربحي قبل التوسع.',
+          ]
+      : acceptancePct >= 60
+      ? [
+          'Execution: 1) launch a paid pilot within 30 days.',
+          'Validation: 2) track one core KPI (conversion/retention/CAC).',
+          'Monetization: 3) lock pricing, then scale distribution gradually.',
+        ]
+      : [
+          'Improve: 1) fix the top two rejection reasons first.',
+          'Validate: 2) test your core value hypothesis with a clear target sample.',
+          'Monetize: 3) revise pricing/revenue model before scaling.',
+        ];
+    addSystemMessage(actionPlan.join('\n'), undefined, 'append');
     if (reasons.length) {
       const reasonsText = settings.language === 'ar'
         ? `أبرز أسباب القرار:\n- ${reasons.slice(0, 4).join('\n- ')}`
@@ -606,24 +670,32 @@ const Index = () => {
     const phaseKey = String(simulation.currentPhaseKey || '').trim();
 
     const phaseLabelAr: Record<string, string> = {
-      intake: 'التهيئة',
-      research_digest: 'تلخيص الأدلة',
-      agent_init: 'تهيئة الوكلاء',
+      intake: 'الآراء الفردية',
+      search_bootstrap: 'الآراء الفردية',
+      evidence_map: 'الآراء الفردية',
+      research_digest: 'الآراء الفردية',
+      agent_init: 'الآراء الفردية',
+      debate: 'النقاش',
       deliberation: 'النقاش',
       convergence: 'تقليل الحياد',
-      verdict: 'الحسم',
-      summary: 'الملخص',
-      completed: 'اكتمل',
+      resolution: 'التقارب النهائي',
+      verdict: 'التقارب النهائي',
+      summary: 'التقارب النهائي',
+      completed: 'التقارب النهائي',
     };
     const phaseLabelEn: Record<string, string> = {
-      intake: 'Intake',
-      research_digest: 'Research digest',
-      agent_init: 'Agent init',
-      deliberation: 'Deliberation',
-      convergence: 'Convergence',
-      verdict: 'Verdict',
-      summary: 'Summary',
-      completed: 'Completed',
+      intake: 'Individual Opinions',
+      search_bootstrap: 'Individual Opinions',
+      evidence_map: 'Individual Opinions',
+      research_digest: 'Individual Opinions',
+      agent_init: 'Individual Opinions',
+      debate: 'Discussion',
+      deliberation: 'Discussion',
+      convergence: 'Neutrality Reduction',
+      resolution: 'Final Convergence',
+      verdict: 'Final Convergence',
+      summary: 'Final Convergence',
+      completed: 'Final Convergence',
     };
     const phaseLabel = settings.language === 'ar'
       ? (phaseLabelAr[phaseKey] || phaseKey || 'مرحلة')
@@ -756,27 +828,75 @@ const Index = () => {
   }), [settings.language]);
 
   const preflightContextKey = useMemo(() => computePreflightKey(userInput), [computePreflightKey, userInput]);
+  const researchGateKey = useMemo(() => JSON.stringify({
+    idea: userInput.idea.trim(),
+    category: userInput.category || DEFAULT_CATEGORY,
+    targetAudience: [...userInput.targetAudience].sort(),
+    goals: [...userInput.goals].sort(),
+    country: userInput.country.trim(),
+    city: userInput.city.trim(),
+    language: settings.language,
+  }), [settings.language, userInput]);
+  const startChoiceKey = useMemo(
+    () => `${preflightContextKey}|${researchGateKey}|${(userInput.agentCount ?? 20)}`,
+    [preflightContextKey, researchGateKey, userInput.agentCount],
+  );
 
   useEffect(() => {
     if (preflightResolvedKeyRef.current === preflightContextKey) return;
     preflightStartPayloadRef.current = null;
+    preflightConfirmedKeyRef.current = '';
     setPendingPreflightQuestion(null);
+    setPendingIdeaConfirmation(null);
     setPreflightRound(0);
     setPreflightMaxRounds(3);
     setPreflightClarityScore(0);
     setPreflightMissingAxes([]);
     setPreflightHistory([]);
+    setUnderstandingQueue([]);
+    setUnderstandingAnswers([]);
     setPreflightNormalizedContext(null);
     setPreflightSummary('');
+    understandingAttemptRef.current = '';
   }, [preflightContextKey]);
 
-  const mapPreflightQuestion = useCallback((question: SimulationPreflightNextResponse['question']): PreflightQuestion | null => {
+  useEffect(() => {
+    if (!lastResearchGateKeyRef.current) {
+      lastResearchGateKeyRef.current = researchGateKey;
+      return;
+    }
+    if (lastResearchGateKeyRef.current === researchGateKey) return;
+    lastResearchGateKeyRef.current = researchGateKey;
+    researchReviewedKeyRef.current = '';
+    setPendingResearchReview(false);
+  }, [researchGateKey]);
+
+  useEffect(() => {
+    if (startChoiceResolvedKeyRef.current === startChoiceKey) return;
+    setStartChoiceModalOpen(false);
+    setSelectedStartPath(null);
+    setShowSocietyBuilder(false);
+  }, [startChoiceKey]);
+
+  useEffect(() => {
+    if (!startChoiceModalOpen || societyCatalog) return;
+    let active = true;
+    apiService.getSocietyCatalog()
+      .then((catalog) => {
+        if (!active) return;
+        setSocietyCatalog(catalog);
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [societyCatalog, startChoiceModalOpen]);
+
+  const mapPreflightQuestion = useCallback((question: SimulationPreflightNextResponse['question'] | Record<string, unknown> | null): PreflightQuestion | null => {
     if (!question || typeof question !== 'object') return null;
-    const questionId = String(question.question_id || '').trim();
-    const text = String(question.question || '').trim();
+    const questionId = String((question as any).question_id || (question as any).id || '').trim();
+    const text = String((question as any).question || '').trim();
     if (!questionId || !text) return null;
-    const options = Array.isArray(question.options)
-      ? question.options
+    const options = Array.isArray((question as any).options)
+      ? (question as any).options
           .map((item, idx) => ({
             id: String(item?.id || `opt_${idx + 1}`).trim(),
             label: String(item?.label || '').trim(),
@@ -787,16 +907,16 @@ const Index = () => {
     if (options.length < 3) return null;
     return {
       questionId,
-      axis: String(question.axis || '').trim() || 'decision_axis',
+      axis: String((question as any).axis || '').trim() || 'decision_axis',
       question: text,
       options,
-      reasonSummary: question.reason_summary ? String(question.reason_summary).trim() : undefined,
+      reasonSummary: (question as any).reason_summary ? String((question as any).reason_summary).trim() : undefined,
       required: true,
-      questionQuality: question.question_quality
+      questionQuality: (question as any).question_quality
         ? {
-            score: typeof question.question_quality.score === 'number' ? question.question_quality.score : undefined,
-            checksPassed: Array.isArray(question.question_quality.checks_passed)
-              ? question.question_quality.checks_passed.map((item) => String(item || '').trim()).filter(Boolean)
+            score: typeof (question as any).question_quality.score === 'number' ? (question as any).question_quality.score : undefined,
+            checksPassed: Array.isArray((question as any).question_quality.checks_passed)
+              ? (question as any).question_quality.checks_passed.map((item: unknown) => String(item || '').trim()).filter(Boolean)
               : undefined,
           }
         : null,
@@ -821,36 +941,6 @@ const Index = () => {
       : {},
   }), [preflightNormalizedContext]);
 
-  const finalizePreflight = useCallback(async (
-    normalizedContext: Record<string, unknown>,
-    history: Array<Record<string, unknown>>,
-    contextKey: string,
-  ) => {
-    const final = await apiService.simulationPreflightFinalize({
-      normalized_context: normalizedContext,
-      history,
-      language: settings.language,
-    });
-    const payload = {
-      preflight_ready: true,
-      preflight_summary: String(final.preflight_summary || '').trim(),
-      preflight_answers: (final.preflight_answers && typeof final.preflight_answers === 'object')
-        ? final.preflight_answers
-        : {},
-      preflight_clarity_score: Number(final.preflight_clarity_score || 0),
-      preflight_assumptions: Array.isArray(final.assumptions)
-        ? final.assumptions.map((item) => String(item || '').trim()).filter(Boolean)
-        : [],
-    };
-    preflightStartPayloadRef.current = payload;
-    preflightResolvedKeyRef.current = contextKey;
-    setPreflightSummary(payload.preflight_summary);
-    setPendingPreflightQuestion(null);
-    setPreflightMissingAxes(Array.isArray(final.missing_axes) ? final.missing_axes.map((item) => String(item || '').trim()) : []);
-    setPreflightClarityScore(payload.preflight_clarity_score);
-    return payload;
-  }, [settings.language]);
-
   const runPreflightGate = useCallback(async (answer?: {
     questionId: string;
     selectedOptionId?: string;
@@ -858,58 +948,138 @@ const Index = () => {
   }, inputOverride?: UserInput): Promise<boolean> => {
     const draftInput = inputOverride || userInput;
     const draftKey = computePreflightKey(draftInput);
-    if (preflightResolvedKeyRef.current === draftKey && preflightStartPayloadRef.current) {
+    if (preflightResolvedKeyRef.current === draftKey && preflightStartPayloadRef.current && preflightConfirmedKeyRef.current === draftKey) {
       return true;
     }
+    if (!answer && pendingPreflightQuestion) return false;
     if (preflightBusy) return false;
 
     setPreflightBusy(true);
     try {
-      const response = await apiService.simulationPreflightNext({
-        draft_context: buildPreflightDraftContext(draftInput),
-        history: preflightHistory,
-        answer: answer
-          ? {
-              question_id: answer.questionId,
-              selected_option_id: answer.selectedOptionId,
-              custom_text: answer.customText,
-            }
-          : undefined,
-        language: settings.language,
-      });
-
-      const nextHistory = Array.isArray(response.history)
-        ? response.history
-        : preflightHistory;
-      const nextContext = (response.normalized_context && typeof response.normalized_context === 'object')
-        ? response.normalized_context
-        : buildPreflightDraftContext(draftInput);
-
-      setPreflightRound(Number(response.round || 0));
-      setPreflightMaxRounds(Number(response.max_rounds || 3));
-      setPreflightClarityScore(Number(response.clarity_score || 0));
-      setPreflightMissingAxes(Array.isArray(response.missing_axes) ? response.missing_axes.map((item) => String(item || '').trim()) : []);
-      setPreflightHistory(nextHistory);
-      setPreflightNormalizedContext(nextContext);
-
-      if (response.ready) {
-        const finalPayload = await finalizePreflight(nextContext, nextHistory, draftKey);
-        if (finalPayload.preflight_summary) {
-          addSystemMessage(finalPayload.preflight_summary);
+      const draftContext = buildPreflightDraftContext(draftInput);
+      if (!answer) {
+        preflightStartPayloadRef.current = null;
+        preflightResolvedKeyRef.current = '';
+        preflightConfirmedKeyRef.current = '';
+        setPendingIdeaConfirmation(null);
+        understandingAttemptRef.current = `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+        const analysis = await apiService.analyzeIdeaUnderstanding({
+          idea: draftContext.idea,
+          attempt_id: understandingAttemptRef.current,
+          context: {
+            category: draftContext.category,
+            target_audience: draftContext.target_audience,
+            goals: draftContext.goals,
+            country: draftContext.country,
+            city: draftContext.city,
+            idea_maturity: draftContext.idea_maturity,
+            risk_appetite: draftContext.risk_appetite,
+            language: settings.language,
+          },
+        });
+        setPreflightRound(analysis.clear_enough ? 0 : 1);
+        setPreflightMaxRounds(Math.max(1, (analysis.questions || []).length || 1));
+        setPreflightClarityScore(Number(analysis.clarity_score || 0));
+        setPreflightMissingAxes(Array.isArray(analysis.missing_axes) ? analysis.missing_axes.map((item) => String(item || '').trim()) : []);
+        setPreflightNormalizedContext(draftContext);
+        if (analysis.clear_enough) {
+          const payload = {
+            preflight_ready: true,
+            preflight_summary: String(analysis.summary || '').trim(),
+            preferred_idea_description: String(analysis.preferred_idea_description || analysis.summary || '').trim(),
+            preflight_answers: {},
+            preflight_clarity_score: Number(analysis.clarity_score || 0),
+            preflight_assumptions: [],
+          };
+          preflightStartPayloadRef.current = payload;
+          preflightResolvedKeyRef.current = draftKey;
+          preflightConfirmedKeyRef.current = '';
+          setPendingPreflightQuestion(null);
+          setPendingIdeaConfirmation({
+            description: payload.preferred_idea_description || payload.preflight_summary,
+            summary: payload.preflight_summary,
+            clarityScore: payload.preflight_clarity_score,
+          });
+          return false;
         }
-        return true;
-      }
-
-      const mappedQuestion = mapPreflightQuestion(response.question || null);
-      if (!mappedQuestion) {
-        addSystemMessage(
-          settings.language === 'ar'
-            ? 'تعذر توليد سؤال توضيح مناسب. حاول مرة أخرى.'
-            : 'Unable to generate a valid clarification question. Please try again.'
-        );
+        const mappedQuestions = (analysis.questions || [])
+          .map((question) => mapPreflightQuestion(question as Record<string, unknown>))
+          .filter((question): question is PreflightQuestion => Boolean(question));
+        if (!mappedQuestions.length) {
+          addSystemMessage(
+            settings.language === 'ar'
+              ? 'تعذر توليد أسئلة توضيح مناسبة. حاول مرة أخرى.'
+              : 'Unable to generate valid clarification questions. Please try again.'
+          );
+          return false;
+        }
+        setUnderstandingAnswers([]);
+        setUnderstandingQueue(mappedQuestions.slice(1));
+        setPendingPreflightQuestion(mappedQuestions[0]);
+        setPendingIdeaConfirmation(null);
         return false;
       }
-      setPendingPreflightQuestion(mappedQuestion);
+
+      const currentAnswer = {
+        questionId: answer.questionId,
+        axis: pendingPreflightQuestion?.axis || 'decision_axis',
+        selectedOptionId: answer.selectedOptionId,
+        customText: answer.customText,
+      };
+      const accumulatedAnswers = [...understandingAnswers, currentAnswer];
+      if (understandingQueue.length > 0) {
+        const [nextQuestion, ...restQueue] = understandingQueue;
+        setUnderstandingAnswers(accumulatedAnswers);
+        setUnderstandingQueue(restQueue);
+        setPendingPreflightQuestion(nextQuestion);
+        setPreflightRound((prev) => Math.max(prev + 1, accumulatedAnswers.length + 1));
+        return false;
+      }
+
+      const submit = await apiService.submitIdeaUnderstanding({
+        draft_context: draftContext,
+        answers: accumulatedAnswers.map((item) => ({
+          question_id: item.questionId,
+          axis: item.axis,
+          selected_option_id: item.selectedOptionId,
+          selected_option_ids: item.selectedOptionId ? [item.selectedOptionId] : undefined,
+          custom_text: item.customText,
+        })),
+        language: settings.language,
+      });
+      const payload = {
+        preflight_ready: true,
+        preflight_summary: String(submit.summary || '').trim(),
+        preferred_idea_description: String(submit.preferred_idea_description || submit.summary || '').trim(),
+        preflight_answers: (submit.preflight_answers && typeof submit.preflight_answers === 'object')
+          ? submit.preflight_answers
+          : {},
+        preflight_clarity_score: Number(submit.preflight_clarity_score || 0),
+        preflight_assumptions: Array.isArray(submit.assumptions)
+          ? submit.assumptions.map((item) => String(item || '').trim()).filter(Boolean)
+          : [],
+      };
+      preflightStartPayloadRef.current = payload;
+      preflightResolvedKeyRef.current = draftKey;
+      preflightConfirmedKeyRef.current = '';
+      setPreflightSummary(payload.preflight_summary);
+      setUnderstandingQueue([]);
+      setUnderstandingAnswers([]);
+      setPendingPreflightQuestion(null);
+      setPendingIdeaConfirmation({
+        description: payload.preferred_idea_description || payload.preflight_summary,
+        summary: payload.preflight_summary,
+        clarityScore: payload.preflight_clarity_score,
+      });
+      setPreflightMissingAxes(Array.isArray(submit.missing_axes) ? submit.missing_axes.map((item) => String(item || '').trim()) : []);
+      setPreflightClarityScore(payload.preflight_clarity_score);
+      setPreflightHistory([
+        ...accumulatedAnswers.map((item) => ({
+          question_id: item.questionId,
+          axis: item.axis,
+          answer: item.customText || item.selectedOptionId || '',
+        })),
+      ]);
       return false;
     } catch (err: unknown) {
       const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
@@ -926,10 +1096,12 @@ const Index = () => {
     addSystemMessage,
     buildPreflightDraftContext,
     computePreflightKey,
-    finalizePreflight,
     mapPreflightQuestion,
+    pendingPreflightQuestion?.axis,
     preflightBusy,
     preflightHistory,
+    understandingAnswers,
+    understandingQueue,
     settings.language,
     userInput,
   ]);
@@ -958,6 +1130,41 @@ const Index = () => {
       language: settings.language,
       speed: simulationSpeed,
       agentCount: input.agentCount,
+      society_mode: selectedStartPath === 'custom_build' ? 'custom' : 'default',
+      start_path: selectedStartPath === 'custom_build' ? 'build_custom' : 'start_default',
+      society_custom_spec: selectedStartPath === 'custom_build'
+        ? {
+            profile_name: settings.language === 'ar' ? 'مجتمع مخصص' : 'Custom society',
+            agent_count: input.agentCount ?? 20,
+            distribution: {
+              skeptic_ratio: Math.max(0, Math.min(100, societyControls.skepticRatio)),
+              optimist_ratio: Math.max(0, Math.min(100, 100 - societyControls.skepticRatio)),
+              pragmatic_ratio: Math.max(0, Math.min(100, societyControls.diversity)),
+              policy_guard_ratio: Math.max(0, Math.min(100, societyControls.strictPolicy ? 35 : 15)),
+            },
+            controls: {
+              diversity: societyControls.diversity,
+              innovation_bias: societyControls.innovationBias,
+              risk_sensitivity: 100 - Math.max(0, Math.min(100, input.riskAppetite ?? 50)),
+              strict_policy: societyControls.strictPolicy,
+              human_debate_style: societyControls.humanDebate,
+              persona_hint: societyControls.personaHint.trim(),
+            },
+          }
+        : undefined,
+      seed_context: {
+        society_mode: selectedStartPath === 'custom_build' ? 'custom' : 'default',
+        society_controls: selectedStartPath === 'custom_build'
+          ? {
+              diversity: societyControls.diversity,
+              skeptic_ratio: societyControls.skepticRatio,
+              innovation_bias: societyControls.innovationBias,
+              strict_policy: societyControls.strictPolicy,
+              human_debate: societyControls.humanDebate,
+              persona_hint: societyControls.personaHint.trim(),
+            }
+          : {},
+      },
     };
     if (preflightPayload) {
       payload.preflight_ready = preflightPayload.preflight_ready;
@@ -967,7 +1174,7 @@ const Index = () => {
       payload.preflight_assumptions = preflightPayload.preflight_assumptions;
     }
     return payload;
-  }, [preflightContextKey, researchContext, researchIdea, settings.language, simulationSpeed]);
+  }, [preflightContextKey, researchContext, researchIdea, settings.language, simulationSpeed, selectedStartPath, societyControls]);
 
   const getMissingForStart = useCallback((input: UserInput, overrideChoice?: 'yes' | 'no' | null) => {
     const missing: string[] = [];
@@ -1167,11 +1374,67 @@ const Index = () => {
     const preflightReady = await runPreflightGate();
     if (!preflightReady) {
       setActivePanel('chat');
+      const waitingIdeaConfirmation = Boolean(
+        preflightStartPayloadRef.current
+        && preflightConfirmedKeyRef.current !== preflightContextKey
+      );
       if (pendingPreflightQuestion) return;
+      if (waitingIdeaConfirmation || pendingIdeaConfirmation) {
+        addSystemMessage(
+          settings.language === 'ar'
+            ? 'راجع وصف الفكرة المقترح ثم اضغط تأكيد الوصف قبل بدء التنفيذ.'
+            : 'Review the proposed idea description, then confirm it before execution.'
+        );
+        return;
+      }
       addSystemMessage(
         settings.language === 'ar'
           ? 'قبل التشغيل نحتاج توضيح سريع لبعض النقاط الأساسية.'
           : 'Before execution, we need a quick clarification on key decisions.'
+      );
+      return;
+    }
+
+    const ideaQuery = userInput.idea.trim();
+    const hasCurrentResearchData = Boolean(
+      researchContext.summary
+      || researchContext.sources.length > 0
+      || researchContext.structured
+    );
+    const hasSearchForCurrentIdea = (
+      searchState.status === 'complete'
+      && researchIdea === ideaQuery
+      && hasCurrentResearchData
+    );
+    const researchReviewed = researchReviewedKeyRef.current === researchGateKey;
+
+    if (!researchReviewed) {
+      if (!hasSearchForCurrentIdea) {
+        const result = await runSearch(ideaQuery, SEARCH_TIMEOUT_BASE_MS, { promptOnTimeout: true });
+        if (result.status !== 'complete') {
+          setActivePanel('chat');
+          return;
+        }
+      }
+      if (!pendingResearchReview) {
+        setPendingResearchReview(true);
+        setActivePanel('chat');
+        addSystemMessage(
+          settings.language === 'ar'
+            ? 'أجريت بحثًا خفيفًا لربط المحاكاة ببيانات واقعية. هل أبدأ المحاكاة الآن بناءً على هذه النتائج؟'
+            : 'I ran a light research pass to ground the simulation in real signals. Should I start the simulation now based on these findings?'
+        );
+      }
+      return;
+    }
+
+    if (startChoiceResolvedKeyRef.current !== startChoiceKey) {
+      setStartChoiceModalOpen(true);
+      setActivePanel('config');
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'اختر طريقة التشغيل: استعراض المجتمع الحالي، بناء مجتمعك، أو البدء بالمجتمع الافتراضي.'
+          : 'Choose run mode: inspect current society, build your own, or start with default society.'
       );
       return;
     }
@@ -1203,7 +1466,35 @@ const Index = () => {
     }
     try {
       addSystemMessage(settings.language === 'ar' ? 'بدء المحاكاة...' : 'Starting simulation...');
-      await simulation.startSimulation(buildConfig(userInput), { throwOnError: true });
+      const config = buildConfig(userInput);
+      if (selectedStartPath === 'custom_build') {
+        try {
+          const built = await apiService.buildCustomSociety({
+            profile_name: settings.language === 'ar' ? 'مجتمع مخصص' : 'Custom society',
+            agent_count: userInput.agentCount ?? 20,
+            distribution: {
+              skeptic_ratio: Math.max(0, Math.min(100, societyControls.skepticRatio)),
+              optimist_ratio: Math.max(0, Math.min(100, 100 - societyControls.skepticRatio)),
+              pragmatic_ratio: Math.max(0, Math.min(100, societyControls.diversity)),
+              policy_guard_ratio: Math.max(0, Math.min(100, societyControls.strictPolicy ? 35 : 15)),
+            },
+            controls: {
+              diversity: societyControls.diversity,
+              innovation_bias: societyControls.innovationBias,
+              risk_sensitivity: 100 - Math.max(0, Math.min(100, userInput.riskAppetite ?? 50)),
+              strict_policy: societyControls.strictPolicy,
+              human_debate_style: societyControls.humanDebate,
+              persona_hint: societyControls.personaHint.trim(),
+            },
+          });
+          config.society_profile_id = built.society_profile_id;
+        } catch {
+          // Custom profile build is best-effort; simulation can still start with inline custom spec.
+        }
+      }
+      await simulation.startSimulation(config, { throwOnError: true });
+      researchReviewedKeyRef.current = '';
+      setPendingResearchReview(false);
       void apiService.getMe().then((me) => {
         setMeSnapshot(me);
         if (!isCreditsBlocked(me)) {
@@ -1257,8 +1548,22 @@ const Index = () => {
     hasStarted,
     isCreditsBlocked,
     meSnapshot,
+    pendingIdeaConfirmation,
+    pendingPreflightQuestion,
+    pendingResearchReview,
     promptForMissing,
+    preflightContextKey,
+    researchContext.sources.length,
+    researchContext.structured,
+    researchContext.summary,
+    researchGateKey,
+    researchIdea,
+    runPreflightGate,
+    searchState.status,
+    selectedStartPath,
     settings.language,
+    societyControls,
+    startChoiceKey,
     simulation,
     userInput,
   ]);
@@ -1368,14 +1673,122 @@ const Index = () => {
   }) => {
     if (preflightBusy) return;
     const ready = await runPreflightGate(payload);
-    if (!ready) return;
+    if (ready) {
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'تم حفظ توضيحات ما قبل البدء. جاري تشغيل المحاكاة.'
+          : 'Pre-start clarifications saved. Starting simulation now.'
+      );
+      await handleStart();
+      return;
+    }
+    if (preflightStartPayloadRef.current && preflightConfirmedKeyRef.current !== preflightContextKey) {
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'راجع وصف الفكرة المقترح واضغط تأكيد الوصف للانتقال للبحث.'
+          : 'Review the proposed idea description and confirm it to proceed to research.'
+      );
+    }
+  }, [addSystemMessage, handleStart, preflightBusy, preflightContextKey, runPreflightGate, settings.language]);
+
+  const handleConfirmPreflightIdea = useCallback(async () => {
+    if (!preflightStartPayloadRef.current) return;
+    preflightConfirmedKeyRef.current = preflightContextKey;
+    setPendingIdeaConfirmation(null);
     addSystemMessage(
       settings.language === 'ar'
-        ? 'تم حفظ توضيحات ما قبل البدء. جاري تشغيل المحاكاة.'
-        : 'Pre-start clarifications saved. Starting simulation now.'
+        ? 'تم تأكيد وصف الفكرة. سنبدأ التنفيذ الآن.'
+        : 'Idea description confirmed. Starting execution now.'
     );
     await handleStart();
-  }, [addSystemMessage, handleStart, preflightBusy, runPreflightGate, settings.language]);
+  }, [addSystemMessage, handleStart, preflightContextKey, settings.language]);
+
+  const handleOpenStartChoice = useCallback(() => {
+    setStartChoiceModalOpen(true);
+    setActivePanel('config');
+  }, []);
+
+  const handleSelectStartPath = useCallback((path: 'inspect_default' | 'build_custom' | 'start_default') => {
+    if (path === 'inspect_default') {
+      setStartChoiceModalOpen(false);
+      setShowSocietyBuilder(false);
+      setSelectedStartPath(null);
+      setActivePanel('config');
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'يمكنك الآن استعراض المجتمع الافتراضي. عندما تصبح جاهزًا، اختر طريقة التشغيل.'
+          : 'You can inspect the default society now. Choose the run path when ready.'
+      );
+      return;
+    }
+
+    if (path === 'build_custom') {
+      startChoiceResolvedKeyRef.current = startChoiceKey;
+      setStartChoiceModalOpen(false);
+      setShowSocietyBuilder(true);
+      setSelectedStartPath('custom_build');
+      setActivePanel('config');
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'فعّلت وضع بناء المجتمع المخصص. عدّل الإعدادات ثم ابدأ المحاكاة.'
+          : 'Custom society builder enabled. Adjust settings, then start simulation.'
+      );
+      return;
+    }
+
+    startChoiceResolvedKeyRef.current = startChoiceKey;
+    setStartChoiceModalOpen(false);
+    setShowSocietyBuilder(false);
+    setSelectedStartPath('default_start');
+    setActivePanel('chat');
+    addSystemMessage(
+      settings.language === 'ar'
+        ? 'تم اختيار التشغيل بالمجتمع الافتراضي.'
+        : 'Default society start selected.'
+    );
+    void handleStart();
+  }, [addSystemMessage, handleStart, settings.language, startChoiceKey]);
+
+  const handleAskSocietyAssistant = useCallback(async (question: string) => {
+    if (!question.trim() || societyAssistantBusy) return;
+    setSocietyAssistantBusy(true);
+    try {
+      const response = await apiService.askSocietyAssistant({
+        question: question.trim(),
+        spec: {
+          agent_count: userInput.agentCount ?? 20,
+          controls: {
+            diversity: societyControls.diversity,
+            skeptic_ratio: societyControls.skepticRatio,
+            innovation_bias: societyControls.innovationBias,
+            strict_policy: societyControls.strictPolicy,
+            human_debate: societyControls.humanDebate,
+            persona_hint: societyControls.personaHint.trim(),
+          },
+        },
+        language: settings.language,
+      });
+      setSocietyAssistantAnswer(String(response.answer || '').trim());
+    } catch {
+      setSocietyAssistantAnswer(
+        settings.language === 'ar'
+          ? 'تعذر الحصول على اقتراح الآن. حاول مرة أخرى.'
+          : 'Unable to get a suggestion right now. Please try again.'
+      );
+    } finally {
+      setSocietyAssistantBusy(false);
+    }
+  }, [
+    settings.language,
+    societyAssistantBusy,
+    societyControls.diversity,
+    societyControls.humanDebate,
+    societyControls.innovationBias,
+    societyControls.personaHint,
+    societyControls.skepticRatio,
+    societyControls.strictPolicy,
+    userInput.agentCount,
+  ]);
 
   const handleSubmitResearchAction = useCallback(async (payload: {
     cycleId: string;
@@ -1387,14 +1800,23 @@ const Index = () => {
     if (!simulation.simulationId || researchReviewBusy) return;
     setResearchReviewBusy(true);
     try {
-      await simulation.submitResearchAction({
+      const response = await simulation.submitResearchAction({
         simulationId: simulation.simulationId,
         cycleId: payload.cycleId,
         action: payload.action,
         selectedUrlIds: payload.selectedUrlIds,
         addedUrls: payload.addedUrls,
         queryRefinement: payload.queryRefinement,
+        researchGateVersion: simulation.researchGateVersion ?? undefined,
       });
+      if (response && response.action_applied === false) {
+        addSystemMessage(
+          settings.language === 'ar'
+            ? 'تم تحديث الحالة تلقائيًا. الإجراء السابق أصبح غير مطلوب.'
+            : 'State was refreshed automatically. Previous review action is no longer needed.'
+        );
+        return;
+      }
       addSystemMessage(
         settings.language === 'ar'
           ? 'تم اعتماد إجراء البحث. جاري استكمال جمع الأدلة.'
@@ -1504,6 +1926,16 @@ const Index = () => {
     settings.language,
     simulation,
     userInput,
+    preflightContextKey,
+    pendingResearchReview,
+    pendingIdeaConfirmation,
+    pendingPreflightQuestion,
+    researchContext.summary,
+    researchContext.sources.length,
+    researchContext.structured,
+    researchGateKey,
+    researchIdea,
+    searchState.status,
   ]);
 
   const fetchFilteredAgents = useCallback(async (stance: 'accepted' | 'rejected' | 'neutral') => {
@@ -1853,7 +2285,7 @@ Required sections:
     }
   }, [addSystemMessage, escapeHtml, reportBusy, researchContext.summary, researchContext.structured, settings.language, simulation.summary, userInput.city, userInput.country, userInput.idea]);
 
-  const runSearch = useCallback(async (query: string, timeoutMs: number, options?: { promptOnTimeout?: boolean }) => {
+  async function runSearch(query: string, timeoutMs: number, options?: { promptOnTimeout?: boolean }) {
     const promptOnTimeout = options?.promptOnTimeout ?? true;
     searchAttemptRef.current += 1;
     const attempt = searchAttemptRef.current;
@@ -1863,12 +2295,25 @@ Required sections:
     try {
       const locationLabel = getSearchLocationLabel();
       const search = await Promise.race([
-        apiService.searchWeb(query, settings.language === 'ar' ? 'ar' : 'en', 5),
+        apiService.runPrestartResearch({
+          idea: query,
+          category: userInput.category || DEFAULT_CATEGORY,
+          country: userInput.country.trim(),
+          city: userInput.city.trim(),
+          language: settings.language === 'ar' ? 'ar' : 'en',
+        }),
         new Promise<SearchResponse>((_, reject) =>
           setTimeout(() => reject(new Error('Search timeout')), timeoutMs)
         ),
       ]);
-      const searchData = search as SearchResponse;
+      const searchData = search as (SearchResponse & {
+        summary?: string;
+        highlights?: string[];
+        gaps?: string[];
+      });
+      if (!searchData.answer && searchData.summary) {
+        searchData.answer = searchData.summary;
+      }
       const hasStructured =
         Boolean(searchData.structured?.summary)
         || Boolean(searchData.structured?.signals?.length)
@@ -1878,7 +2323,7 @@ Required sections:
         || Boolean(searchData.structured?.demand_level)
         || Boolean(searchData.structured?.price_sensitivity)
         || Boolean(searchData.structured?.regulatory_risk);
-      const hasAnswer = Boolean(searchData.answer?.trim());
+      const hasAnswer = Boolean(searchData.answer?.trim() || searchData.summary?.trim());
       if (!hasStructured && !hasAnswer) {
         setSearchState({
           status: 'timeout',
@@ -1905,17 +2350,19 @@ Required sections:
       setSearchState({
         status: 'complete',
         query,
-        answer: searchData.answer,
+          answer: searchData.answer || searchData.summary || '',
         provider: searchData.provider,
         isLive: searchData.is_live,
         results: searchData.results,
         timeoutMs,
         attempts: attempt,
       });
-      const summary = searchData.structured?.summary
+      const summary = searchData.summary
+        || searchData.structured?.summary
         || searchData.answer
-        || searchData.results.map((r) => r.snippet).filter(Boolean).slice(0, 3).join(' ');
-      setResearchContext({ summary, sources: searchData.results, structured: searchData.structured });
+        || (searchData.results || []).map((r) => r.snippet).filter(Boolean).slice(0, 3).join(' ');
+      const sources = Array.isArray(searchData.results) ? searchData.results : [];
+      setResearchContext({ summary, sources, structured: searchData.structured });
       const report = buildSearchSummary(searchData, locationLabel);
       if (report) {
         addSystemMessage(report);
@@ -1947,7 +2394,7 @@ Required sections:
     } finally {
       setIsConfigSearching(false);
     }
-  }, [addSystemMessage, buildSearchSummary, getSearchLocationLabel, getSearchTimeoutPrompt, settings.language, setSearchState, setResearchContext, setResearchIdea]);
+  }
 
 
   const handleConfigSubmit = useCallback(async () => {
@@ -1964,6 +2411,15 @@ Required sections:
 
     setPendingConfigReview(false);
     setPendingResearchReview(false);
+    // Always regenerate pre-start understanding questions on each fresh start attempt.
+    preflightStartPayloadRef.current = null;
+    preflightResolvedKeyRef.current = '';
+    preflightConfirmedKeyRef.current = '';
+    understandingAttemptRef.current = '';
+    setPendingPreflightQuestion(null);
+    setPendingIdeaConfirmation(null);
+    setUnderstandingQueue([]);
+    setUnderstandingAnswers([]);
     setActivePanel('chat');
     await handleStart();
   }, [getMissingForStart, handleStart, promptForMissing, userInput, setPendingConfigReview, setActivePanel]);
@@ -1982,11 +2438,44 @@ Required sections:
     }
   }, [handleStart, runSearch, searchState, userInput.idea]);
 
+  const handleStartAnywayAfterWeakResearch = useCallback(async () => {
+    const warningText = settings.language === 'ar'
+      ? 'جودة البحث الحالية أقل من الحد المطلوب، وقد تكون دقة المحاكاة أقل. هل تريد بدء المحاكاة رغم ذلك؟'
+      : 'Research quality is below threshold and simulation confidence may be lower. Start anyway?';
+    if (typeof window !== 'undefined' && !window.confirm(warningText)) {
+      return;
+    }
+    researchReviewedKeyRef.current = researchGateKey;
+    setPendingResearchReview(false);
+    addSystemMessage(
+      settings.language === 'ar'
+        ? 'تم تجاوز بوابة جودة البحث بتحذير صريح. سيتم بدء المحاكاة بالبيانات المتاحة.'
+        : 'Research gate was bypassed with warning confirmation. Starting with available evidence.'
+    );
+    await handleStart();
+  }, [addSystemMessage, handleStart, researchGateKey, settings.language]);
+
+  const handleRetryPrestartResearch = useCallback(async () => {
+    const query = userInput.idea.trim();
+    if (!query) return;
+    setPendingResearchReview(false);
+    const result = await runSearch(query, SEARCH_TIMEOUT_BASE_MS, { promptOnTimeout: true });
+    if (result.status === 'complete') {
+      setPendingResearchReview(true);
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'تم تحديث البحث المبدئي. هل أبدأ المحاكاة الآن؟'
+          : 'Prestart research was refreshed. Should I start simulation now?'
+      );
+    }
+  }, [addSystemMessage, runSearch, settings.language, userInput.idea]);
+
   const handleConfirmStart = useCallback(async () => {
     if (!pendingResearchReview) return;
+    researchReviewedKeyRef.current = researchGateKey;
     setPendingResearchReview(false);
     await handleStart();
-  }, [handleStart, pendingResearchReview]);
+  }, [handleStart, pendingResearchReview, researchGateKey]);
 
   const handleSendMessage = useCallback(
     (content: string, options?: { skipUserMessage?: boolean }) => {
@@ -1999,23 +2488,6 @@ Required sections:
 
       void (async () => {
         try {
-          if (pendingResearchReview) {
-            if (trimmed) {
-              const correctionPrefix = settings.language === 'ar' ? 'تصحيح المستخدم: ' : 'User correction: ';
-              const nextSummary = `${researchContext.summary ? `${researchContext.summary}\n` : ''}${correctionPrefix}${trimmed}`;
-              const nextStructured = researchContext.structured
-                ? { ...researchContext.structured, summary: nextSummary }
-                : { summary: nextSummary };
-              setResearchContext({ summary: nextSummary, sources: researchContext.sources, structured: nextStructured });
-              addSystemMessage(settings.language === 'ar'
-                ? 'تم تحديث البيانات بناءً على ملاحظتك.'
-                : 'Got it. I updated the data based on your note.');
-              addSystemMessage(settings.language === 'ar'
-                ? 'تحب أبدأ المحاكاة الآن ولا في تعديل إضافي؟'
-                : 'Start the simulation, or correct anything else?');
-            }
-            return;
-          }
           if (pendingConfigReview) {
             const lower = trimmed.toLowerCase();
             const confirm = ['yes', 'ok', 'okay', 'go', 'start', 'run', 'y', '\u062a\u0645', '\u062a\u0645\u0627\u0645', '\u0645\u0648\u0627\u0641\u0642', '\u0646\u0639\u0645', '\u0627\u0628\u062f\u0623', '\u0627\u0628\u062f\u0621'];
@@ -2302,6 +2774,7 @@ If rejection is about competition or location, suggest searching for a better lo
         getAssistantMessage,
         getMissingForStart,
         handleConfigSubmit,
+        handleConfirmStart,
         handleStart,
         pendingResearchReview,
         pendingConfigReview,
@@ -2492,6 +2965,7 @@ If rejection is about competition or location, suggest searching for a better lo
       simulation.simulationId
       && simulation.status === 'paused'
       && simulation.statusReason === 'paused_research_review'
+      && simulation.researchGate === 'runtime_review'
       && simulation.pendingResearchReview?.cycleId
     );
     if (!needsClarification && !needsResearchReview) return;
@@ -2499,6 +2973,7 @@ If rejection is about competition or location, suggest searching for a better lo
   }, [
     simulation.pendingClarification,
     simulation.pendingResearchReview,
+    simulation.researchGate,
     simulation.simulationId,
     simulation.status,
     simulation.statusReason,
@@ -2513,6 +2988,9 @@ If rejection is about competition or location, suggest searching for a better lo
   }, [settings.language, simulation.status, simulation.statusReason]);
 
   const hasProgress = simulation.metrics.currentIteration > 0 || simulation.reasoningFeed.length > 0;
+  const simulationActuallyStarted = simulation.metrics.currentIteration > 0
+    || simulation.metrics.totalAgents > 0
+    || simulation.reasoningFeed.length > 0;
   const isSummarizing = simulation.status === 'running'
     && hasProgress
     && !simulation.summary
@@ -2539,6 +3017,7 @@ If rejection is about competition or location, suggest searching for a better lo
     simulation.simulationId
     && simulation.status === 'paused'
     && simulation.statusReason === 'paused_research_review'
+    && simulation.researchGate === 'runtime_review'
     && simulation.pendingResearchReview?.cycleId
   );
   const clarificationBannerText = settings.language === 'ar'
@@ -2567,7 +3046,7 @@ If rejection is about competition or location, suggest searching for a better lo
   const primaryControl = useMemo(() => {
     const hasIdea = Boolean(userInput.idea.trim());
 
-    if (simulation.status === 'running') {
+    if (simulation.status === 'running' && simulationActuallyStarted) {
       return {
         key: 'pause_reasoning',
         label: settings.language === 'ar' ? 'إيقاف التفكير مؤقتًا' : 'Pause reasoning',
@@ -2577,6 +3056,18 @@ If rejection is about competition or location, suggest searching for a better lo
         tone: 'warning' as const,
         icon: 'pause' as const,
         onClick: () => { void handleManualPause(); },
+      };
+    }
+
+    if (simulation.status === 'running' && !simulationActuallyStarted) {
+      return {
+        key: 'starting',
+        label: settings.language === 'ar' ? 'جاري تجهيز المحاكاة...' : 'Preparing simulation...',
+        description: settings.language === 'ar' ? 'سيظهر زر الإيقاف بعد بداية التكرارات.' : 'Stop control appears after iterations begin.',
+        disabled: true,
+        busy: true,
+        tone: 'secondary' as const,
+        icon: 'sparkles' as const,
       };
     }
 
@@ -2639,50 +3130,68 @@ If rejection is about competition or location, suggest searching for a better lo
     if (searchState.status === 'timeout') {
       return {
         key: 'retry_search',
-        label: settings.language === 'ar' ? 'إعادة البحث' : 'Retry search',
-        description: settings.language === 'ar' ? 'سنحاول بمصادر إضافية قبل الإيقاف' : 'Try again with expanded source queries',
+        label: settings.language === 'ar' ? 'إعادة البحث' : 'Retry research',
+        description: settings.language === 'ar'
+          ? 'سيظهر بدء المحاكاة بعد بحث كافٍ أو بعد تجاوز التحذير.'
+          : 'Start simulation unlocks after sufficient research or warning-confirm bypass.',
         disabled: false,
         busy: false,
         tone: 'warning' as const,
         icon: 'retry' as const,
         onClick: () => { void handleSearchRetry(); },
+        secondary: {
+          label: settings.language === 'ar' ? 'ابدأ المحاكاة رغم ذلك' : 'Start anyway',
+          onClick: () => { void handleStartAnywayAfterWeakResearch(); },
+        },
       };
     }
 
     if (pendingConfigReview) {
       return {
         key: 'confirm_start',
-        label: settings.language === 'ar' ? 'تأكيد البيانات وبدء المحاكاة' : 'Confirm data and start',
-        description: settings.language === 'ar' ? 'سيبدأ البحث أولًا ثم التفكير' : 'Search starts first, then reasoning',
+        label: settings.language === 'ar' ? 'ابدأ البحث' : 'Run research',
+        description: settings.language === 'ar' ? 'سيتم تنفيذ البحث أولًا ثم ستظهر لك خطوة بدء المحاكاة' : 'Research runs first, then start simulation appears',
         disabled: isConfigSearching,
         busy: isConfigSearching,
         tone: 'primary' as const,
-        icon: 'play' as const,
+        icon: 'sparkles' as const,
         onClick: () => { void handleConfigSubmit(); },
+        secondary: {
+          label: settings.language === 'ar' ? 'تعديل' : 'Edit',
+          onClick: () => { setActivePanel('config'); },
+        },
       };
     }
 
     if (pendingResearchReview) {
       return {
         key: 'start_reasoning',
-        label: settings.language === 'ar' ? 'ابدأ المحاكاة الآن' : 'Start simulation now',
+        label: selectedStartPath === 'custom_build'
+          ? (settings.language === 'ar' ? 'ابدأ المحاكاة بالمجتمع المخصص' : 'Start with your custom society')
+          : (settings.language === 'ar' ? 'ابدأ المحاكاة الآن' : 'Start simulation now'),
         description: settings.language === 'ar' ? 'سيتم تشغيل مرحلة التفكير مباشرة' : 'Reasoning phase will begin now',
         disabled: false,
         busy: false,
-        tone: 'primary' as const,
+        tone: 'success' as const,
         icon: 'play' as const,
         onClick: () => { void handleConfirmStart(); },
+        secondary: {
+          label: settings.language === 'ar' ? 'إعادة البحث' : 'Retry research',
+          onClick: () => { void handleRetryPrestartResearch(); },
+        },
       };
     }
 
     return {
       key: 'start',
-      label: settings.language === 'ar' ? 'ابدأ المحاكاة' : 'Start simulation',
-      description: settings.language === 'ar' ? 'التحقق من البيانات ثم البحث ثم التفكير' : 'Validate data, run search, then reason',
+      label: selectedStartPath === 'custom_build'
+        ? (settings.language === 'ar' ? 'ابدأ البحث بالمجتمع المخصص' : 'Run research with your custom society')
+        : (settings.language === 'ar' ? 'ابدأ البحث' : 'Run research'),
+      description: settings.language === 'ar' ? 'ابدأ ببحث واقعي أولًا، ثم سنعرض زر بدء المحاكاة' : 'Start with real research first; start simulation comes next',
       disabled: !hasIdea,
       busy: false,
       tone: 'primary' as const,
-      icon: 'play' as const,
+      icon: 'sparkles' as const,
       onClick: () => { void handleConfigSubmit(); },
     };
   }, [
@@ -2691,6 +3200,8 @@ If rejection is about competition or location, suggest searching for a better lo
     handleConfirmStart,
     handleManualPause,
     handleManualResume,
+    handleStartAnywayAfterWeakResearch,
+    handleRetryPrestartResearch,
     handleSearchRetry,
     isClarificationPause,
     isResearchReviewPause,
@@ -2703,21 +3214,17 @@ If rejection is about competition or location, suggest searching for a better lo
     simulation.currentPhaseKey,
     resumeBusy,
     searchState.status,
+    selectedStartPath,
     settings.language,
     showResumeAction,
     simulation.simulationId,
     simulation.status,
     setActivePanel,
+    simulationActuallyStarted,
     userInput.idea,
   ]);
   const hasReasoningContent = simulation.reasoningFeed.length > 0;
   const isArabic = settings.language === 'ar';
-
-  useEffect(() => {
-    if (activePanel === 'reasoning' && !hasReasoningContent) {
-      setActivePanel('chat');
-    }
-  }, [activePanel, hasReasoningContent]);
 
   return (
     <div className="h-screen w-screen bg-background flex flex-col overflow-hidden">
@@ -2761,6 +3268,67 @@ If rejection is about competition or location, suggest searching for a better lo
           )}
         </div>
       )}
+      {startChoiceModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/55 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-2xl rounded-2xl border border-border/60 bg-background/95 shadow-2xl p-4 sm:p-5 space-y-4">
+            <div>
+              <h3 className="text-base sm:text-lg font-semibold text-foreground">
+                {settings.language === 'ar' ? 'كيف تريد تشغيل المحاكاة؟' : 'How would you like to run the simulation?'}
+              </h3>
+              <p className="text-xs sm:text-sm text-muted-foreground mt-1">
+                {settings.language === 'ar'
+                  ? 'اختر المسار المناسب قبل بدء التنفيذ.'
+                  : 'Choose a run path before execution starts.'}
+              </p>
+              {societyCatalog && (
+                <p className="text-[11px] sm:text-xs text-muted-foreground mt-2">
+                  {settings.language === 'ar'
+                    ? `المجتمع الحالي يحتوي ${societyCatalog.total_templates} قالب شخصية عبر ${societyCatalog.categories.length} فئات.`
+                    : `Current society has ${societyCatalog.total_templates} persona templates across ${societyCatalog.categories.length} categories.`}
+                </p>
+              )}
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <button
+                type="button"
+                onClick={() => handleSelectStartPath('inspect_default')}
+                className="rounded-xl border border-border/50 bg-secondary/25 hover:bg-secondary/40 p-3 text-start transition"
+              >
+                <div className="text-sm font-medium text-foreground">
+                  {settings.language === 'ar' ? 'استعرض المجتمع الحالي' : 'View current society'}
+                </div>
+                <div className="text-xs text-muted-foreground mt-1">
+                  {settings.language === 'ar' ? 'افتح الإعدادات وراجع المجتمع الافتراضي.' : 'Inspect default setup first.'}
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSelectStartPath('build_custom')}
+                className="rounded-xl border border-primary/40 bg-primary/10 hover:bg-primary/15 p-3 text-start transition"
+              >
+                <div className="text-sm font-medium text-foreground">
+                  {settings.language === 'ar' ? 'ابنِ مجتمعك الخاص' : 'Create your own society'}
+                </div>
+                <div className="text-xs text-muted-foreground mt-1">
+                  {settings.language === 'ar' ? 'فعّل لوحة التحكم المتقدمة وعدّل الشخصيات.' : 'Open advanced builder controls.'}
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSelectStartPath('start_default')}
+                className="rounded-xl border border-emerald-500/45 bg-emerald-500/10 hover:bg-emerald-500/15 p-3 text-start transition"
+              >
+                <div className="text-sm font-medium text-emerald-200">
+                  {settings.language === 'ar' ? 'ابدأ بالمجتمع الافتراضي' : 'Start with default society'}
+                </div>
+                <div className="text-xs text-emerald-100/80 mt-1">
+                  {settings.language === 'ar' ? 'ابدأ التنفيذ فورًا بالإعدادات الحالية.' : 'Run immediately with current defaults.'}
+                </div>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="flex-1 overflow-hidden min-h-0 p-3 md:p-4">
         <div className="h-full grid grid-cols-1 xl:grid-cols-[minmax(280px,26%)_minmax(0,1fr)_minmax(320px,30%)] gap-4 min-h-0">
           {isArabic ? (
@@ -2780,20 +3348,18 @@ If rejection is about competition or location, suggest searching for a better lo
                     >
                       {settings.language === 'ar' ? 'الدردشة' : 'Chat'}
                     </button>
-                    {hasReasoningContent && (
-                      <button
-                        type="button"
-                        onClick={() => setActivePanel('reasoning')}
-                        className={cn(
-                          'px-3 py-1.5 rounded-full text-xs font-medium transition',
-                          activePanel === 'reasoning'
-                            ? 'bg-primary text-primary-foreground'
-                            : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
-                        )}
-                      >
-                        {settings.language === 'ar' ? 'تفكير الوكلاء' : 'Reasoning'}
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => setActivePanel('reasoning')}
+                      className={cn(
+                        'px-3 py-1.5 rounded-full text-xs font-medium transition',
+                        activePanel === 'reasoning'
+                          ? 'bg-primary text-primary-foreground'
+                          : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
+                      )}
+                    >
+                      {settings.language === 'ar' ? 'تفكير الوكلاء' : 'Reasoning'}
+                    </button>
                     <button
                       type="button"
                       onClick={() => setActivePanel('config')}
@@ -2829,6 +3395,14 @@ If rejection is about competition or location, suggest searching for a better lo
                       missingFields={missingFields}
                       language={settings.language}
                       isSearching={isConfigSearching}
+                      showSocietyBuilder={showSocietyBuilder}
+                      onToggleSocietyBuilder={setShowSocietyBuilder}
+                      societyControls={societyControls}
+                      onSocietyControlsChange={(updates) => setSocietyControls((prev) => ({ ...prev, ...updates }))}
+                      onOpenStartChoice={handleOpenStartChoice}
+                      societyAssistantBusy={societyAssistantBusy}
+                      societyAssistantAnswer={societyAssistantAnswer}
+                      onAskSocietyAssistant={handleAskSocietyAssistant}
                     />
                   ) : (
                     <ChatPanel
@@ -2866,7 +3440,9 @@ If rejection is about competition or location, suggest searching for a better lo
                       preflightMaxRounds={preflightMaxRounds}
                       preflightBusy={preflightBusy}
                       onSubmitPreflight={handleSubmitPreflight}
-                      pendingResearchReview={simulation.pendingResearchReview}
+                      pendingIdeaConfirmation={pendingIdeaConfirmation}
+                      onConfirmIdeaForStart={handleConfirmPreflightIdea}
+                      pendingResearchReview={isResearchReviewPause ? simulation.pendingResearchReview : null}
                       researchReviewBusy={researchReviewBusy}
                       onSubmitResearchReviewAction={handleSubmitResearchAction}
                       postActionsEnabled={simulation.status === 'completed' && Boolean(simulation.simulationId)}
@@ -2953,20 +3529,18 @@ If rejection is about competition or location, suggest searching for a better lo
                     >
                       {settings.language === 'ar' ? 'الدردشة' : 'Chat'}
                     </button>
-                    {hasReasoningContent && (
-                      <button
-                        type="button"
-                        onClick={() => setActivePanel('reasoning')}
-                        className={cn(
-                          'px-3 py-1.5 rounded-full text-xs font-medium transition',
-                          activePanel === 'reasoning'
-                            ? 'bg-primary text-primary-foreground'
-                            : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
-                        )}
-                      >
-                        {settings.language === 'ar' ? 'تفكير الوكلاء' : 'Reasoning'}
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => setActivePanel('reasoning')}
+                      className={cn(
+                        'px-3 py-1.5 rounded-full text-xs font-medium transition',
+                        activePanel === 'reasoning'
+                          ? 'bg-primary text-primary-foreground'
+                          : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
+                      )}
+                    >
+                      {settings.language === 'ar' ? 'تفكير الوكلاء' : 'Reasoning'}
+                    </button>
                     <button
                       type="button"
                       onClick={() => setActivePanel('config')}
@@ -3002,6 +3576,14 @@ If rejection is about competition or location, suggest searching for a better lo
                       missingFields={missingFields}
                       language={settings.language}
                       isSearching={isConfigSearching}
+                      showSocietyBuilder={showSocietyBuilder}
+                      onToggleSocietyBuilder={setShowSocietyBuilder}
+                      societyControls={societyControls}
+                      onSocietyControlsChange={(updates) => setSocietyControls((prev) => ({ ...prev, ...updates }))}
+                      onOpenStartChoice={handleOpenStartChoice}
+                      societyAssistantBusy={societyAssistantBusy}
+                      societyAssistantAnswer={societyAssistantAnswer}
+                      onAskSocietyAssistant={handleAskSocietyAssistant}
                     />
                   ) : (
                     <ChatPanel
@@ -3039,7 +3621,9 @@ If rejection is about competition or location, suggest searching for a better lo
                       preflightMaxRounds={preflightMaxRounds}
                       preflightBusy={preflightBusy}
                       onSubmitPreflight={handleSubmitPreflight}
-                      pendingResearchReview={simulation.pendingResearchReview}
+                      pendingIdeaConfirmation={pendingIdeaConfirmation}
+                      onConfirmIdeaForStart={handleConfirmPreflightIdea}
+                      pendingResearchReview={isResearchReviewPause ? simulation.pendingResearchReview : null}
                       researchReviewBusy={researchReviewBusy}
                       onSubmitResearchReviewAction={handleSubmitResearchAction}
                       postActionsEnabled={simulation.status === 'completed' && Boolean(simulation.simulationId)}

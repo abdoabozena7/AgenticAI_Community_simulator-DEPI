@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import json
+import time
 from datetime import datetime
 import uuid
 from typing import Any, Dict, Optional, List
@@ -23,7 +24,7 @@ from fastapi import APIRouter, HTTPException, status, Header
 from ..core.dataset_loader import Dataset
 from ..core import auth as auth_core
 from ..simulation.engine import SimulationEngine, ClarificationNeeded
-from ..simulation.preflight import preflight_next, preflight_finalize
+from ..simulation.preflight import preflight_next, preflight_finalize, generate_axis_question
 from ..core.ollama_client import generate_ollama
 from ..core.context_store import save_context
 from ..core.web_search import search_web
@@ -35,12 +36,14 @@ import hashlib
 
 
 router = APIRouter(prefix="/simulation")
+society_router = APIRouter(prefix="/society")
 
 # Global dictionaries to track simulation tasks, results, and live state
 _simulation_tasks: Dict[str, asyncio.Task] = {}
 _simulation_results: Dict[str, Dict[str, Any]] = {}
 _simulation_state: Dict[str, Dict[str, Any]] = {}
 _simulation_pause_reasons: Dict[str, str] = {}
+_society_profiles: Dict[str, Dict[str, Any]] = {}
 _PAUSE_STATUS_REASONS = {
     "paused_manual",
     "interrupted",
@@ -52,6 +55,206 @@ _PAUSE_STATUS_REASONS = {
 
 # Reference to the loaded dataset (set in main module at startup)
 dataset: Optional[Dataset] = None
+
+_UNDERSTANDING_AXIS_ORDER = [
+    "value_proposition",
+    "target_segment",
+    "pricing_or_monetization",
+    "delivery_model",
+    "risk_boundary",
+]
+_understanding_questions: Dict[str, Dict[str, Any]] = {}
+_UNDERSTANDING_TTL_SECONDS = 60 * 60
+
+
+def _normalize_language(value: Any) -> str:
+    return "ar" if str(value or "en").strip().lower().startswith("ar") else "en"
+
+
+def _understanding_axis_label(axis: str, language: str) -> str:
+    labels = {
+        "value_proposition": {"ar": "القيمة الأساسية", "en": "Value proposition"},
+        "target_segment": {"ar": "الشريحة المستهدفة", "en": "Target segment"},
+        "pricing_or_monetization": {"ar": "التسعير/الإيراد", "en": "Pricing/monetization"},
+        "delivery_model": {"ar": "نموذج التنفيذ", "en": "Delivery model"},
+        "risk_boundary": {"ar": "حدود المخاطر", "en": "Risk boundary"},
+    }
+    row = labels.get(axis) or {}
+    return row.get(language) or row.get("en") or axis
+
+
+def _build_understanding_question(axis: str, language: str, idea: str) -> Dict[str, Any]:
+    idea_anchor = str(idea or "").strip() or ("الفكرة الحالية" if language == "ar" else "the current idea")
+    templates: Dict[str, Dict[str, Any]] = {
+        "value_proposition": {
+            "question_ar": f'ما القيمة الأولى التي يجب أن نثبتها في "{idea_anchor}" قبل التنفيذ؟',
+            "question_en": f'What is the first value promise we should lock for "{idea_anchor}" before execution?',
+            "options_ar": [
+                "توفير تكلفة مباشر قابل للقياس",
+                "رفع الجودة أو الدقة للمستخدم النهائي",
+                "تقليل المخاطر والامتثال كأولوية",
+            ],
+            "options_en": [
+                "Measurable direct cost savings",
+                "Clear end-user quality/accuracy improvement",
+                "Risk and compliance reduction first",
+            ],
+        },
+        "target_segment": {
+            "question_ar": f'من هو أول قطاع سنستهدفه في "{idea_anchor}"؟',
+            "question_en": f'Who is the first segment to target for "{idea_anchor}"?',
+            "options_ar": [
+                "شركات صغيرة ومتوسطة في Pilot محدود",
+                "مستخدمون أفراد في مدينة واحدة أولًا",
+                "شركات كبرى بعقود تجريبية",
+            ],
+            "options_en": [
+                "SMBs in a limited pilot",
+                "Consumers in one city first",
+                "Enterprise accounts via pilot contracts",
+            ],
+        },
+        "pricing_or_monetization": {
+            "question_ar": f'ما نموذج الإيراد الأنسب كبداية لفكرة "{idea_anchor}"؟',
+            "question_en": f'What initial monetization model best fits "{idea_anchor}"?',
+            "options_ar": [
+                "اشتراك شهري ثابت",
+                "الدفع حسب الاستخدام",
+                "Pilot مدفوع ثم عقد سنوي",
+            ],
+            "options_en": [
+                "Fixed monthly subscription",
+                "Usage-based pricing",
+                "Paid pilot then annual contract",
+            ],
+        },
+        "delivery_model": {
+            "question_ar": f'كيف سيتم تشغيل "{idea_anchor}" في النسخة الأولى عمليًا؟',
+            "question_en": f'How should "{idea_anchor}" be delivered in v1?',
+            "options_ar": [
+                "منصة SaaS سحابية بالكامل",
+                "خدمة مُدارة مع تشغيل يدوي جزئي",
+                "نموذج هجين بتكامل محدود أولًا",
+            ],
+            "options_en": [
+                "Fully cloud SaaS",
+                "Managed service with partial manual ops",
+                "Hybrid rollout with limited integration first",
+            ],
+        },
+        "risk_boundary": {
+            "question_ar": f'قبل إطلاق "{idea_anchor}"، ما الحد غير القابل للتجاوز في المخاطر؟',
+            "question_en": f'Before launching "{idea_anchor}", what risk boundary is non-negotiable?',
+            "options_ar": [
+                "لا استخدام لبيانات حساسة إطلاقًا",
+                "استخدام محدود بموافقة صريحة وتدقيق دوري",
+                "Pilot مغلق مع مراجعة بشرية كاملة",
+            ],
+            "options_en": [
+                "No sensitive data usage at all",
+                "Limited use with explicit consent and recurring audits",
+                "Closed pilot with full human oversight",
+            ],
+        },
+    }
+    template = templates.get(axis) or templates["value_proposition"]
+    options_seed = template["options_ar"] if language == "ar" else template["options_en"]
+    options = [
+        {"id": f"{axis}_opt_{idx + 1}", "label": str(text)}
+        for idx, text in enumerate(options_seed[:3])
+    ]
+    return {
+        "id": f"axis:{axis}",
+        "axis": axis,
+        "question": template["question_ar"] if language == "ar" else template["question_en"],
+        "options": options,
+        "required": True,
+    }
+
+
+def _prune_understanding_questions() -> None:
+    now_ts = datetime.utcnow().timestamp()
+    stale_ids = [
+        qid
+        for qid, payload in _understanding_questions.items()
+        if now_ts - float(payload.get("created_ts") or now_ts) > _UNDERSTANDING_TTL_SECONDS
+    ]
+    for qid in stale_ids:
+        _understanding_questions.pop(qid, None)
+
+
+def _remember_understanding_question(
+    *,
+    question_id: str,
+    axis: str,
+    question: str,
+    options: List[Dict[str, Any]],
+    user_id: Optional[int],
+    attempt_id: str,
+    generation_mode: str,
+    quality_score: Optional[float],
+) -> None:
+    _prune_understanding_questions()
+    _understanding_questions[question_id] = {
+        "axis": axis,
+        "question": question,
+        "options": options if isinstance(options, list) else [],
+        "user_id": int(user_id) if user_id is not None else None,
+        "attempt_id": attempt_id,
+        "generation_mode": generation_mode,
+        "quality_score": quality_score,
+        "created_ts": datetime.utcnow().timestamp(),
+    }
+
+
+def _lookup_understanding_question(question_id: str, user_id: Optional[int]) -> Optional[Dict[str, Any]]:
+    if not question_id:
+        return None
+    _prune_understanding_questions()
+    row = _understanding_questions.get(question_id)
+    if not row:
+        return None
+    owner_id = row.get("user_id")
+    if owner_id is not None and user_id is not None and int(owner_id) != int(user_id):
+        return None
+    return row
+
+
+def _extract_understanding_answer(raw: Dict[str, Any], questions_by_axis: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, str]]:
+    axis = str(raw.get("axis") or "").strip()
+    question_id = str(raw.get("question_id") or "").strip()
+    if not axis and question_id.startswith("axis:"):
+        axis = question_id.split(":", 1)[1].strip()
+    if axis not in _UNDERSTANDING_AXIS_ORDER:
+        return None
+    custom_text = str(raw.get("custom_text") or "").strip()
+    if custom_text:
+        return {"axis": axis, "answer": custom_text}
+
+    selected_ids_raw = raw.get("selected_option_ids")
+    selected_option_id = str(raw.get("selected_option_id") or "").strip()
+    selected_ids: List[str] = []
+    if isinstance(selected_ids_raw, list):
+        selected_ids = [str(item or "").strip() for item in selected_ids_raw if str(item or "").strip()]
+    elif selected_option_id:
+        selected_ids = [selected_option_id]
+
+    labels: List[str] = []
+    options = (questions_by_axis.get(axis) or {}).get("options")
+    if isinstance(options, list):
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            opt_id = str(option.get("id") or "").strip()
+            if opt_id and opt_id in selected_ids:
+                label = str(option.get("label") or "").strip()
+                if label:
+                    labels.append(label)
+    if not labels and selected_ids:
+        labels = selected_ids[:1]
+    if not labels:
+        return None
+    return {"axis": axis, "answer": " / ".join(labels[:2])}
 
 
 def _auth_required() -> bool:
@@ -289,6 +492,485 @@ async def simulation_preflight_finalize(payload: Dict[str, Any], authorization: 
         threshold=threshold,
     )
     return result
+
+
+@router.post("/understanding/analyze")
+async def simulation_understanding_analyze(payload: Dict[str, Any], authorization: str = Header(None)) -> Dict[str, Any]:
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if user and not auth_core.has_permission(user, "simulation:run"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+
+    idea = str(payload.get("idea") or "").strip()
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    language = _normalize_language((context or {}).get("language") or payload.get("language"))
+    try:
+        threshold = float(payload.get("threshold") if payload.get("threshold") is not None else os.getenv("SIM_PREFLIGHT_THRESHOLD", "0.78"))
+    except Exception:
+        threshold = 0.78
+    threshold = max(0.50, min(0.95, threshold))
+
+    draft_context = {
+        "idea": idea,
+        "category": str((context or {}).get("category") or "").strip(),
+        "target_audience": (context or {}).get("target_audience") if isinstance((context or {}).get("target_audience"), list) else [],
+        "goals": (context or {}).get("goals") if isinstance((context or {}).get("goals"), list) else [],
+        "country": str((context or {}).get("country") or "").strip(),
+        "city": str((context or {}).get("city") or "").strip(),
+        "idea_maturity": str((context or {}).get("idea_maturity") or "").strip(),
+        "risk_appetite": (context or {}).get("risk_appetite"),
+    }
+    if not draft_context["idea"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="idea is required")
+    attempt_id = str(payload.get("attempt_id") or uuid.uuid4().hex[:12]).strip()
+
+    final = preflight_finalize(
+        normalized_context=draft_context,
+        history=[],
+        language=language,
+        threshold=threshold,
+    )
+    missing_axes = [str(item or "").strip() for item in (final.get("missing_axes") or []) if str(item or "").strip()]
+    clear_enough = bool(final.get("preflight_ready"))
+    questions = []
+    questions_meta: List[Dict[str, Any]] = []
+    generated_modes: List[str] = []
+    user_id = int(user.get("id")) if user and user.get("id") is not None else None
+    if not clear_enough:
+        for axis in missing_axes[:3]:
+            generated = await generate_axis_question(
+                axis=axis,
+                language=language,
+                context=draft_context,
+                axis_answers={},
+            )
+            question_id = uuid.uuid4().hex[:12]
+            question_text = str(generated.get("question") or "").strip()
+            options = generated.get("options") if isinstance(generated.get("options"), list) else []
+            mode = str(generated.get("generation_mode") or "fallback")
+            quality = generated.get("question_quality") if isinstance(generated.get("question_quality"), dict) else {}
+            quality_score = float(quality.get("score") or 0.0) if quality else None
+            questions.append(
+                {
+                    "id": question_id,
+                    "axis": axis,
+                    "question": question_text,
+                    "options": options[:3],
+                    "required": True,
+                    "reason_summary": str(generated.get("reason_summary") or "").strip(),
+                    "question_quality": quality,
+                    "generation_mode": mode,
+                }
+            )
+            questions_meta.append(
+                {
+                    "axis": axis,
+                    "generation_mode": mode,
+                    "quality_score": quality_score,
+                }
+            )
+            generated_modes.append(mode)
+            _remember_understanding_question(
+                question_id=question_id,
+                axis=axis,
+                question=question_text,
+                options=options[:3],
+                user_id=user_id,
+                attempt_id=attempt_id,
+                generation_mode=mode,
+                quality_score=quality_score,
+            )
+    generation_mode = "llm" if not generated_modes or all(mode == "llm" for mode in generated_modes) else "fallback"
+
+    return {
+        "clear_enough": clear_enough,
+        "clarity_score": float(final.get("preflight_clarity_score") or 0.0),
+        "missing_axes": missing_axes,
+        "questions": questions,
+        "questions_meta": questions_meta,
+        "generation_mode": generation_mode,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "attempt_id": attempt_id,
+        "batch_required": True,
+        "preferred_idea_description": str(final.get("preferred_idea_description") or "").strip(),
+        "summary": str(final.get("preflight_summary") or "").strip(),
+    }
+
+
+@router.post("/understanding/submit")
+async def simulation_understanding_submit(payload: Dict[str, Any], authorization: str = Header(None)) -> Dict[str, Any]:
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if user and not auth_core.has_permission(user, "simulation:run"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+
+    answers = payload.get("answers")
+    if not isinstance(answers, list):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="answers array is required")
+
+    draft_context = payload.get("draft_context") if isinstance(payload.get("draft_context"), dict) else {}
+    if not draft_context:
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        draft_context = {
+            "idea": str(payload.get("idea") or context.get("idea") or "").strip(),
+            "category": str(context.get("category") or "").strip(),
+            "target_audience": context.get("target_audience") if isinstance(context.get("target_audience"), list) else [],
+            "goals": context.get("goals") if isinstance(context.get("goals"), list) else [],
+            "country": str(context.get("country") or "").strip(),
+            "city": str(context.get("city") or "").strip(),
+            "idea_maturity": str(context.get("idea_maturity") or "").strip(),
+            "risk_appetite": context.get("risk_appetite"),
+        }
+    language = _normalize_language(payload.get("language") or draft_context.get("language"))
+
+    if not str(draft_context.get("idea") or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="draft_context.idea is required")
+
+    user_id = int(user.get("id")) if user and user.get("id") is not None else None
+    history_rows: List[Dict[str, Any]] = []
+    axis_answers: Dict[str, str] = {}
+    unresolved_questions: List[Dict[str, Any]] = []
+    for item in answers:
+        if not isinstance(item, dict):
+            continue
+        question_id = str(item.get("question_id") or "").strip()
+        axis = str(item.get("axis") or "").strip()
+        stored_question = _lookup_understanding_question(question_id, user_id)
+        if not axis:
+            axis = str((stored_question or {}).get("axis") or "").strip()
+        if not axis and question_id.startswith("axis:"):
+            axis = question_id.split(":", 1)[1].strip()
+        if axis not in _UNDERSTANDING_AXIS_ORDER:
+            continue
+
+        custom_text = str(item.get("custom_text") or "").strip()
+        answer_text = custom_text
+        selected_option_id = str(item.get("selected_option_id") or "").strip()
+        selected_option_ids_raw = item.get("selected_option_ids")
+        selected_ids: List[str] = []
+        if isinstance(selected_option_ids_raw, list):
+            selected_ids = [str(val or "").strip() for val in selected_option_ids_raw if str(val or "").strip()]
+        elif selected_option_id:
+            selected_ids = [selected_option_id]
+
+        row_question = stored_question
+        if row_question is None and custom_text:
+            row_question = {
+                "id": question_id or f"axis:{axis}",
+                "axis": axis,
+                "question": _understanding_axis_label(axis, language),
+                "options": [],
+            }
+        if row_question is None and selected_ids:
+            unresolved_questions.append(
+                {
+                    "question_id": question_id or None,
+                    "axis": axis,
+                    "reason": "question_mapping_missing",
+                }
+            )
+            continue
+        if row_question is None:
+            continue
+        options = row_question.get("options") if isinstance(row_question.get("options"), list) else []
+        if not answer_text:
+            labels: List[str] = []
+            for option in options:
+                if not isinstance(option, dict):
+                    continue
+                opt_id = str(option.get("id") or "").strip()
+                if opt_id and opt_id in selected_ids:
+                    label = str(option.get("label") or option.get("text") or option.get("value") or "").strip()
+                    if label:
+                        labels.append(label)
+            if not labels and selected_ids:
+                labels = selected_ids[:1]
+            answer_text = " / ".join(labels[:2]).strip()
+
+        if not answer_text:
+            if selected_ids:
+                unresolved_questions.append(
+                    {
+                        "question_id": question_id or None,
+                        "axis": axis,
+                        "reason": "option_label_missing",
+                    }
+                )
+            continue
+        axis_answers[axis] = answer_text
+        history_rows.append(
+            {
+                "question_id": question_id or str(row_question.get("id") or f"axis:{axis}"),
+                "axis": axis,
+                "question": str(row_question.get("question") or _understanding_axis_label(axis, language)),
+                "answer": answer_text,
+                "options": options,
+            }
+        )
+
+    if unresolved_questions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "Understanding question mapping is stale. Please regenerate questions and submit again.",
+                "invalid_questions": unresolved_questions[:10],
+            },
+        )
+
+    normalized_context = dict(draft_context)
+    normalized_context["preflight_axis_answers"] = axis_answers
+    final = preflight_finalize(
+        normalized_context=normalized_context,
+        history=history_rows,
+        language=language,
+        threshold=max(0.50, min(0.95, float(payload.get("threshold") or os.getenv("SIM_PREFLIGHT_THRESHOLD", "0.78")))),
+    )
+    return {
+        "preferred_idea_description": str(final.get("preferred_idea_description") or "").strip(),
+        "summary": str(final.get("preflight_summary") or "").strip(),
+        "confirm_required": True,
+        "preflight_ready": bool(final.get("preflight_ready")),
+        "preflight_answers": final.get("preflight_answers") if isinstance(final.get("preflight_answers"), dict) else {},
+        "preflight_clarity_score": float(final.get("preflight_clarity_score") or 0.0),
+        "assumptions": final.get("assumptions") if isinstance(final.get("assumptions"), list) else [],
+        "missing_axes": final.get("missing_axes") if isinstance(final.get("missing_axes"), list) else [],
+        "custom_text_overrides": True,
+    }
+
+
+@router.post("/research/prestart")
+async def simulation_prestart_research(payload: Dict[str, Any], authorization: str = Header(None)) -> Dict[str, Any]:
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if user and not auth_core.has_permission(user, "simulation:run"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+
+    idea = str(payload.get("idea") or "").strip()
+    category = str(payload.get("category") or "").strip()
+    country = str(payload.get("country") or "").strip()
+    city = str(payload.get("city") or "").strip()
+    language = _normalize_language(payload.get("language"))
+    if not idea:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="idea is required")
+
+    query_parts = [idea]
+    if category:
+        query_parts.append(f"category {category}")
+    if city or country:
+        query_parts.append(f"in {', '.join([part for part in [city, country] if part])}")
+    query = " ".join(part for part in query_parts if part).strip()
+
+    result = await search_web(query=query, max_results=6, language=language, strict_web_only=True)
+    structured = result.get("structured") if isinstance(result.get("structured"), dict) else {}
+    summary = str(structured.get("summary") or result.get("answer") or "").strip()
+    rows = result.get("results") if isinstance(result.get("results"), list) else []
+    highlights: List[str] = []
+    if isinstance(structured.get("signals"), list):
+        highlights.extend([str(item or "").strip() for item in structured.get("signals") if str(item or "").strip()])
+    for row in rows[:4]:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip()
+        snippet = str(row.get("snippet") or "").strip()
+        if title and snippet:
+            highlights.append(f"{title}: {snippet[:160]}")
+        elif title:
+            highlights.append(title)
+    gaps: List[str] = []
+    if isinstance(structured.get("gaps"), list):
+        gaps.extend([str(item or "").strip() for item in structured.get("gaps") if str(item or "").strip()])
+    quality = result.get("quality") if isinstance(result.get("quality"), dict) else {}
+    if int(quality.get("usable_sources") or 0) < 2:
+        gaps.append("Need more usable sources")
+    if int(quality.get("domains") or 0) < 2:
+        gaps.append("Need more domain diversity")
+    if not summary:
+        summary = (
+            "Found initial live signals, but evidence is still thin."
+            if language != "ar"
+            else "وجدنا إشارات أولية مباشرة، لكن الأدلة ما زالت محدودة."
+        )
+    return {
+        "summary": summary,
+        "highlights": highlights[:6],
+        "gaps": gaps[:6],
+        "confirm_start_required": True,
+        "provider": str(result.get("provider") or "unknown"),
+        "is_live": bool(result.get("is_live")),
+        "results": rows,
+        "structured": structured,
+    }
+
+
+@router.get("/society/catalog")
+async def simulation_society_catalog(authorization: str = Header(None)) -> Dict[str, Any]:
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if user and not auth_core.has_permission(user, "simulation:run"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+    if dataset is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Dataset not loaded")
+
+    items: List[Dict[str, Any]] = []
+    for category in dataset.categories:
+        templates = dataset.templates_by_category.get(category.category_id) or []
+        items.append(
+            {
+                "category_id": category.category_id,
+                "description": category.description,
+                "template_count": len(templates),
+                "sample_archetypes": [str(t.archetype_name) for t in templates[:4]],
+            }
+        )
+    return {
+        "total_templates": len(dataset.templates),
+        "categories": items,
+    }
+
+
+def _template_bucket(template: Any) -> str:
+    name = str(getattr(template, "archetype_name", "") or "").lower()
+    category = str(getattr(template, "category_id", "") or "").lower()
+    text = f"{name} {category}"
+    if any(token in text for token in ["policy", "guardian", "legal", "compliance"]):
+        return "policy_guard"
+    if any(token in text for token in ["skeptic", "cautious"]):
+        return "skeptic"
+    if any(token in text for token in ["pragmatic", "steady", "entrepreneur", "worker"]):
+        return "pragmatic"
+    if any(token in text for token in ["optimistic", "progressive", "techie"]):
+        return "optimist"
+    return "pragmatic"
+
+
+def _allocate_society_counts(total: int, ratios: Dict[str, float]) -> Dict[str, int]:
+    keys = ["skeptic_ratio", "optimist_ratio", "pragmatic_ratio", "policy_guard_ratio"]
+    raw_weights: Dict[str, float] = {}
+    for key in keys:
+        try:
+            raw_weights[key] = max(0.0, float(ratios.get(key) or 0.0))
+        except Exception:
+            raw_weights[key] = 0.0
+    weight_sum = sum(raw_weights.values()) or 1.0
+    normalized = {k: (v / weight_sum) for k, v in raw_weights.items()}
+    counts = {k: int(total * normalized[k]) for k in keys}
+    assigned = sum(counts.values())
+    if assigned < total:
+        leftovers = sorted(keys, key=lambda k: normalized[k], reverse=True)
+        idx = 0
+        while assigned < total:
+            counts[leftovers[idx % len(leftovers)]] += 1
+            assigned += 1
+            idx += 1
+    return counts
+
+
+@router.post("/society/custom/build")
+async def simulation_society_custom_build(payload: Dict[str, Any], authorization: str = Header(None)) -> Dict[str, Any]:
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if user and not auth_core.has_permission(user, "simulation:run"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+    if dataset is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Dataset not loaded")
+
+    profile_name = str(payload.get("profile_name") or "").strip() or "Custom Society"
+    try:
+        agent_count = int(payload.get("agent_count") or 24)
+    except Exception:
+        agent_count = 24
+    agent_count = max(5, min(500, agent_count))
+    distribution = payload.get("distribution") if isinstance(payload.get("distribution"), dict) else {}
+    controls = payload.get("controls") if isinstance(payload.get("controls"), dict) else {}
+
+    counts = _allocate_society_counts(agent_count, distribution)
+    buckets: Dict[str, List[Any]] = {"skeptic": [], "optimist": [], "pragmatic": [], "policy_guard": []}
+    for template in dataset.templates:
+        buckets[_template_bucket(template)].append(template)
+    for key, value in buckets.items():
+        if not value:
+            buckets[key] = list(dataset.templates)
+
+    profile_id = str(uuid.uuid4())
+    rnd = hashlib.sha256(profile_id.encode("utf-8")).hexdigest()
+    offset = int(rnd[:8], 16)
+    computed_personas: List[Dict[str, Any]] = []
+    for bucket_key, ratio_key in [
+        ("skeptic", "skeptic_ratio"),
+        ("optimist", "optimist_ratio"),
+        ("pragmatic", "pragmatic_ratio"),
+        ("policy_guard", "policy_guard_ratio"),
+    ]:
+        pool = buckets[bucket_key]
+        needed = int(counts.get(ratio_key) or 0)
+        if needed <= 0:
+            continue
+        for idx in range(needed):
+            template = pool[(offset + idx) % len(pool)]
+            computed_personas.append(
+                {
+                    "template_id": str(template.template_id),
+                    "category_id": str(template.category_id),
+                    "archetype_name": str(template.archetype_name),
+                    "bucket": bucket_key,
+                }
+            )
+
+    owner_id = int(user.get("id")) if user and user.get("id") is not None else None
+    _society_profiles[profile_id] = {
+        "profile_name": profile_name,
+        "owner_id": owner_id,
+        "agent_count": agent_count,
+        "distribution": distribution,
+        "controls": controls,
+        "computed_personas": computed_personas,
+        "created_at": int(datetime.utcnow().timestamp() * 1000),
+    }
+    return {
+        "society_profile_id": profile_id,
+        "computed_personas": computed_personas,
+    }
+
+
+@router.post("/society/custom/assistant")
+async def simulation_society_custom_assistant(payload: Dict[str, Any], authorization: str = Header(None)) -> Dict[str, Any]:
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if user and not auth_core.has_permission(user, "simulation:run"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+
+    question = str(payload.get("question") or "").strip()
+    spec = payload.get("spec") if isinstance(payload.get("spec"), dict) else {}
+    language = _normalize_language(payload.get("language"))
+    if not question:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="question is required")
+
+    prompt = (
+        "You are a concise assistant helping the user tune an AI society configuration.\n"
+        f"Language: {language}\n"
+        f"Current spec: {json.dumps(spec, ensure_ascii=False)}\n"
+        f"User question: {question}\n"
+        "Return plain text advice with concrete parameter suggestions."
+    )
+    answer = await generate_ollama(prompt=prompt, temperature=0.35)
+    return {
+        "answer": str(answer or "").strip(),
+    }
+
+
+@society_router.get("/catalog")
+async def society_catalog_alias(authorization: str = Header(None)) -> Dict[str, Any]:
+    return await simulation_society_catalog(authorization=authorization)
+
+
+@society_router.post("/custom/build")
+async def society_custom_build_alias(payload: Dict[str, Any], authorization: str = Header(None)) -> Dict[str, Any]:
+    return await simulation_society_custom_build(payload=payload, authorization=authorization)
+
+
+@society_router.post("/custom/assistant")
+async def society_custom_assistant_alias(payload: Dict[str, Any], authorization: str = Header(None)) -> Dict[str, Any]:
+    return await simulation_society_custom_assistant(payload=payload, authorization=authorization)
 
 
 def _store_event(simulation_id: str, event_type: str, data: Dict[str, Any]) -> None:
@@ -529,13 +1211,26 @@ def _next_event_seq(simulation_id: str) -> int:
     return seq
 
 
+async def _safe_broadcast_json(payload: Dict[str, Any]) -> None:
+    try:
+        timeout = float(os.getenv("WS_BROADCAST_TIMEOUT_SEC", "2.0") or 2.0)
+    except Exception:
+        timeout = 2.0
+    timeout = max(0.25, timeout)
+    try:
+        await asyncio.wait_for(manager.broadcast_json(payload), timeout=timeout)
+    except Exception:
+        # Broadcasting is best-effort; simulation flow must continue.
+        pass
+
+
 async def _emit_live_event(simulation_id: str, event_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
     event_seq = data.get("event_seq")
     if not isinstance(event_seq, int):
         event_seq = _next_event_seq(simulation_id)
     event_data = {**data, "event_seq": event_seq}
     payload = {"type": event_type, "simulation_id": simulation_id, **event_data}
-    await manager.broadcast_json(payload)
+    await _safe_broadcast_json(payload)
     _store_event(simulation_id, event_type, event_data)
     if event_type == "research_update":
         try:
@@ -571,7 +1266,7 @@ async def _persist_chat_event(
         "timestamp": int(datetime.utcnow().timestamp() * 1000),
     }
     if broadcast:
-        await manager.broadcast_json({"type": "chat_event", "simulation_id": simulation_id, **event_data})
+        await _safe_broadcast_json({"type": "chat_event", "simulation_id": simulation_id, **event_data})
     _store_event(simulation_id, "chat_event", event_data)
     await db_core.insert_chat_event(
         simulation_id=simulation_id,
@@ -1282,8 +1977,15 @@ async def _run_research_loop(
 
     research_loop_state = meta.get("research_loop_state") if isinstance(meta.get("research_loop_state"), dict) else {}
     pending_review = meta.get("pending_research_review") if isinstance(meta.get("pending_research_review"), dict) else None
+    if pending_review is None:
+        saved_pending = research_loop_state.get("pending_review_payload") if isinstance(research_loop_state, dict) else None
+        if isinstance(saved_pending, dict):
+            pending_review = saved_pending
     cycle_index = int(meta.get("research_cycle_index") or 0)
     max_cycles = max(1, min(6, int(os.getenv("RESEARCH_MAX_CYCLES", "4") or 4)))
+    hard_timeout_sec = max(60, int(os.getenv("RESEARCH_HARD_TIMEOUT_SEC", "180") or 180))
+    started_monotonic = time.monotonic()
+    deadline_monotonic = started_monotonic + float(hard_timeout_sec)
 
     configured_min_usable_sources = max(1, int(os.getenv("SEARCH_MIN_USABLE_SOURCES", "2") or 2))
     configured_min_domains = max(1, int(os.getenv("SEARCH_MIN_DOMAINS", "2") or 2))
@@ -1294,6 +1996,137 @@ async def _run_research_loop(
     min_content_chars = min(configured_min_content_chars, 80) if balanced_gate_enabled else configured_min_content_chars
 
     language = str(context.get("language") or "en").strip().lower() or "en"
+    last_cycle_id: Optional[str] = None
+    last_quality_snapshot: Dict[str, Any] = {}
+    last_extraction_rows: List[Dict[str, Any]] = []
+    last_structured: Dict[str, Any] = {}
+    last_base_answer = ""
+    last_evidence_cards: List[str] = []
+
+    def _remaining_seconds() -> float:
+        return max(0.0, deadline_monotonic - time.monotonic())
+
+    def _timed_out() -> bool:
+        return _remaining_seconds() <= 0.0
+
+    async def _complete_due_timeout() -> Dict[str, Any]:
+        elapsed = max(0, int(round(time.monotonic() - started_monotonic)))
+        timeout_notice = (
+            f"تم تجاوز {hard_timeout_sec // 60} دقائق للبحث. سنكمل المحاكاة الآن بالبيانات المتاحة."
+            if language == "ar"
+            else f"Research exceeded {hard_timeout_sec // 60} minutes. Continuing simulation with available evidence."
+        )
+        quality_snapshot = dict(last_quality_snapshot or {})
+        if not quality_snapshot:
+            quality_snapshot = {
+                "usable_sources": 0,
+                "domains": 0,
+                "extraction_success_rate": 0.0,
+                "max_content_chars": 0,
+            }
+        evidence_cards = list(last_evidence_cards or [])
+        if not evidence_cards:
+            evidence_cards = _build_evidence_cards_from_rows(last_extraction_rows, [])
+
+        fallback_summary = (
+            str(last_structured.get("summary") or "").strip()
+            or str(last_base_answer or "").strip()
+            or str(context.get("research_summary") or "").strip()
+            or timeout_notice
+        )
+        summary_text = _extractive_summary_from_rows(last_extraction_rows, fallback_summary).strip() or timeout_notice
+        if timeout_notice not in summary_text:
+            summary_text = f"{summary_text}\n\n{timeout_notice}".strip()
+
+        sources: List[Dict[str, Any]] = []
+        for row in last_extraction_rows:
+            if str(row.get("status") or "").lower() != "completed":
+                continue
+            sources.append(
+                {
+                    "title": row.get("title"),
+                    "url": row.get("url"),
+                    "domain": row.get("domain"),
+                    "snippet": str(row.get("snippet") or "")[:280],
+                    "score": None,
+                    "reason": "Fetched and extracted",
+                }
+            )
+        if not sources and isinstance(existing_sources, list):
+            sources = [
+                item for item in existing_sources
+                if isinstance(item, dict) and str(item.get("url") or "").strip()
+            ][:4]
+
+        context["research_summary"] = summary_text
+        context["research_sources"] = sources
+        structured_payload = dict(last_structured or {})
+        structured_payload["summary"] = structured_payload.get("summary") or summary_text
+        structured_payload["evidence_cards"] = evidence_cards
+        if not isinstance(structured_payload.get("gaps"), list):
+            structured_payload["gaps"] = [timeout_notice]
+        context["research_structured"] = structured_payload
+        context["search_quality"] = {
+            "usable_sources": int(quality_snapshot.get("usable_sources") or 0),
+            "domains": int(quality_snapshot.get("domains") or 0),
+            "extraction_success_rate": float(quality_snapshot.get("extraction_success_rate") or 0.0),
+        }
+        context["evidence_cards"] = evidence_cards
+        context["research_timeout_bypass"] = True
+
+        done_event = await _emit_live_event(
+            simulation_id,
+            "research_update",
+            {
+                "action": "research_done",
+                "status": "completed",
+                "cycle_id": last_cycle_id,
+                "snippet": timeout_notice[:280],
+                "meta_json": {
+                    "quality_snapshot": quality_snapshot,
+                    "cycle_id": last_cycle_id,
+                    "evidence_cards": evidence_cards,
+                    "timeout_bypass": True,
+                    "timeout_seconds": hard_timeout_sec,
+                    "elapsed_seconds": elapsed,
+                },
+            },
+        )
+        await _emit_live_event(
+            simulation_id,
+            "phase_update",
+            {
+                "phase_key": "search_bootstrap",
+                "phase_label": "Search Bootstrap",
+                "progress_pct": 100.0,
+                "status": "completed",
+            },
+        )
+        meta["pending_research_review"] = None
+        meta["research_loop_state"] = {}
+        meta["research_cycle_index"] = cycle_index
+        meta["last_research_quality"] = quality_snapshot
+        meta["last_research_gaps"] = [timeout_notice]
+        meta["status"] = "running"
+        meta["status_reason"] = "running"
+        meta["last_error"] = None
+        meta["search_quality"] = context.get("search_quality")
+        meta["current_phase_key"] = "evidence_map"
+        meta["phase_progress_pct"] = 0.0
+        meta["event_seq"] = max(int(meta.get("event_seq") or 0), int(done_event.get("event_seq") or 0))
+        checkpoint["meta"] = meta
+        await db_core.upsert_simulation_checkpoint(
+            simulation_id=simulation_id,
+            checkpoint=checkpoint,
+            status="running",
+            last_error=None,
+            status_reason="running",
+            current_phase_key="evidence_map",
+            phase_progress_pct=0.0,
+            event_seq=int(meta.get("event_seq") or 0),
+        )
+        return {"ok": True, "context": context, "status_reason": "running", "timeout_bypass": True}
+
     await _emit_live_event(
         simulation_id,
         "phase_update",
@@ -1316,8 +2149,11 @@ async def _run_research_loop(
     )
 
     while cycle_index < max_cycles:
+        if _timed_out():
+            return await _complete_due_timeout()
         cycle_index += 1
         cycle_id = f"cycle_{cycle_index}_{uuid.uuid4().hex[:6]}"
+        last_cycle_id = cycle_id
         query_plan = _build_search_query_variants(context)
         if not query_plan:
             break
@@ -1353,8 +2189,18 @@ async def _run_research_loop(
         else:
             search_result: Dict[str, Any] = {}
             for query in query_plan[:4]:
+                if _timed_out():
+                    return await _complete_due_timeout()
+                if _remaining_seconds() <= 2.0:
+                    return await _complete_due_timeout()
                 try:
-                    search_result = await search_web(query=query, max_results=8, language=language, strict_web_only=True)
+                    search_timeout = max(6.0, min(30.0, _remaining_seconds() - 0.5))
+                    search_result = await asyncio.wait_for(
+                        search_web(query=query, max_results=8, language=language, strict_web_only=True),
+                        timeout=search_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    continue
                 except Exception:
                     continue
                 candidate_urls = _prepare_candidate_urls(search_result.get("results") or [])
@@ -1363,6 +2209,8 @@ async def _run_research_loop(
             structured = search_result.get("structured") if isinstance(search_result.get("structured"), dict) else {}
             base_answer = str(search_result.get("answer") or "").strip()
             search_quality = search_result.get("quality") if isinstance(search_result.get("quality"), dict) else {}
+            last_structured = structured if isinstance(structured, dict) else {}
+            last_base_answer = base_answer
 
         await _emit_live_event(
             simulation_id,
@@ -1392,6 +2240,7 @@ async def _run_research_loop(
                 else "لم يتم العثور على روابط بحث مباشرة كافية. حاول تعديل الاستعلام."
             )
             suggested_queries = [q for q in query_plan[:3] if q]
+            next_gate_version = int(meta.get("research_gate_version") or 0) + 1
             pending_payload = {
                 "cycle_id": cycle_id,
                 "query_plan": query_plan[:5],
@@ -1405,6 +2254,7 @@ async def _run_research_loop(
                 "gap_summary": gap_summary,
                 "suggested_queries": suggested_queries,
                 "required": True,
+                "gate_version": next_gate_version,
             }
             review_event = await _emit_live_event(
                 simulation_id,
@@ -1419,6 +2269,7 @@ async def _run_research_loop(
                 },
             )
             meta["pending_research_review"] = pending_payload
+            meta["research_gate_version"] = next_gate_version
             meta["research_cycle_index"] = cycle_index
             meta["last_research_quality"] = pending_payload["quality_snapshot"]
             meta["last_research_gaps"] = [gap_summary]
@@ -1462,13 +2313,19 @@ async def _run_research_loop(
                     }
                 )
         else:
-            selected = _pick_diverse_urls(candidate_urls, limit=4)
+            selected = _pick_diverse_urls(candidate_urls, limit=3)
 
         if not selected:
-            selected = _pick_diverse_urls(candidate_urls, limit=2)
+            selected = _pick_diverse_urls(candidate_urls, limit=1)
 
         extraction_rows: List[Dict[str, Any]] = []
         for index, item in enumerate(selected, start=1):
+            if _timed_out():
+                last_extraction_rows = extraction_rows
+                return await _complete_due_timeout()
+            if _remaining_seconds() <= 2.0:
+                last_extraction_rows = extraction_rows
+                return await _complete_due_timeout()
             url = str(item.get("url") or "").strip()
             domain = str(item.get("domain") or "").strip()
             title = str(item.get("title") or "").strip()
@@ -1487,7 +2344,11 @@ async def _run_research_loop(
                     "progress_pct": min(95.0, 20.0 + (index * 60.0 / max(1, len(selected)))),
                 },
             )
-            fetched = await fetch_page(url)
+            try:
+                fetch_timeout = max(4, min(7, int(_remaining_seconds() - 1)))
+                fetched = await fetch_page(url, timeout=fetch_timeout)
+            except Exception as exc:
+                fetched = {"ok": False, "error": f"fetch_exception: {exc}"}
             if fetched.get("ok"):
                 preview = str(fetched.get("preview") or "").strip()
                 event = await _emit_live_event(
@@ -1563,8 +2424,11 @@ async def _run_research_loop(
                 )
 
         quality_snapshot = _compute_extraction_quality(extraction_rows)
+        last_quality_snapshot = quality_snapshot
+        last_extraction_rows = extraction_rows
         fallback_cards = structured.get("evidence_cards") if isinstance(structured.get("evidence_cards"), list) else []
         evidence_cards = _build_evidence_cards_from_rows(extraction_rows, fallback_cards)
+        last_evidence_cards = evidence_cards
         await _emit_live_event(
             simulation_id,
             "research_update",
@@ -1610,6 +2474,9 @@ async def _run_research_loop(
         )
 
         if not quality_ok:
+            if _timed_out():
+                return await _complete_due_timeout()
+            next_gate_version = int(meta.get("research_gate_version") or 0) + 1
             pending_payload = {
                 "cycle_id": cycle_id,
                 "query_plan": query_plan[:5],
@@ -1618,6 +2485,7 @@ async def _run_research_loop(
                 "gap_summary": gap_summary,
                 "suggested_queries": suggested_queries,
                 "required": True,
+                "gate_version": next_gate_version,
             }
             review_event = await _emit_live_event(
                 simulation_id,
@@ -1632,6 +2500,7 @@ async def _run_research_loop(
                 },
             )
             meta["pending_research_review"] = pending_payload
+            meta["research_gate_version"] = next_gate_version
             meta["research_cycle_index"] = cycle_index
             meta["last_research_quality"] = quality_snapshot
             meta["last_research_gaps"] = [gap_summary]
@@ -1727,6 +2596,9 @@ async def _run_research_loop(
             event_seq=int(meta.get("event_seq") or 0),
         )
         return {"ok": True, "context": context, "status_reason": "running"}
+
+    if _timed_out():
+        return await _complete_due_timeout()
 
     message = (
         "Search loop reached maximum cycles without enough live evidence."
@@ -1935,7 +2807,7 @@ async def _start_background_simulation(
             event_seq = _next_event_seq(simulation_id)
         event_data = {**data, "event_seq": event_seq}
         payload = {"type": event_type, "simulation_id": simulation_id, **event_data}
-        await manager.broadcast_json(payload)
+        await _safe_broadcast_json(payload)
         _store_event(simulation_id, event_type, event_data)
         try:
             if event_type == "agents" and data.get("iteration") == 0:
@@ -2081,7 +2953,7 @@ async def _start_background_simulation(
                         "acceptance_rate": result.get("acceptance_rate"),
                     },
                 )
-            await manager.broadcast_json({"type": "summary", "simulation_id": simulation_id, "summary": summary})
+            await _safe_broadcast_json({"type": "summary", "simulation_id": simulation_id, "summary": summary})
         except ClarificationNeeded as clarification_exc:
             payload = dict(clarification_exc.payload or {})
             reason_tag = str(payload.get("reason_tag") or "evidence_gap")
@@ -2143,7 +3015,7 @@ async def _start_background_simulation(
                 "created_at": created_at,
                 "required": True,
             }
-            await manager.broadcast_json({"type": "clarification_request", "simulation_id": simulation_id, **clarification_data})
+            await _safe_broadcast_json({"type": "clarification_request", "simulation_id": simulation_id, **clarification_data})
             _store_event(simulation_id, "clarification_request", clarification_data)
 
             state = _simulation_state.setdefault(simulation_id, {})
@@ -2350,6 +3222,31 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
     # Generate a unique ID for this simulation
     simulation_id = str(uuid.uuid4())
     run_mode = str(user_context.get("run_mode") or "normal").strip().lower() or "normal"
+    society_mode = str(user_context.get("society_mode") or "default").strip().lower() or "default"
+    if society_mode not in {"default", "custom"}:
+        society_mode = "default"
+    start_path = str(user_context.get("start_path") or "start_default").strip().lower() or "start_default"
+    if start_path not in {"inspect_default", "build_custom", "start_default"}:
+        start_path = "start_default"
+    society_profile_id = str(user_context.get("society_profile_id") or "").strip() or None
+    society_custom_spec = user_context.get("society_custom_spec") if isinstance(user_context.get("society_custom_spec"), dict) else {}
+    if society_profile_id and society_profile_id in _society_profiles:
+        profile = _society_profiles.get(society_profile_id) or {}
+        profile_owner = profile.get("owner_id")
+        if profile_owner is not None and user_id is not None and int(profile_owner) != int(user_id):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for selected society profile")
+        if society_mode == "custom":
+            society_custom_spec = {
+                **(profile.get("controls") if isinstance(profile.get("controls"), dict) else {}),
+                "distribution": profile.get("distribution") if isinstance(profile.get("distribution"), dict) else {},
+                "computed_personas": profile.get("computed_personas") if isinstance(profile.get("computed_personas"), list) else [],
+                "profile_name": profile.get("profile_name"),
+            }
+            if user_context.get("agentCount") is None:
+                try:
+                    user_context["agentCount"] = int(profile.get("agent_count") or 0) or None
+                except Exception:
+                    pass
     preflight_ready = bool(user_context.get("preflight_ready"))
     preflight_summary = str(user_context.get("preflight_summary") or "").strip()
     preflight_answers = user_context.get("preflight_answers")
@@ -2374,6 +3271,10 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
     neutral_cap_pct = max(0.05, min(0.70, neutral_cap_pct))
     neutral_enforcement = str(user_context.get("neutral_enforcement") or "clarification_before_complete").strip() or "clarification_before_complete"
     user_context["run_mode"] = run_mode
+    user_context["society_mode"] = society_mode
+    user_context["society_profile_id"] = society_profile_id
+    user_context["society_custom_spec"] = society_custom_spec if isinstance(society_custom_spec, dict) else {}
+    user_context["start_path"] = start_path
     user_context["neutral_cap_pct"] = neutral_cap_pct
     user_context["neutral_enforcement"] = neutral_enforcement
     user_context["preflight_ready"] = preflight_ready
@@ -2415,6 +3316,9 @@ async def start_simulation(user_context: Dict[str, Any], authorization: str = He
                     "policy_reason": None,
                     "search_quality": None,
                     "run_mode": run_mode,
+                    "society_mode": society_mode,
+                    "society_profile_id": society_profile_id,
+                    "start_path": start_path,
                     "neutral_cap_pct": neutral_cap_pct,
                     "neutral_enforcement": neutral_enforcement,
                     "clarification_count": 0,
@@ -2617,6 +3521,77 @@ async def pause_simulation(payload: Dict[str, Any], authorization: str = Header(
     return {"simulation_id": simulation_id, "status": "paused", "paused": True}
 
 
+def _research_action_soft_conflict(
+    *,
+    simulation_id: str,
+    conflict_reason: str,
+    snapshot: Optional[Dict[str, Any]],
+    checkpoint_row: Optional[Dict[str, Any]],
+    meta: Dict[str, Any],
+    pending: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    snapshot_status = str((snapshot or {}).get("status") or "running").strip().lower()
+    if snapshot_status not in {"running", "paused", "completed", "error"}:
+        snapshot_status = "running"
+    status_reason = str(
+        (checkpoint_row or {}).get("status_reason")
+        or meta.get("status_reason")
+        or ("paused_research_review" if conflict_reason in {"stale_cycle", "no_pending_review"} else "running")
+    ).strip().lower()
+    if status_reason not in {
+        "running",
+        "interrupted",
+        "paused_manual",
+        "paused_search_failed",
+        "paused_research_review",
+        "paused_credits_exhausted",
+        "paused_clarification_needed",
+        "error",
+        "completed",
+    }:
+        status_reason = "running"
+    pending_payload = pending if (status_reason == "paused_research_review" and isinstance(pending, dict)) else None
+    phase_key = str((checkpoint_row or {}).get("current_phase_key") or meta.get("current_phase_key") or "").strip() or None
+    phase_progress_raw = (
+        (checkpoint_row or {}).get("phase_progress_pct")
+        if (checkpoint_row or {}).get("phase_progress_pct") is not None
+        else meta.get("phase_progress_pct")
+    )
+    try:
+        phase_progress = float(phase_progress_raw) if phase_progress_raw is not None else None
+    except Exception:
+        phase_progress = None
+    gate_version_raw = (
+        (pending_payload or {}).get("gate_version")
+        if isinstance(pending_payload, dict)
+        else meta.get("research_gate_version")
+    )
+    try:
+        gate_version = int(gate_version_raw) if gate_version_raw is not None else None
+    except Exception:
+        gate_version = None
+    return {
+        "ok": True,
+        "action_applied": False,
+        "conflict_reason": conflict_reason,
+        "simulation_id": simulation_id,
+        "status": snapshot_status,
+        "status_reason": status_reason,
+        "pending_research_review": pending_payload,
+        "state_snapshot": {
+            "status": snapshot_status,
+            "status_reason": status_reason,
+            "phase_key": phase_key,
+            "phase_progress_pct": phase_progress,
+        },
+        "research_gate": "runtime_review" if pending_payload else "none",
+        "research_gate_cycle_id": (
+            str((pending_payload or {}).get("cycle_id") or "").strip() or None
+        ) if pending_payload else None,
+        "research_gate_version": gate_version,
+    }
+
+
 @router.post("/research/action")
 async def submit_research_action(payload: Dict[str, Any], authorization: str = Header(None)) -> Dict[str, Any]:
     simulation_id = str(payload.get("simulation_id") or "").strip()
@@ -2639,9 +3614,6 @@ async def submit_research_action(payload: Dict[str, Any], authorization: str = H
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
         await _ensure_simulation_access(simulation_id, user)
 
-    if _task_is_running(simulation_id):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Simulation is already running")
-
     snapshot = await db_core.fetch_simulation_snapshot(simulation_id)
     if not snapshot:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Simulation not found")
@@ -2649,14 +3621,67 @@ async def submit_research_action(payload: Dict[str, Any], authorization: str = H
     checkpoint_row = await db_core.fetch_simulation_checkpoint(simulation_id)
     checkpoint = (checkpoint_row or {}).get("checkpoint") or {}
     meta = checkpoint.get("meta") if isinstance(checkpoint.get("meta"), dict) else {}
-    status_reason = str((checkpoint_row or {}).get("status_reason") or meta.get("status_reason") or "").strip().lower()
     pending = meta.get("pending_research_review") if isinstance(meta.get("pending_research_review"), dict) else None
+
+    if _task_is_running(simulation_id):
+        return _research_action_soft_conflict(
+            simulation_id=simulation_id,
+            conflict_reason="already_running",
+            snapshot=snapshot,
+            checkpoint_row=checkpoint_row,
+            meta=meta,
+            pending=pending,
+        )
+
+    status_reason = str((checkpoint_row or {}).get("status_reason") or meta.get("status_reason") or "").strip().lower()
     if status_reason != "paused_research_review" or not pending:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No pending research review to handle")
+        return _research_action_soft_conflict(
+            simulation_id=simulation_id,
+            conflict_reason="no_pending_review",
+            snapshot=snapshot,
+            checkpoint_row=checkpoint_row,
+            meta=meta,
+            pending=pending,
+        )
 
     pending_cycle_id = str(pending.get("cycle_id") or "").strip()
     if pending_cycle_id and pending_cycle_id != cycle_id:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="cycle_id does not match pending review")
+        return _research_action_soft_conflict(
+            simulation_id=simulation_id,
+            conflict_reason="stale_cycle",
+            snapshot=snapshot,
+            checkpoint_row=checkpoint_row,
+            meta=meta,
+            pending=pending,
+        )
+
+    requested_gate_version_raw = payload.get("research_gate_version")
+    requested_gate_version: Optional[int] = None
+    if requested_gate_version_raw is not None:
+        try:
+            requested_gate_version = int(requested_gate_version_raw)
+        except Exception:
+            requested_gate_version = None
+    pending_gate_version_raw = pending.get("gate_version") if isinstance(pending, dict) else None
+    if pending_gate_version_raw is None:
+        pending_gate_version_raw = meta.get("research_gate_version")
+    try:
+        pending_gate_version = int(pending_gate_version_raw) if pending_gate_version_raw is not None else None
+    except Exception:
+        pending_gate_version = None
+    if (
+        requested_gate_version is not None
+        and pending_gate_version is not None
+        and requested_gate_version != pending_gate_version
+    ):
+        return _research_action_soft_conflict(
+            simulation_id=simulation_id,
+            conflict_reason="stale_cycle",
+            snapshot=snapshot,
+            checkpoint_row=checkpoint_row,
+            meta=meta,
+            pending=pending,
+        )
 
     selected_url_ids = payload.get("selected_url_ids") if isinstance(payload.get("selected_url_ids"), list) else []
     selected_url_ids = [str(item).strip() for item in selected_url_ids if str(item or "").strip()]
@@ -2700,7 +3725,28 @@ async def submit_research_action(payload: Dict[str, Any], authorization: str = H
             phase_progress_pct=100.0,
             event_seq=int(meta.get("event_seq") or 0),
         )
-        return {"ok": True, "simulation_id": simulation_id, "status": "paused", "status_reason": "paused_research_review"}
+        gate_version_raw = pending.get("gate_version") if isinstance(pending, dict) else meta.get("research_gate_version")
+        try:
+            gate_version = int(gate_version_raw) if gate_version_raw is not None else None
+        except Exception:
+            gate_version = None
+        return {
+            "ok": True,
+            "action_applied": True,
+            "simulation_id": simulation_id,
+            "status": "paused",
+            "status_reason": "paused_research_review",
+            "pending_research_review": pending,
+            "state_snapshot": {
+                "status": "paused",
+                "status_reason": "paused_research_review",
+                "phase_key": "search_bootstrap",
+                "phase_progress_pct": 100.0,
+            },
+            "research_gate": "runtime_review",
+            "research_gate_cycle_id": str((pending or {}).get("cycle_id") or "").strip() or None,
+            "research_gate_version": gate_version,
+        }
 
     if action == "scrape_selected" and not selected_url_ids:
         candidate_urls = pending.get("candidate_urls") if isinstance(pending.get("candidate_urls"), list) else []
@@ -2713,10 +3759,11 @@ async def submit_research_action(payload: Dict[str, Any], authorization: str = H
         "selected_url_ids": selected_url_ids,
         "added_urls": normalized_added_urls[:8],
         "query_refinement": query_refinement,
+        "pending_review_payload": pending,
     }
 
     meta["research_loop_state"] = research_loop_state
-    meta["pending_research_review"] = pending
+    meta["pending_research_review"] = None
     meta["status"] = "running"
     meta["status_reason"] = "running"
     meta["last_error"] = None
@@ -2764,7 +3811,23 @@ async def submit_research_action(payload: Dict[str, Any], authorization: str = H
                 "action": action,
             },
         )
-    return {"ok": True, "simulation_id": simulation_id, "status": "running", "status_reason": "running"}
+    return {
+        "ok": True,
+        "action_applied": True,
+        "simulation_id": simulation_id,
+        "status": "running",
+        "status_reason": "running",
+        "pending_research_review": None,
+        "state_snapshot": {
+            "status": "running",
+            "status_reason": "running",
+            "phase_key": "search_bootstrap",
+            "phase_progress_pct": 0.0,
+        },
+        "research_gate": "none",
+        "research_gate_cycle_id": None,
+        "research_gate_version": int(meta.get("research_gate_version") or 0) if meta.get("research_gate_version") is not None else None,
+    }
 
 
 @router.post("/clarification/answer")
@@ -2856,7 +3919,7 @@ async def submit_clarification_answer(payload: Dict[str, Any], authorization: st
         "question_id": question_id,
         "answer_source": answer_source,
     }
-    await manager.broadcast_json({"type": "clarification_resolved", "simulation_id": simulation_id, **resolution_event})
+    await _safe_broadcast_json({"type": "clarification_resolved", "simulation_id": simulation_id, **resolution_event})
     _store_event(simulation_id, "clarification_resolved", resolution_event)
 
     user_context = await _fetch_simulation_context(simulation_id)
@@ -3334,7 +4397,11 @@ async def get_state(simulation_id: str, authorization: str = Header(None)) -> Di
                 pass
         if state.get("pending_clarification") is None and isinstance(snapshot.get("pending_clarification"), dict):
             state["pending_clarification"] = snapshot.get("pending_clarification")
-        if state.get("pending_research_review") is None and isinstance(snapshot.get("pending_research_review"), dict):
+        if (
+            status_reason == "paused_research_review"
+            and state.get("pending_research_review") is None
+            and isinstance(snapshot.get("pending_research_review"), dict)
+        ):
             state["pending_research_review"] = snapshot.get("pending_research_review")
         if snapshot.get("can_answer_clarification") is not None:
             state["can_answer_clarification"] = bool(snapshot.get("can_answer_clarification"))
@@ -3359,6 +4426,21 @@ async def get_state(simulation_id: str, authorization: str = Header(None)) -> Di
     state["pause_available"] = bool(status_value == "running" and _task_is_running(simulation_id))
     if status_reason != "paused_clarification_needed":
         state["can_answer_clarification"] = False
+    if status_reason != "paused_research_review":
+        state["pending_research_review"] = None
+    pending_gate = state.get("pending_research_review") if isinstance(state.get("pending_research_review"), dict) else None
+    gate_version_raw = (
+        (pending_gate or {}).get("gate_version")
+        if pending_gate
+        else ((snapshot or {}).get("research_gate_version") if isinstance(snapshot, dict) else None)
+    )
+    try:
+        gate_version = int(gate_version_raw) if gate_version_raw is not None else None
+    except Exception:
+        gate_version = None
+    state["research_gate"] = "runtime_review" if pending_gate else "none"
+    state["research_gate_cycle_id"] = str((pending_gate or {}).get("cycle_id") or "").strip() or None
+    state["research_gate_version"] = gate_version
     public_state = {k: v for k, v in state.items() if k != "user_id"}
     return {"simulation_id": simulation_id, "status": status_value, "status_reason": status_reason, **public_state}
 
@@ -3374,10 +4456,10 @@ async def get_transcript(simulation_id: str, authorization: str = Header(None)) 
     if not transcript:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcript not found")
     phase_labels = {
-        "Information Shock": "ط·آ§ط¸â€‍ط·ع¾ط·آµط·آ§ط·آ¯ط¸â€¦ ط·آ§ط¸â€‍ط¸â€¦ط·آ¹ط·آ±ط¸ظ¾ط¸ظ¹ (Information Shock)",
-        "Polarization Phase": "ط·آ§ط¸â€‍ط·آ§ط·آ³ط·ع¾ط¸â€ڑط·آ·ط·آ§ط·آ¨ (Polarization Phase)",
-        "Clash of Values": "ط¸â€¦ط·آ­ط·آ§ط¸ث†ط¸â€‍ط·آ§ط·ع¾ ط·آ§ط¸â€‍ط·آ¥ط¸â€ڑط¸â€ ط·آ§ط·آ¹ ط¸ث†ط·آ§ط¸â€‍ط·آ¬ط¸â€¦ط¸ث†ط·آ¯ (Clash of Values)",
-        "Resolution Pressure": "ط·آ§ط¸â€‍ط¸â€ ط·ع¾ط¸ظ¹ط·آ¬ط·آ© ط·آ§ط¸â€‍ط¸â€ ط¸â€،ط·آ§ط·آ¦ط¸ظ¹ط·آ© (Resolution Pressure)",
+        "Information Shock": "الصدمة المعلوماتية (Information Shock)",
+        "Polarization Phase": "الاستقطاب (Polarization Phase)",
+        "Clash of Values": "صدام القيم (Clash of Values)",
+        "Resolution Pressure": "ضغط الحسم (Resolution Pressure)",
     }
     for group in transcript:
         label = phase_labels.get(group.get("phase"))

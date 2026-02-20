@@ -169,18 +169,37 @@ interface SimulationArenaProps {
 export const SimulationArena = ({ agents, activePulses }: SimulationArenaProps) => {
   const [contextLost, setContextLost] = useState(false);
   const [canvasKey, setCanvasKey] = useState(0);
+  const [autoRestoreState, setAutoRestoreState] = useState<'idle' | 'retrying' | 'failed'>('idle');
   const cleanupGlListenersRef = useRef<(() => void) | null>(null);
+  const autoRestoreAttemptedRef = useRef(false);
+  const restoreTimerRef = useRef<number | null>(null);
 
   const bindGlLifecycle = useCallback((state: { gl: THREE.WebGLRenderer }) => {
     cleanupGlListenersRef.current?.();
+    if (restoreTimerRef.current) {
+      window.clearTimeout(restoreTimerRef.current);
+      restoreTimerRef.current = null;
+    }
+    setContextLost(false);
+    setAutoRestoreState('idle');
     const canvas = state.gl.domElement;
 
     const handleContextLost = (event: Event) => {
       event.preventDefault();
       setContextLost(true);
+      if (!autoRestoreAttemptedRef.current) {
+        autoRestoreAttemptedRef.current = true;
+        setAutoRestoreState('retrying');
+        restoreTimerRef.current = window.setTimeout(() => {
+          setCanvasKey((prev) => prev + 1);
+        }, 900);
+      } else {
+        setAutoRestoreState('failed');
+      }
     };
     const handleContextRestored = () => {
       setContextLost(false);
+      setAutoRestoreState('idle');
     };
 
     canvas.addEventListener('webglcontextlost', handleContextLost, false);
@@ -192,7 +211,13 @@ export const SimulationArena = ({ agents, activePulses }: SimulationArenaProps) 
     };
   }, []);
 
-  useEffect(() => () => cleanupGlListenersRef.current?.(), []);
+  useEffect(() => () => {
+    cleanupGlListenersRef.current?.();
+    if (restoreTimerRef.current) {
+      window.clearTimeout(restoreTimerRef.current);
+      restoreTimerRef.current = null;
+    }
+  }, []);
 
   return (
     <div className="w-full h-full relative">
@@ -256,17 +281,21 @@ export const SimulationArena = ({ agents, activePulses }: SimulationArenaProps) 
         <div className="absolute inset-0 z-20 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="rounded-lg border border-border bg-card/90 p-4 text-center space-y-3 max-w-xs">
             <div className="text-sm text-foreground">
-              WebGL context lost. Visualization paused.
+              {autoRestoreState === 'retrying'
+                ? 'WebGL context lost. Switching to static fallback and retrying renderer...'
+                : 'WebGL context lost. Static fallback is active; controls remain available.'}
             </div>
             <button
               type="button"
               className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-sm"
               onClick={() => {
+                autoRestoreAttemptedRef.current = false;
+                setAutoRestoreState('retrying');
                 setContextLost(false);
                 setCanvasKey((prev) => prev + 1);
               }}
             >
-              Retry renderer
+              {autoRestoreState === 'retrying' ? 'Retrying renderer...' : 'Retry renderer'}
             </button>
           </div>
         </div>
