@@ -1,4 +1,4 @@
-﻿import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { Header } from '@/components/Header';
 import {
@@ -15,9 +15,11 @@ import { IterationTimeline } from '@/components/IterationTimeline';
 import { useSimulation } from '@/hooks/useSimulation';
 import { ChatMessage, PendingIdeaConfirmation, PreflightQuestion, UserInput } from '@/types/simulation';
 import { websocketService } from '@/services/websocket';
-import { apiService, SearchResponse, SimulationConfig, SimulationPreflightNextResponse, SocietyCatalogResponse, UserMe } from '@/services/api';
+import { apiService, clearAuthTokens, SearchResponse, SimulationConfig, SimulationPreflightNextResponse, SocietyCatalogResponse, UserMe } from '@/services/api';
 import { cn } from '@/lib/utils';
 import { addIdeaLogEntry, updateIdeaLogEntry } from '@/lib/ideaLog';
+import { useLanguage } from '@/contexts/LanguageContext';
+import { useTheme } from '@/contexts/ThemeContext';
 
 const CATEGORY_LABEL_BY_VALUE = new Map(
   CATEGORY_OPTIONS.map((label) => [label.toLowerCase(), label])
@@ -97,6 +99,16 @@ const MAX_CHAT_MESSAGES = 40;
 const SEARCH_TIMEOUT_BASE_MS = 10000;
 const SEARCH_TIMEOUT_STEP_MS = 7000;
 const SEARCH_TIMEOUT_MAX_MS = 30000;
+
+type UiBusyStage =
+  | 'extracting_schema'
+  | 'detecting_mode'
+  | 'assistant_reply'
+  | 'prestart_research'
+  | 'starting_simulation'
+  | 'checking_session';
+
+type RealtimeConnectionState = 'connected' | 'disconnected' | 'reconnecting';
 
 const canonicalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '');
 
@@ -192,6 +204,8 @@ const normalizeAssistantText = (text: string): string => {
 };
 
 const Index = () => {
+  const { language, setLanguage } = useLanguage();
+  const { theme, setTheme } = useTheme();
   const location = useLocation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -237,11 +251,19 @@ const Index = () => {
   const messageIdCounterRef = useRef(0);
   const searchPromptedRef = useRef(false);
   const searchAttemptRef = useRef(0);
-  const [settings, setSettings] = useState({
-    language: 'ar' as 'ar' | 'en',
-    theme: 'dark',
-    autoFocusInput: true,
-  });
+  const searchRequestSeqRef = useRef(0);
+  const searchAbortRef = useRef<AbortController | null>(null);
+  const runSearchRef = useRef<null | ((
+    query: string,
+    timeoutMs: number,
+    options?: { promptOnTimeout?: boolean }
+  ) => Promise<{ status: 'complete' | 'timeout' | 'aborted' }>)>(null);
+  const [autoFocusInput, setAutoFocusInput] = useState(true);
+  const settings = useMemo(() => ({
+    language,
+    theme,
+    autoFocusInput,
+  }), [autoFocusInput, language, theme]);
   const [showSettings, setShowSettings] = useState(false);
 
   const [activePanel, setActivePanel] = useState<'config' | 'chat' | 'reasoning'>('chat');
@@ -312,8 +334,14 @@ const Index = () => {
   const [creditNotice, setCreditNotice] = useState<string | null>(null);
   const [meSnapshot, setMeSnapshot] = useState<UserMe | null>(null);
   const reasoningTimerRef = useRef<number | null>(null);
+  const sessionRedirectingRef = useRef(false);
+  const uiBusyTokenRef = useRef(0);
+  const [uiBusyStage, setUiBusyStage] = useState<UiBusyStage | null>(null);
+  const [uiBusyStartedAt, setUiBusyStartedAt] = useState<number | null>(null);
+  const [uiBusyClock, setUiBusyClock] = useState(() => Date.now());
   const [searchState, setSearchState] = useState<{
     status: 'idle' | 'searching' | 'complete' | 'timeout' | 'error';
+    stage?: UiBusyStage;
     query?: string;
     answer?: string;
     provider?: string;
@@ -321,7 +349,16 @@ const Index = () => {
     results?: SearchResponse['results'];
     timeoutMs?: number;
     attempts?: number;
+    startedAt?: number;
+    elapsedMs?: number;
   }>({ status: 'idle' });
+  const [connectionState, setConnectionState] = useState<RealtimeConnectionState>(() => (
+    websocketService.isConnected() ? 'connected' : 'disconnected'
+  ));
+  const lastRealtimeConnectedAtRef = useRef<number | null>(
+    websocketService.isConnected() ? Date.now() : null
+  );
+  const hasEverConnectedRealtimeRef = useRef<boolean>(websocketService.isConnected());
   const [pendingUpdate, setPendingUpdate] = useState<string | null>(null);
   const [simulationSpeed, setSimulationSpeed] = useState(1);
   const [researchContext, setResearchContext] = useState<{
@@ -354,7 +391,126 @@ const Index = () => {
     preflight_assumptions: string[];
   } | null>(null);
 
+  const beginUiBusy = useCallback((stage: UiBusyStage) => {
+    const token = uiBusyTokenRef.current + 1;
+    uiBusyTokenRef.current = token;
+    setUiBusyStage(stage);
+    setUiBusyStartedAt(Date.now());
+    setUiBusyClock(Date.now());
+    return token;
+  }, []);
+
+  const endUiBusy = useCallback((token: number) => {
+    if (uiBusyTokenRef.current !== token) return;
+    setUiBusyStage(null);
+    setUiBusyStartedAt(null);
+  }, []);
+
+  useEffect(() => {
+    if (!uiBusyStage || !uiBusyStartedAt) return;
+    const timer = window.setInterval(() => {
+      setUiBusyClock(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [uiBusyStage, uiBusyStartedAt]);
+
+  useEffect(() => {
+    if (searchState.status !== 'searching' || !searchState.startedAt) return;
+    const timer = window.setInterval(() => {
+      setSearchState((prev) => (
+        prev.status === 'searching' && prev.startedAt
+          ? { ...prev, elapsedMs: Date.now() - prev.startedAt }
+          : prev
+      ));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [searchState.startedAt, searchState.status]);
+
+  useEffect(() => {
+    const syncRealtimeConnectionState = () => {
+      const connected = websocketService.isConnected();
+      if (connected) {
+        hasEverConnectedRealtimeRef.current = true;
+        lastRealtimeConnectedAtRef.current = Date.now();
+        setConnectionState((prev) => (prev === 'connected' ? prev : 'connected'));
+        return;
+      }
+      const lastConnectedAt = lastRealtimeConnectedAtRef.current;
+      const reconnectWindowMs = 12000;
+      const isReconnecting = Boolean(
+        hasEverConnectedRealtimeRef.current
+        && lastConnectedAt
+        && (Date.now() - lastConnectedAt) < reconnectWindowMs
+      );
+      const nextState: RealtimeConnectionState = isReconnecting ? 'reconnecting' : 'disconnected';
+      setConnectionState((prev) => (prev === nextState ? prev : nextState));
+    };
+
+    syncRealtimeConnectionState();
+    const intervalId = window.setInterval(syncRealtimeConnectionState, 1000);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        syncRealtimeConnectionState();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, []);
+
+  const isAuthError = useCallback((err: unknown) => {
+    if (!err) return false;
+    const status = (err as { status?: number })?.status;
+    if (status === 401) return true;
+    const message = err instanceof Error
+      ? err.message
+      : String((err as { detail?: unknown })?.detail || '');
+    return /unauthorized|session expired|missing or invalid token|invalid or expired token/i.test(message);
+  }, []);
+
+  const handleSessionExpired = useCallback(() => {
+    if (sessionRedirectingRef.current) return;
+    sessionRedirectingRef.current = true;
+    const draftIdea = userInput.idea.trim();
+    if (typeof window !== 'undefined') {
+      try {
+        if (draftIdea) {
+          window.localStorage.setItem('pendingIdea', draftIdea);
+          window.localStorage.setItem('pendingAutoStart', 'true');
+        }
+        window.localStorage.setItem('postLoginRedirect', '/simulate');
+      } catch {
+        // ignore
+      }
+    }
+    searchAbortRef.current?.abort();
+    setIsChatThinking(false);
+    setIsConfigSearching(false);
+    setLlmBusy(false);
+    setReportBusy(false);
+    setResumeBusy(false);
+    setPauseBusy(false);
+    setResearchReviewBusy(false);
+    setClarificationBusy(false);
+    setPreflightBusy(false);
+    setSocietyAssistantBusy(false);
+    setPostActionBusy(null);
+    setSearchState({ status: 'idle' });
+    setUiBusyStage(null);
+    setUiBusyStartedAt(null);
+    clearAuthTokens();
+    navigate('/?auth=login', { replace: true });
+  }, [navigate, userInput.idea]);
+
+  const uiBusyElapsedMs = useMemo(
+    () => (uiBusyStage && uiBusyStartedAt ? Math.max(0, uiBusyClock - uiBusyStartedAt) : undefined),
+    [uiBusyClock, uiBusyStage, uiBusyStartedAt],
+  );
+
   const getAssistantMessage = useCallback(async (prompt: string) => {
+    const busyToken = beginUiBusy('assistant_reply');
     const context = chatMessages
       .slice(-6)
       .map((msg) => `${msg.type === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
@@ -390,30 +546,44 @@ const Index = () => {
         ),
       ]);
       return normalizeAssistantText(String(text));
-    } catch {
+    } catch (err: unknown) {
+      if (isAuthError(err)) {
+        handleSessionExpired();
+      }
       return '';
+    } finally {
+      endUiBusy(busyToken);
     }
-  }, [chatMessages, settings.language]);
+  }, [beginUiBusy, chatMessages, endUiBusy, handleSessionExpired, isAuthError, settings.language]);
 
   const extractWithRetry = useCallback(async (message: string, schemaPayload: Record<string, unknown>) => {
+    const busyToken = beginUiBusy('extracting_schema');
     const timeoutMs = 10000;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        const result = await Promise.race([
-          apiService.extractSchema(message, schemaPayload),
-          new Promise<ReturnType<typeof apiService.extractSchema>>((_, reject) =>
-            setTimeout(() => reject(new Error('Extract timeout')), timeoutMs)
-          ),
-        ]);
-        return result;
-      } catch (err) {
-        if (attempt == 1) {
-          throw err;
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const result = await Promise.race([
+            apiService.extractSchema(message, schemaPayload),
+            new Promise<ReturnType<typeof apiService.extractSchema>>((_, reject) =>
+              setTimeout(() => reject(new Error('Extract timeout')), timeoutMs)
+            ),
+          ]);
+          return result;
+        } catch (err: unknown) {
+          if (isAuthError(err)) {
+            handleSessionExpired();
+            throw err;
+          }
+          if (attempt === 1) {
+            throw err;
+          }
         }
       }
+      throw new Error('Extract failed');
+    } finally {
+      endUiBusy(busyToken);
     }
-    throw new Error('Extract failed');
-  }, []);
+  }, [beginUiBusy, endUiBusy, handleSessionExpired, isAuthError]);
 
   const addSystemMessage = useCallback((
     content: string,
@@ -477,6 +647,10 @@ const Index = () => {
     loadedFromQueryRef.current = requestedSimulationId;
     setAutoStartPending(false);
       simulation.loadSimulation(requestedSimulationId).catch((err: unknown) => {
+      if (isAuthError(err)) {
+        handleSessionExpired();
+        return;
+      }
       const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
       addSystemMessage(
         settings.language === 'ar'
@@ -486,8 +660,11 @@ const Index = () => {
     });
   }, [
     addSystemMessage,
+    handleSessionExpired,
+    isAuthError,
     requestedSimulationId,
     settings.language,
+    simulation,
     simulation.loadSimulation,
     simulation.simulationId,
   ]);
@@ -535,8 +712,8 @@ const Index = () => {
     const errorText = String(simulation.error || '').toLowerCase();
     if (!errorText) return;
     if (!errorText.includes('session expired') && !errorText.includes('unauthorized')) return;
-    navigate('/?auth=login', { replace: true });
-  }, [navigate, simulation.error]);
+    handleSessionExpired();
+  }, [handleSessionExpired, simulation.error]);
 
   useEffect(() => {
     const simulationId = simulation.simulationId?.trim();
@@ -728,14 +905,16 @@ const Index = () => {
   ]);
 
   useEffect(() => {
-    const saved = localStorage.getItem('appSettings');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        setSettings((prev) => ({ ...prev, ...parsed }));
-      } catch {
-        // ignore
+    if (typeof window === 'undefined') return;
+    const saved = window.localStorage.getItem('appSettings');
+    if (!saved) return;
+    try {
+      const parsed = JSON.parse(saved);
+      if (typeof parsed?.autoFocusInput === 'boolean') {
+        setAutoFocusInput(parsed.autoFocusInput);
       }
+    } catch {
+      // ignore
     }
   }, []);
 
@@ -805,15 +984,24 @@ const Index = () => {
   ]);
 
   useEffect(() => {
-    localStorage.setItem('appSettings', JSON.stringify(settings));
-    const root = document.documentElement;
-    root.lang = settings.language;
-    root.dir = settings.language === 'ar' ? 'rtl' : 'ltr';
-    root.classList.toggle('rtl', settings.language === 'ar');
-    root.classList.toggle('lang-ar', settings.language === 'ar');
-    root.classList.remove('theme-dark', 'theme-light');
-    root.classList.add(`theme-${settings.theme}`);
-  }, [settings]);
+    if (typeof window === 'undefined') return;
+    try {
+      const saved = window.localStorage.getItem('appSettings');
+      const parsed = saved ? JSON.parse(saved) : {};
+      window.localStorage.setItem('appSettings', JSON.stringify({
+        ...parsed,
+        autoFocusInput,
+      }));
+    } catch {
+      // ignore
+    }
+  }, [autoFocusInput]);
+
+  useEffect(() => {
+    return () => {
+      searchAbortRef.current?.abort();
+    };
+  }, []);
 
   const computePreflightKey = useCallback((input: UserInput) => JSON.stringify({
     idea: input.idea.trim(),
@@ -892,31 +1080,39 @@ const Index = () => {
 
   const mapPreflightQuestion = useCallback((question: SimulationPreflightNextResponse['question'] | Record<string, unknown> | null): PreflightQuestion | null => {
     if (!question || typeof question !== 'object') return null;
-    const questionId = String((question as any).question_id || (question as any).id || '').trim();
-    const text = String((question as any).question || '').trim();
+    const normalized = question as Record<string, unknown>;
+    const questionId = String(normalized.question_id || normalized.id || '').trim();
+    const text = String(normalized.question || '').trim();
     if (!questionId || !text) return null;
-    const options = Array.isArray((question as any).options)
-      ? (question as any).options
-          .map((item, idx) => ({
-            id: String(item?.id || `opt_${idx + 1}`).trim(),
-            label: String(item?.label || '').trim(),
-          }))
-          .filter((item) => item.id && item.label)
+    const options = Array.isArray(normalized.options)
+      ? normalized.options
+          .map((item, idx) => {
+            if (!item || typeof item !== 'object') return null;
+            const raw = item as Record<string, unknown>;
+            const id = String(raw.id || `opt_${idx + 1}`).trim();
+            const label = String(raw.label || '').trim();
+            if (!id || !label) return null;
+            return { id, label };
+          })
+          .filter((item): item is { id: string; label: string } => Boolean(item))
           .slice(0, 3)
       : [];
     if (options.length < 3) return null;
+    const questionQuality = normalized.question_quality && typeof normalized.question_quality === 'object'
+      ? normalized.question_quality as Record<string, unknown>
+      : null;
     return {
       questionId,
-      axis: String((question as any).axis || '').trim() || 'decision_axis',
+      axis: String(normalized.axis || '').trim() || 'decision_axis',
       question: text,
       options,
-      reasonSummary: (question as any).reason_summary ? String((question as any).reason_summary).trim() : undefined,
+      reasonSummary: normalized.reason_summary ? String(normalized.reason_summary).trim() : undefined,
       required: true,
-      questionQuality: (question as any).question_quality
+      questionQuality: questionQuality
         ? {
-            score: typeof (question as any).question_quality.score === 'number' ? (question as any).question_quality.score : undefined,
-            checksPassed: Array.isArray((question as any).question_quality.checks_passed)
-              ? (question as any).question_quality.checks_passed.map((item: unknown) => String(item || '').trim()).filter(Boolean)
+            score: typeof questionQuality.score === 'number' ? questionQuality.score : undefined,
+            checksPassed: Array.isArray(questionQuality.checks_passed)
+              ? questionQuality.checks_passed.map((item: unknown) => String(item || '').trim()).filter(Boolean)
               : undefined,
           }
         : null,
@@ -1097,9 +1293,8 @@ const Index = () => {
     buildPreflightDraftContext,
     computePreflightKey,
     mapPreflightQuestion,
-    pendingPreflightQuestion?.axis,
+    pendingPreflightQuestion,
     preflightBusy,
-    preflightHistory,
     understandingAnswers,
     understandingQueue,
     settings.language,
@@ -1202,6 +1397,7 @@ const Index = () => {
 
   useEffect(() => {
     let active = true;
+    const busyToken = beginUiBusy('checking_session');
     apiService.getMe()
       .then((me) => {
         if (!active) return;
@@ -1214,11 +1410,23 @@ const Index = () => {
           setCreditNotice(null);
         }
       })
-      .catch(() => {
-        if (active) setCreditNotice(null);
+      .catch((err: unknown) => {
+        if (!active) return;
+        if (isAuthError(err)) {
+          handleSessionExpired();
+          return;
+        }
+        setCreditNotice(null);
+      })
+      .finally(() => {
+        if (!active) return;
+        endUiBusy(busyToken);
       });
-    return () => { active = false; };
-  }, [isCreditsBlocked, settings.language]);
+    return () => {
+      active = false;
+      endUiBusy(busyToken);
+    };
+  }, [beginUiBusy, endUiBusy, handleSessionExpired, isAuthError, isCreditsBlocked, settings.language]);
 
 
   const addOptionsMessage = useCallback((
@@ -1410,7 +1618,9 @@ const Index = () => {
 
     if (!researchReviewed) {
       if (!hasSearchForCurrentIdea) {
-        const result = await runSearch(ideaQuery, SEARCH_TIMEOUT_BASE_MS, { promptOnTimeout: true });
+        const runSearchCurrent = runSearchRef.current;
+        if (!runSearchCurrent) return;
+        const result = await runSearchCurrent(ideaQuery, SEARCH_TIMEOUT_BASE_MS, { promptOnTimeout: true });
         if (result.status !== 'complete') {
           setActivePanel('chat');
           return;
@@ -1464,6 +1674,7 @@ const Index = () => {
     if (reasoningTimerRef.current) {
       window.clearTimeout(reasoningTimerRef.current);
     }
+    const startBusyToken = beginUiBusy('starting_simulation');
     try {
       addSystemMessage(settings.language === 'ar' ? 'بدء المحاكاة...' : 'Starting simulation...');
       const config = buildConfig(userInput);
@@ -1500,11 +1711,15 @@ const Index = () => {
         if (!isCreditsBlocked(me)) {
           setCreditNotice(null);
         }
-      }).catch(() => undefined);
-    } catch (err) {
+      }).catch((err: unknown) => {
+        if (isAuthError(err)) {
+          handleSessionExpired();
+        }
+      });
+    } catch (err: unknown) {
       console.warn('Simulation start failed.', err);
       setReasoningActive(false);
-      const status = err?.status;
+      const status = (err as { status?: number })?.status;
       if (status === 429) {
         try {
           const me = await apiService.getMe();
@@ -1522,30 +1737,38 @@ const Index = () => {
               ? 'نفد رصيد التوكنز. اشحن Credits للمتابعة.'
               : 'Token budget exhausted. Add credits to continue.');
           }
-        } catch {
+        } catch (meErr: unknown) {
+          if (isAuthError(meErr)) {
+            handleSessionExpired();
+            return;
+          }
           addSystemMessage(settings.language === 'ar'
             ? 'انتهت الحصة اليومية المجانية من التوكنز. اشحن Credits أو انتظر للغد.'
             : 'Daily free token quota reached. Add credits to continue.');
         }
         return;
       }
-      if (status === 401) {
-        addSystemMessage(settings.language === 'ar'
-          ? 'فشل بدء الجلسة. سجّل الدخول مرة أخرى.'
-          : 'Session expired. Please log in again.');
+      if (isAuthError(err)) {
+        handleSessionExpired();
         return;
       }
-      const msg = err?.message ? ` ${err.message}` : '';
+      const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
       addSystemMessage(settings.language === 'ar'
         ? `Failed to start simulation.${msg}`.trim()
         : `Failed to start simulation.${msg}`.trim());
+    } finally {
+      endUiBusy(startBusyToken);
     }
   }, [
     addUserMessage,
     addSystemMessage,
+    beginUiBusy,
     buildConfig,
+    endUiBusy,
     getMissingForStart,
     hasStarted,
+    handleSessionExpired,
+    isAuthError,
     isCreditsBlocked,
     meSnapshot,
     pendingIdeaConfirmation,
@@ -1592,9 +1815,8 @@ const Index = () => {
   }, [
     addSystemMessage,
     resumeBusy,
+    simulation,
     settings.language,
-    simulation.resumeSimulation,
-    simulation.simulationId,
   ]);
 
   const handleManualPause = useCallback(async () => {
@@ -1624,10 +1846,8 @@ const Index = () => {
   }, [
     addSystemMessage,
     pauseBusy,
+    simulation,
     settings.language,
-    simulation.pauseSimulation,
-    simulation.simulationId,
-    simulation.status,
   ]);
 
   const handleSubmitClarification = useCallback(async (payload: {
@@ -1926,16 +2146,6 @@ const Index = () => {
     settings.language,
     simulation,
     userInput,
-    preflightContextKey,
-    pendingResearchReview,
-    pendingIdeaConfirmation,
-    pendingPreflightQuestion,
-    researchContext.summary,
-    researchContext.sources.length,
-    researchContext.structured,
-    researchGateKey,
-    researchIdea,
-    searchState.status,
   ]);
 
   const fetchFilteredAgents = useCallback(async (stance: 'accepted' | 'rejected' | 'neutral') => {
@@ -2275,7 +2485,11 @@ Required sections:
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
-    } catch (err) {
+    } catch (err: unknown) {
+      if (isAuthError(err)) {
+        handleSessionExpired();
+        return;
+      }
       console.warn('Report generation failed', err);
       addSystemMessage(settings.language === 'ar'
         ? 'حصلت مشكلة أثناء تجهيز التقرير.'
@@ -2283,34 +2497,72 @@ Required sections:
     } finally {
       setReportBusy(false);
     }
-  }, [addSystemMessage, escapeHtml, reportBusy, researchContext.summary, researchContext.structured, settings.language, simulation.summary, userInput.city, userInput.country, userInput.idea]);
+  }, [
+    addSystemMessage,
+    escapeHtml,
+    handleSessionExpired,
+    isAuthError,
+    reportBusy,
+    researchContext.summary,
+    researchContext.structured,
+    settings.language,
+    simulation.summary,
+    userInput.city,
+    userInput.country,
+    userInput.idea,
+  ]);
 
-  async function runSearch(query: string, timeoutMs: number, options?: { promptOnTimeout?: boolean }) {
+  const runSearch = useCallback(async (
+    query: string,
+    timeoutMs: number,
+    options?: { promptOnTimeout?: boolean },
+  ) => {
     const promptOnTimeout = options?.promptOnTimeout ?? true;
+    const requestSeq = searchRequestSeqRef.current + 1;
+    searchRequestSeqRef.current = requestSeq;
+    searchAbortRef.current?.abort();
+    const controller = new AbortController();
+    searchAbortRef.current = controller;
+    let timeoutId: number | null = null;
+
     searchAttemptRef.current += 1;
     const attempt = searchAttemptRef.current;
-    setResearchIdea(query.trim());
-    setSearchState({ status: 'searching', query, timeoutMs, attempts: attempt });
+    const trimmedQuery = query.trim();
+    const startedAt = Date.now();
+    setResearchIdea(trimmedQuery);
+    setSearchState({
+      status: 'searching',
+      stage: 'prestart_research',
+      query: trimmedQuery,
+      timeoutMs,
+      attempts: attempt,
+      startedAt,
+      elapsedMs: 0,
+    });
     setIsConfigSearching(true);
+    const locationLabel = getSearchLocationLabel();
+
     try {
-      const locationLabel = getSearchLocationLabel();
-      const search = await Promise.race([
-        apiService.runPrestartResearch({
-          idea: query,
+      timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+      const searchData = await apiService.runPrestartResearch(
+        {
+          idea: trimmedQuery,
           category: userInput.category || DEFAULT_CATEGORY,
           country: userInput.country.trim(),
           city: userInput.city.trim(),
           language: settings.language === 'ar' ? 'ar' : 'en',
-        }),
-        new Promise<SearchResponse>((_, reject) =>
-          setTimeout(() => reject(new Error('Search timeout')), timeoutMs)
-        ),
-      ]);
-      const searchData = search as (SearchResponse & {
+        },
+        { signal: controller.signal },
+      ) as SearchResponse & {
         summary?: string;
         highlights?: string[];
         gaps?: string[];
-      });
+      };
+
+      if (requestSeq !== searchRequestSeqRef.current) {
+        return { status: 'aborted' as const };
+      }
+
       if (!searchData.answer && searchData.summary) {
         searchData.answer = searchData.summary;
       }
@@ -2324,10 +2576,11 @@ Required sections:
         || Boolean(searchData.structured?.price_sensitivity)
         || Boolean(searchData.structured?.regulatory_risk);
       const hasAnswer = Boolean(searchData.answer?.trim() || searchData.summary?.trim());
+
       if (!hasStructured && !hasAnswer) {
         setSearchState({
           status: 'timeout',
-          query,
+          query: trimmedQuery,
           answer: '',
           provider: searchData.provider || 'none',
           isLive: searchData.is_live,
@@ -2339,7 +2592,7 @@ Required sections:
         if (promptOnTimeout && !searchPromptedRef.current) {
           addSystemMessage(getSearchTimeoutPrompt({
             locationLabel,
-            query,
+            query: trimmedQuery,
             timeoutMs,
             attempts: attempt,
           }));
@@ -2347,10 +2600,11 @@ Required sections:
         }
         return { status: 'timeout' as const };
       }
+
       setSearchState({
         status: 'complete',
-        query,
-          answer: searchData.answer || searchData.summary || '',
+        query: trimmedQuery,
+        answer: searchData.answer || searchData.summary || '',
         provider: searchData.provider,
         isLive: searchData.is_live,
         results: searchData.results,
@@ -2369,22 +2623,33 @@ Required sections:
       }
       searchPromptedRef.current = false;
       return { status: 'complete' as const };
-    } catch {
+    } catch (err: unknown) {
+      if (requestSeq !== searchRequestSeqRef.current || controller.signal.aborted) {
+        return { status: 'aborted' as const };
+      }
+      if (isAuthError(err)) {
+        handleSessionExpired();
+        return { status: 'aborted' as const };
+      }
+
       setSearchState({
         status: 'timeout',
-        query,
+        stage: 'prestart_research',
+        query: trimmedQuery,
         answer: '',
         provider: 'none',
         isLive: false,
         results: [],
         timeoutMs,
         attempts: attempt,
+        startedAt,
+        elapsedMs: Date.now() - startedAt,
       });
       setResearchContext({ summary: '', sources: [], structured: undefined });
       if (promptOnTimeout && !searchPromptedRef.current) {
         addSystemMessage(getSearchTimeoutPrompt({
-          locationLabel: getSearchLocationLabel(),
-          query,
+          locationLabel,
+          query: trimmedQuery,
           timeoutMs,
           attempts: attempt,
         }));
@@ -2392,9 +2657,29 @@ Required sections:
       }
       return { status: 'timeout' as const };
     } finally {
-      setIsConfigSearching(false);
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+      if (requestSeq === searchRequestSeqRef.current) {
+        setIsConfigSearching(false);
+      }
+      if (searchAbortRef.current === controller) {
+        searchAbortRef.current = null;
+      }
     }
-  }
+  }, [
+    addSystemMessage,
+    buildSearchSummary,
+    getSearchLocationLabel,
+    getSearchTimeoutPrompt,
+    settings.language,
+    userInput.category,
+    userInput.city,
+    userInput.country,
+    handleSessionExpired,
+    isAuthError,
+  ]);
+  runSearchRef.current = runSearch;
 
 
   const handleConfigSubmit = useCallback(async () => {
@@ -2592,7 +2877,11 @@ Required sections:
             let extraction = null;
             try {
               extraction = await extractWithRetry(trimmed, schemaPayload);
-            } catch {
+            } catch (err: unknown) {
+              if (isAuthError(err)) {
+                handleSessionExpired();
+                return;
+              }
               addSystemMessage(settings.language === 'ar'
                 ? 'الـ LLM مشغول الآن. حاول مرة أخرى بعد قليل.'
                 : 'LLM is busy right now. Please try again in a moment.');
@@ -2633,6 +2922,7 @@ Required sections:
           if (simulation.status === 'running' || simulation.status === 'completed') {
             const context = `Idea: ${userInput.idea}. Location: ${userInput.city}, ${userInput.country}.`;
             let mode: 'update' | 'discuss' = 'discuss';
+            const modeBusyToken = beginUiBusy('detecting_mode');
             try {
               const res = await Promise.race([
                 apiService.detectMessageMode(trimmed, context, settings.language),
@@ -2641,9 +2931,15 @@ Required sections:
                 ),
               ]);
               mode = res.mode;
-            } catch {
+            } catch (err: unknown) {
+              if (isAuthError(err)) {
+                handleSessionExpired();
+                return;
+              }
               const isQuestion = /[?؟]/.test(trimmed);
               mode = isQuestion ? 'discuss' : 'update';
+            } finally {
+              endUiBusy(modeBusyToken);
             }
 
             if (mode === 'discuss') {
@@ -2693,6 +2989,10 @@ If rejection is about competition or location, suggest searching for a better lo
           try {
             extraction = await extractWithRetry(trimmed, schemaPayload);
           } catch (extractErr) {
+            if (isAuthError(extractErr)) {
+              handleSessionExpired();
+              return;
+            }
             console.warn('Schema extraction failed.', extractErr);
             addSystemMessage(settings.language === 'ar'
               ? 'الـ LLM مشغول الآن. حاول مرة أخرى بعد قليل.'
@@ -2759,7 +3059,11 @@ If rejection is about competition or location, suggest searching for a better lo
           addSystemMessage(settings.language === 'ar'
             ? 'راجع الإعدادات ثم اضغط تأكيد البيانات للمتابعة.'
             : 'Review the configuration, then confirm to continue.');
-        } catch (err) {
+        } catch (err: unknown) {
+          if (isAuthError(err)) {
+            handleSessionExpired();
+            return;
+          }
           console.error('Schema extraction failed', err);
           addSystemMessage(settings.language === 'ar'
             ? 'الـ LLM غير متاح الآن. أعد تشغيل الخلفية ثم حاول مرة أخرى.'
@@ -2770,21 +3074,24 @@ If rejection is about competition or location, suggest searching for a better lo
       [
         addUserMessage,
         addSystemMessage,
+        beginUiBusy,
+        buildConfig,
+        endUiBusy,
         extractWithRetry,
         getAssistantMessage,
         getMissingForStart,
         handleConfigSubmit,
-        handleConfirmStart,
-        handleStart,
-        pendingResearchReview,
+        handleSessionExpired,
+        isAuthError,
         pendingConfigReview,
         pendingUpdate,
         promptForMissing,
         researchContext,
-        setResearchContext,
         settings.language,
         simulation,
         isWaitingForLocationChoice,
+        isWaitingForCity,
+        isWaitingForCountry,
         touched,
         userInput,
       ]
@@ -2921,8 +3228,6 @@ If rejection is about competition or location, suggest searching for a better lo
       setMissingFields,
       settings.language,
       userInput,
-      userInput.goals,
-      userInput.targetAudience,
     ]
   );
 
@@ -3219,24 +3524,216 @@ If rejection is about competition or location, suggest searching for a better lo
     showResumeAction,
     simulation.simulationId,
     simulation.status,
+    simulation.statusReason,
     setActivePanel,
     simulationActuallyStarted,
     userInput.idea,
   ]);
-  const hasReasoningContent = simulation.reasoningFeed.length > 0;
   const isArabic = settings.language === 'ar';
+  const uiProgress = useMemo(() => {
+    if (searchState.status === 'searching') {
+      return {
+        active: true,
+        stage: searchState.stage ?? 'prestart_research',
+        elapsedMs: searchState.elapsedMs,
+        timeoutMs: searchState.timeoutMs,
+      };
+    }
+    if (!uiBusyStage) {
+      return undefined;
+    }
+    return {
+      active: true,
+      stage: uiBusyStage,
+      elapsedMs: uiBusyElapsedMs,
+      timeoutMs: undefined,
+    };
+  }, [searchState.elapsedMs, searchState.stage, searchState.status, searchState.timeoutMs, uiBusyElapsedMs, uiBusyStage]);
+
+  const handleConfigChange = useCallback((updates: Partial<UserInput>) => {
+    setUserInput((prev) => {
+      const next = { ...prev, ...updates };
+      const hasLocation = Boolean(next.city.trim() || next.country.trim());
+      if (hasLocation) {
+        setLocationChoice('yes');
+        setIsWaitingForLocationChoice(false);
+      }
+      const missing = getMissingForStart(next, hasLocation ? 'yes' : undefined);
+      setMissingFields(missing.filter((field) => field !== 'location_choice'));
+      return next;
+    });
+  }, [getMissingForStart]);
+
+  const sidePanel = (
+    <div className="min-h-0 rounded-2xl border border-border/50 bg-card/20 overflow-hidden flex flex-col">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border/40 bg-background/50 backdrop-blur">
+        <div className="flex gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={() => setActivePanel('chat')}
+            className={cn(
+              'px-3 py-1.5 rounded-full text-xs font-medium transition',
+              activePanel === 'chat'
+                ? 'bg-primary text-primary-foreground'
+                : 'bg-secondary/60 text-muted-foreground hover:text-foreground',
+            )}
+          >
+            {settings.language === 'ar' ? 'الدردشة' : 'Chat'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActivePanel('reasoning')}
+            className={cn(
+              'px-3 py-1.5 rounded-full text-xs font-medium transition',
+              activePanel === 'reasoning'
+                ? 'bg-primary text-primary-foreground'
+                : 'bg-secondary/60 text-muted-foreground hover:text-foreground',
+            )}
+          >
+            {settings.language === 'ar' ? 'تفكير الوكلاء' : 'Reasoning'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActivePanel('config')}
+            className={cn(
+              'px-3 py-1.5 rounded-full text-xs font-medium transition',
+              activePanel === 'config'
+                ? 'bg-primary text-primary-foreground'
+                : 'bg-secondary/60 text-muted-foreground hover:text-foreground',
+            )}
+          >
+            {settings.language === 'ar' ? 'الإعدادات' : 'Config'}
+          </button>
+        </div>
+      </div>
+      <div className="min-h-0 flex-1" dir={settings.language === 'ar' ? 'rtl' : 'ltr'}>
+        {activePanel === 'config' ? (
+          <ConfigPanel
+            value={userInput}
+            onChange={handleConfigChange}
+            onSubmit={handleConfigSubmit}
+            missingFields={missingFields}
+            language={settings.language}
+            isSearching={isConfigSearching}
+            showSocietyBuilder={showSocietyBuilder}
+            onToggleSocietyBuilder={setShowSocietyBuilder}
+            societyControls={societyControls}
+            onSocietyControlsChange={(updates) => setSocietyControls((prev) => ({ ...prev, ...updates }))}
+            onOpenStartChoice={handleOpenStartChoice}
+            societyAssistantBusy={societyAssistantBusy}
+            societyAssistantAnswer={societyAssistantAnswer}
+            onAskSocietyAssistant={handleAskSocietyAssistant}
+          />
+        ) : (
+          <ChatPanel
+            viewMode={activePanel === 'reasoning' ? 'reasoning' : 'chat'}
+            messages={chatMessages}
+            reasoningFeed={simulation.reasoningFeed}
+            reasoningDebug={simulation.reasoningDebug}
+            onSendMessage={handleSendMessage}
+            onSelectOption={handleOptionSelect}
+            isWaitingForCity={isWaitingForCity}
+            isWaitingForCountry={isWaitingForCountry}
+            isWaitingForLocationChoice={isWaitingForLocationChoice}
+            searchState={searchState}
+            uiProgress={uiProgress}
+            isThinking={isChatThinking}
+            showRetry={llmBusy}
+            onRetryLlm={handleRetryLlm}
+            simulationStatus={simulation.status}
+            simulationError={simulation.error}
+            reasoningActive={reasoningActive}
+            isSummarizing={isSummarizing}
+            phaseState={{
+              currentPhaseKey: simulation.currentPhaseKey,
+              progressPct: simulation.phaseProgressPct,
+            }}
+            researchSourcesLive={simulation.researchSources}
+            quickReplies={quickReplies || undefined}
+            onQuickReply={handleQuickReply}
+            primaryControl={primaryControl}
+            pendingClarification={simulation.pendingClarification}
+            canAnswerClarification={simulation.canAnswerClarification}
+            clarificationBusy={clarificationBusy}
+            onSubmitClarification={handleSubmitClarification}
+            pendingPreflightQuestion={pendingPreflightQuestion}
+            preflightRound={preflightRound}
+            preflightMaxRounds={preflightMaxRounds}
+            preflightBusy={preflightBusy}
+            onSubmitPreflight={handleSubmitPreflight}
+            pendingIdeaConfirmation={pendingIdeaConfirmation}
+            onConfirmIdeaForStart={handleConfirmPreflightIdea}
+            pendingResearchReview={isResearchReviewPause ? simulation.pendingResearchReview : null}
+            researchReviewBusy={researchReviewBusy}
+            onSubmitResearchReviewAction={handleSubmitResearchAction}
+            postActionsEnabled={simulation.status === 'completed' && Boolean(simulation.simulationId)}
+            recommendedPostAction={recommendedPostAction}
+            finalAcceptancePct={finalAcceptancePct}
+            postActionBusy={postActionBusy}
+            postActionResult={postActionResult}
+            onRunPostAction={(action) => { void handleRunPostAction(action); }}
+            onStartFollowupFromPostAction={() => { void handleStartFollowupFromAction(); }}
+            settings={settings}
+          />
+        )}
+      </div>
+    </div>
+  );
+
+  const arenaPanel = (
+    <div className="min-h-0 grid grid-rows-[minmax(0,1fr)_auto] gap-4">
+      <div className="min-h-0 rounded-2xl border border-border/50 overflow-hidden">
+        <SimulationArena
+          agents={Array.from(simulation.agents.values())}
+          activePulses={simulation.activePulses}
+          language={settings.language}
+        />
+      </div>
+      <IterationTimeline
+        currentIteration={simulation.metrics.currentIteration}
+        totalIterations={simulation.metrics.totalIterations}
+        language={settings.language}
+        currentPhaseKey={simulation.currentPhaseKey}
+        phaseProgressPct={simulation.phaseProgressPct}
+      />
+    </div>
+  );
+
+  const metricsPane = (
+    <div className="min-h-0">
+      <MetricsPanel
+        metrics={simulation.metrics}
+        language={settings.language}
+        onSelectStance={handleSelectStanceFilter}
+        selectedStance={selectedStanceFilter}
+        filteredAgents={filteredAgents}
+        filteredAgentsTotal={filteredAgentsTotal}
+      />
+    </div>
+  );
 
   return (
-    <div className="h-screen w-screen bg-background flex flex-col overflow-hidden">
+    <div className="h-[100dvh] min-h-[100dvh] w-screen bg-background flex flex-col overflow-hidden">
       {/* Header */}
       <Header
         simulationStatus={simulation.status}
-        isConnected={websocketService.isConnected()}
+        connectionState={connectionState}
+        connectionScope="realtime"
         language={settings.language}
         settings={settings}
         showSettings={showSettings}
         onToggleSettings={() => setShowSettings((prev) => !prev)}
-        onSettingsChange={(updates) => setSettings((prev) => ({ ...prev, ...updates }))}
+        onSettingsChange={(updates) => {
+          if (updates.language) {
+            setLanguage(updates.language);
+          }
+          if (updates.theme === 'dark' || updates.theme === 'light') {
+            setTheme(updates.theme);
+          }
+          if (typeof updates.autoFocusInput === 'boolean') {
+            setAutoFocusInput(updates.autoFocusInput);
+          }
+        }}
         onExitDashboard={() => navigate('/dashboard')}
         onLogout={handleLogout}
       />
@@ -3329,317 +3826,19 @@ If rejection is about competition or location, suggest searching for a better lo
           </div>
         </div>
       )}
-      <div className="flex-1 overflow-hidden min-h-0 p-3 md:p-4">
-        <div className="h-full grid grid-cols-1 xl:grid-cols-[minmax(280px,26%)_minmax(0,1fr)_minmax(320px,30%)] gap-4 min-h-0">
-          {isArabic ? (
-            <>
-              <div className="min-h-0 rounded-2xl border border-border/50 bg-card/20 overflow-hidden flex flex-col">
-                <div className="flex items-center justify-between px-4 py-3 border-b border-border/40 bg-background/50 backdrop-blur">
-                  <div className="flex gap-2 flex-wrap">
-                    <button
-                      type="button"
-                      onClick={() => setActivePanel('chat')}
-                      className={cn(
-                        'px-3 py-1.5 rounded-full text-xs font-medium transition',
-                        activePanel === 'chat'
-                          ? 'bg-primary text-primary-foreground'
-                          : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
-                      )}
-                    >
-                      {settings.language === 'ar' ? 'الدردشة' : 'Chat'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setActivePanel('reasoning')}
-                      className={cn(
-                        'px-3 py-1.5 rounded-full text-xs font-medium transition',
-                        activePanel === 'reasoning'
-                          ? 'bg-primary text-primary-foreground'
-                          : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
-                      )}
-                    >
-                      {settings.language === 'ar' ? 'تفكير الوكلاء' : 'Reasoning'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setActivePanel('config')}
-                      className={cn(
-                        'px-3 py-1.5 rounded-full text-xs font-medium transition',
-                        activePanel === 'config'
-                          ? 'bg-primary text-primary-foreground'
-                          : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
-                      )}
-                    >
-                      {settings.language === 'ar' ? 'الإعدادات' : 'Config'}
-                    </button>
-                  </div>
-                </div>
-                <div className="min-h-0 flex-1" dir={settings.language === 'ar' ? 'rtl' : 'ltr'}>
-                  {activePanel === 'config' ? (
-                    <ConfigPanel
-                      value={userInput}
-                      onChange={(updates) => {
-                        setUserInput((prev) => {
-                          const next = { ...prev, ...updates };
-                          const hasLocation = Boolean(next.city.trim() || next.country.trim());
-                          if (hasLocation) {
-                            setLocationChoice('yes');
-                            setIsWaitingForLocationChoice(false);
-                          }
-                          const missing = getMissingForStart(next, hasLocation ? 'yes' : undefined);
-                          setMissingFields(missing.filter((field) => field !== 'location_choice'));
-                          return next;
-                        });
-                      }}
-                      onSubmit={handleConfigSubmit}
-                      missingFields={missingFields}
-                      language={settings.language}
-                      isSearching={isConfigSearching}
-                      showSocietyBuilder={showSocietyBuilder}
-                      onToggleSocietyBuilder={setShowSocietyBuilder}
-                      societyControls={societyControls}
-                      onSocietyControlsChange={(updates) => setSocietyControls((prev) => ({ ...prev, ...updates }))}
-                      onOpenStartChoice={handleOpenStartChoice}
-                      societyAssistantBusy={societyAssistantBusy}
-                      societyAssistantAnswer={societyAssistantAnswer}
-                      onAskSocietyAssistant={handleAskSocietyAssistant}
-                    />
-                  ) : (
-                    <ChatPanel
-                      viewMode={activePanel === 'reasoning' ? 'reasoning' : 'chat'}
-                      messages={chatMessages}
-                      reasoningFeed={simulation.reasoningFeed}
-                      reasoningDebug={simulation.reasoningDebug}
-                      onSendMessage={handleSendMessage}
-                      onSelectOption={handleOptionSelect}
-                      isWaitingForCity={isWaitingForCity}
-                      isWaitingForCountry={isWaitingForCountry}
-                      isWaitingForLocationChoice={isWaitingForLocationChoice}
-                      searchState={searchState}
-                      isThinking={isChatThinking}
-                      showRetry={llmBusy}
-                      onRetryLlm={handleRetryLlm}
-                      simulationStatus={simulation.status}
-                      simulationError={simulation.error}
-                      reasoningActive={reasoningActive}
-                      isSummarizing={isSummarizing}
-                      phaseState={{
-                        currentPhaseKey: simulation.currentPhaseKey,
-                        progressPct: simulation.phaseProgressPct,
-                      }}
-                      researchSourcesLive={simulation.researchSources}
-                      quickReplies={quickReplies || undefined}
-                      onQuickReply={handleQuickReply}
-                      primaryControl={primaryControl}
-                      pendingClarification={simulation.pendingClarification}
-                      canAnswerClarification={simulation.canAnswerClarification}
-                      clarificationBusy={clarificationBusy}
-                      onSubmitClarification={handleSubmitClarification}
-                      pendingPreflightQuestion={pendingPreflightQuestion}
-                      preflightRound={preflightRound}
-                      preflightMaxRounds={preflightMaxRounds}
-                      preflightBusy={preflightBusy}
-                      onSubmitPreflight={handleSubmitPreflight}
-                      pendingIdeaConfirmation={pendingIdeaConfirmation}
-                      onConfirmIdeaForStart={handleConfirmPreflightIdea}
-                      pendingResearchReview={isResearchReviewPause ? simulation.pendingResearchReview : null}
-                      researchReviewBusy={researchReviewBusy}
-                      onSubmitResearchReviewAction={handleSubmitResearchAction}
-                      postActionsEnabled={simulation.status === 'completed' && Boolean(simulation.simulationId)}
-                      recommendedPostAction={recommendedPostAction}
-                      finalAcceptancePct={finalAcceptancePct}
-                      postActionBusy={postActionBusy}
-                      postActionResult={postActionResult}
-                      onRunPostAction={(action) => { void handleRunPostAction(action); }}
-                      onStartFollowupFromPostAction={() => { void handleStartFollowupFromAction(); }}
-                      settings={settings}
-                    />
-                  )}
-                </div>
-              </div>
+      <div className="flex-1 min-h-0 overflow-y-auto xl:overflow-hidden p-3 md:p-4">
+        <div className="min-h-full xl:h-full grid grid-cols-1 xl:grid-cols-[minmax(280px,26%)_minmax(0,1fr)_minmax(320px,30%)] gap-4 min-h-0">
+          <div className={cn('min-h-0', isArabic ? 'xl:order-3' : 'xl:order-1')}>
+            {metricsPane}
+          </div>
 
-              <div className="min-h-0 grid grid-rows-[minmax(0,1fr)_auto] gap-4">
-                <div className="min-h-0 rounded-2xl border border-border/50 overflow-hidden">
-                  <SimulationArena
-                    agents={Array.from(simulation.agents.values())}
-                    activePulses={simulation.activePulses}
-                  />
-                </div>
-                <IterationTimeline
-                  currentIteration={simulation.metrics.currentIteration}
-                  totalIterations={simulation.metrics.totalIterations}
-                  language={settings.language}
-                  currentPhaseKey={simulation.currentPhaseKey}
-                  phaseProgressPct={simulation.phaseProgressPct}
-                />
-              </div>
+          <div className="min-h-0 xl:order-2">
+            {arenaPanel}
+          </div>
 
-              <div className="min-h-0">
-                <MetricsPanel
-                  metrics={simulation.metrics}
-                  language={settings.language}
-                  onSelectStance={handleSelectStanceFilter}
-                  selectedStance={selectedStanceFilter}
-                  filteredAgents={filteredAgents}
-                  filteredAgentsTotal={filteredAgentsTotal}
-                />
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="min-h-0">
-                <MetricsPanel
-                  metrics={simulation.metrics}
-                  language={settings.language}
-                  onSelectStance={handleSelectStanceFilter}
-                  selectedStance={selectedStanceFilter}
-                  filteredAgents={filteredAgents}
-                  filteredAgentsTotal={filteredAgentsTotal}
-                />
-              </div>
-
-              <div className="min-h-0 grid grid-rows-[minmax(0,1fr)_auto] gap-4">
-                <div className="min-h-0 rounded-2xl border border-border/50 overflow-hidden">
-                  <SimulationArena
-                    agents={Array.from(simulation.agents.values())}
-                    activePulses={simulation.activePulses}
-                  />
-                </div>
-                <IterationTimeline
-                  currentIteration={simulation.metrics.currentIteration}
-                  totalIterations={simulation.metrics.totalIterations}
-                  language={settings.language}
-                  currentPhaseKey={simulation.currentPhaseKey}
-                  phaseProgressPct={simulation.phaseProgressPct}
-                />
-              </div>
-
-              <div className="min-h-0 rounded-2xl border border-border/50 bg-card/20 overflow-hidden flex flex-col">
-                <div className="flex items-center justify-between px-4 py-3 border-b border-border/40 bg-background/50 backdrop-blur">
-                  <div className="flex gap-2 flex-wrap">
-                    <button
-                      type="button"
-                      onClick={() => setActivePanel('chat')}
-                      className={cn(
-                        'px-3 py-1.5 rounded-full text-xs font-medium transition',
-                        activePanel === 'chat'
-                          ? 'bg-primary text-primary-foreground'
-                          : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
-                      )}
-                    >
-                      {settings.language === 'ar' ? 'الدردشة' : 'Chat'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setActivePanel('reasoning')}
-                      className={cn(
-                        'px-3 py-1.5 rounded-full text-xs font-medium transition',
-                        activePanel === 'reasoning'
-                          ? 'bg-primary text-primary-foreground'
-                          : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
-                      )}
-                    >
-                      {settings.language === 'ar' ? 'تفكير الوكلاء' : 'Reasoning'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setActivePanel('config')}
-                      className={cn(
-                        'px-3 py-1.5 rounded-full text-xs font-medium transition',
-                        activePanel === 'config'
-                          ? 'bg-primary text-primary-foreground'
-                          : 'bg-secondary/60 text-muted-foreground hover:text-foreground'
-                      )}
-                    >
-                      {settings.language === 'ar' ? 'الإعدادات' : 'Config'}
-                    </button>
-                  </div>
-                </div>
-                <div className="min-h-0 flex-1" dir={settings.language === 'ar' ? 'rtl' : 'ltr'}>
-                  {activePanel === 'config' ? (
-                    <ConfigPanel
-                      value={userInput}
-                      onChange={(updates) => {
-                        setUserInput((prev) => {
-                          const next = { ...prev, ...updates };
-                          const hasLocation = Boolean(next.city.trim() || next.country.trim());
-                          if (hasLocation) {
-                            setLocationChoice('yes');
-                            setIsWaitingForLocationChoice(false);
-                          }
-                          const missing = getMissingForStart(next, hasLocation ? 'yes' : undefined);
-                          setMissingFields(missing.filter((field) => field !== 'location_choice'));
-                          return next;
-                        });
-                      }}
-                      onSubmit={handleConfigSubmit}
-                      missingFields={missingFields}
-                      language={settings.language}
-                      isSearching={isConfigSearching}
-                      showSocietyBuilder={showSocietyBuilder}
-                      onToggleSocietyBuilder={setShowSocietyBuilder}
-                      societyControls={societyControls}
-                      onSocietyControlsChange={(updates) => setSocietyControls((prev) => ({ ...prev, ...updates }))}
-                      onOpenStartChoice={handleOpenStartChoice}
-                      societyAssistantBusy={societyAssistantBusy}
-                      societyAssistantAnswer={societyAssistantAnswer}
-                      onAskSocietyAssistant={handleAskSocietyAssistant}
-                    />
-                  ) : (
-                    <ChatPanel
-                      viewMode={activePanel === 'reasoning' ? 'reasoning' : 'chat'}
-                      messages={chatMessages}
-                      reasoningFeed={simulation.reasoningFeed}
-                      reasoningDebug={simulation.reasoningDebug}
-                      onSendMessage={handleSendMessage}
-                      onSelectOption={handleOptionSelect}
-                      isWaitingForCity={isWaitingForCity}
-                      isWaitingForCountry={isWaitingForCountry}
-                      isWaitingForLocationChoice={isWaitingForLocationChoice}
-                      searchState={searchState}
-                      isThinking={isChatThinking}
-                      showRetry={llmBusy}
-                      onRetryLlm={handleRetryLlm}
-                      simulationStatus={simulation.status}
-                      simulationError={simulation.error}
-                      reasoningActive={reasoningActive}
-                      isSummarizing={isSummarizing}
-                      phaseState={{
-                        currentPhaseKey: simulation.currentPhaseKey,
-                        progressPct: simulation.phaseProgressPct,
-                      }}
-                      researchSourcesLive={simulation.researchSources}
-                      quickReplies={quickReplies || undefined}
-                      onQuickReply={handleQuickReply}
-                      primaryControl={primaryControl}
-                      pendingClarification={simulation.pendingClarification}
-                      canAnswerClarification={simulation.canAnswerClarification}
-                      clarificationBusy={clarificationBusy}
-                      onSubmitClarification={handleSubmitClarification}
-                      pendingPreflightQuestion={pendingPreflightQuestion}
-                      preflightRound={preflightRound}
-                      preflightMaxRounds={preflightMaxRounds}
-                      preflightBusy={preflightBusy}
-                      onSubmitPreflight={handleSubmitPreflight}
-                      pendingIdeaConfirmation={pendingIdeaConfirmation}
-                      onConfirmIdeaForStart={handleConfirmPreflightIdea}
-                      pendingResearchReview={isResearchReviewPause ? simulation.pendingResearchReview : null}
-                      researchReviewBusy={researchReviewBusy}
-                      onSubmitResearchReviewAction={handleSubmitResearchAction}
-                      postActionsEnabled={simulation.status === 'completed' && Boolean(simulation.simulationId)}
-                      recommendedPostAction={recommendedPostAction}
-                      finalAcceptancePct={finalAcceptancePct}
-                      postActionBusy={postActionBusy}
-                      postActionResult={postActionResult}
-                      onRunPostAction={(action) => { void handleRunPostAction(action); }}
-                      onStartFollowupFromPostAction={() => { void handleStartFollowupFromAction(); }}
-                      settings={settings}
-                    />
-                  )}
-                </div>
-              </div>
-            </>
-          )}
+          <div className={cn('min-h-0', isArabic ? 'xl:order-1' : 'xl:order-3')}>
+            {sidePanel}
+          </div>
         </div>
       </div>
     </div>

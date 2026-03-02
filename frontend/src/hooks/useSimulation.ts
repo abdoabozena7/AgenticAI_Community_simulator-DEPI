@@ -945,13 +945,8 @@ export function useSimulation(options?: UseSimulationOptions) {
       pollInFlightRef.current = true;
       let stateResponse: SimulationStateResponse | null = null;
       try {
-        stateResponse = await apiService.getSimulationState(simulationId);
-      } catch (err) {
-        const status = (err as Error & { status?: number }).status;
-        if (status === 401) {
-          handleUnauthorizedState();
-          return;
-        }
+        stateResponse = await fetchSimulationStateSafe(simulationId);
+      } catch {
         stateResponse = null;
       }
       try {
@@ -986,7 +981,7 @@ export function useSimulation(options?: UseSimulationOptions) {
       }
     }, pollIntervalMs);
     pollTaskRef.current = intervalId;
-  }, [applyStateResponse, clearPolling, handleUnauthorizedState, mapBackendStatus]);
+  }, [applyStateResponse, clearPolling, fetchSimulationStateSafe, mapBackendStatus]);
 
   const handleWebSocketEvent = useCallback((event: WebSocketEvent) => {
     const activeSimulationId = stateRef.current.simulationId;
@@ -1369,8 +1364,12 @@ export function useSimulation(options?: UseSimulationOptions) {
 
   const pauseSimulation = useCallback(async (simulationId: string, reason?: string) => {
     if (!simulationId) return null;
+    const opEpoch = requestEpochRef.current + 1;
+    requestEpochRef.current = opEpoch;
     const response = await apiService.pauseSimulation(simulationId, reason);
+    if (requestEpochRef.current !== opEpoch) return response;
     const snapshot = await fetchSimulationStateSafe(simulationId).catch(() => null);
+    if (requestEpochRef.current !== opEpoch) return response;
     if (snapshot && (!snapshot.simulation_id || snapshot.simulation_id === simulationId)) {
       applyStateResponse(snapshot);
     } else {

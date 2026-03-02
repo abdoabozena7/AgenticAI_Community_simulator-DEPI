@@ -1078,11 +1078,12 @@ class ApiService {
     country?: string;
     city?: string;
     language: 'ar' | 'en';
-  }): Promise<PrestartResearchResponse> {
+  }, options?: { signal?: AbortSignal }): Promise<PrestartResearchResponse> {
     return this.request<PrestartResearchResponse>('/simulation/research/prestart', {
       method: 'POST',
       body: JSON.stringify(payload),
       timeoutMs: ApiService.LONG_TIMEOUT_MS,
+      signal: options?.signal,
     });
   }
 

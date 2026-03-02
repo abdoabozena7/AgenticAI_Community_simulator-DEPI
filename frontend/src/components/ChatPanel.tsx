@@ -1,4 +1,4 @@
-﻿import { useState, useRef, useEffect, useMemo, useCallback, type CSSProperties } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback, useId, type CSSProperties } from 'react';
 import {
   Send,
   Bot,
@@ -16,6 +16,14 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ChatMessage, PendingClarification, PendingIdeaConfirmation, PendingResearchReview, PreflightQuestion, ReasoningMessage, SimulationStatus } from '@/types/simulation';
 import { cn } from '@/lib/utils';
+
+type BusyStage =
+  | 'extracting_schema'
+  | 'detecting_mode'
+  | 'assistant_reply'
+  | 'prestart_research'
+  | 'starting_simulation'
+  | 'checking_session';
 
 /* ------------------------------------------------------------------
    PROP-TYPES
@@ -65,6 +73,15 @@ interface ChatPanelProps {
   /** current status of the web-search routine */
   searchState?: {
     status: 'idle' | 'searching' | 'timeout' | 'error' | 'complete';
+    stage?: BusyStage;
+    timeoutMs?: number;
+    elapsedMs?: number;
+  };
+  uiProgress?: {
+    active: boolean;
+    stage: BusyStage;
+    elapsedMs?: number;
+    timeoutMs?: number;
   };
   phaseState?: {
     currentPhaseKey?: string | null;
@@ -173,6 +190,7 @@ function ReadMoreText({
 }) {
   const [internalExpanded, setInternalExpanded] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+  const contentId = useId();
   useEffect(() => {
     const apply = () => setIsMobile(window.innerWidth < 768);
     apply();
@@ -181,6 +199,18 @@ function ReadMoreText({
   }, []);
   const isExpanded = typeof expanded === 'boolean' ? expanded : internalExpanded;
   const words = useMemo(() => text.trim().split(/\s+/).filter(Boolean).length, [text]);
+  const toggleExpanded = useCallback(() => {
+    if (onToggleExpanded) {
+      onToggleExpanded();
+      return;
+    }
+    setInternalExpanded((prev) => !prev);
+  }, [onToggleExpanded]);
+  const handleReadMoreKeyDown = useCallback((event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    toggleExpanded();
+  }, [toggleExpanded]);
   const shouldClamp = words > (isMobile ? 55 : 85);
   const clampStyle = shouldClamp && !isExpanded
     ? ({
@@ -193,22 +223,18 @@ function ReadMoreText({
 
   return (
     <div className={cn('min-w-0', className)}>
-      <div className="whitespace-pre-wrap break-words overflow-visible" style={clampStyle}>
+      <div id={contentId} className="whitespace-pre-wrap break-words overflow-visible" style={clampStyle}>
         {text}
       </div>
 
       {shouldClamp && (
-        <span
+        <button
+          type="button"
           className="readmore"
-          onClick={() => {
-            if (onToggleExpanded) {
-              onToggleExpanded();
-              return;
-            }
-            setInternalExpanded((prev) => !prev);
-          }}
-          role="button"
-          tabIndex={0}
+          onClick={toggleExpanded}
+          onKeyDown={handleReadMoreKeyDown}
+          aria-expanded={isExpanded}
+          aria-controls={contentId}
         >
           <ChevronDown
             className={cn('w-4 h-4 transition-transform', isExpanded && 'rotate-180')}
@@ -216,7 +242,7 @@ function ReadMoreText({
           {isExpanded
             ? (language === 'ar' ? 'عرض أقل' : 'Read less')
             : (language === 'ar' ? 'اقرأ المزيد' : 'Read more')}
-        </span>
+        </button>
       )}
     </div>
   );
@@ -240,18 +266,27 @@ function InlineDisclosure({
   onClickLabel?: () => void;
   language: 'ar' | 'en';
 }) {
+  const disclosureId = useId();
+  const handleToggle = onClickLabel ?? onToggle;
+
   return (
     <div className={cn('mt-2', open && 'inline-disclosure-open')}>
-      <div className="inline-disclosure" onClick={onClickLabel ?? onToggle}>
+      <button
+        type="button"
+        className="inline-disclosure"
+        onClick={handleToggle}
+        aria-expanded={open}
+        aria-controls={disclosureId}
+      >
         <span className="thinking-icon" />
         <span>{label}</span>
         <ChevronDown
           className={cn('w-4 h-4 transition-transform', open && 'rotate-180')}
         />
-      </div>
+      </button>
 
       {/* No borders-/boxes - expandable area */}
-      <div className="inline-disclosure-content">
+      <div id={disclosureId} className="inline-disclosure-content" aria-hidden={!open}>
         <div className="inline-steps">
           {steps.map((s, i) => (
             <div
@@ -291,6 +326,7 @@ export function ChatPanel({
   isSummarizing = false,
   viewMode = 'chat',
   searchState,
+  uiProgress,
   phaseState,
   researchSourcesLive = [],
   primaryControl = null,
@@ -372,6 +408,10 @@ export function ChatPanel({
     && actionChoiceCount === 1
     && !inputValue.trim()
     && !showRetry
+  );
+  const lockComposerByProgress = Boolean(
+    uiProgress?.active
+    && uiProgress.stage !== 'assistant_reply'
   );
   const isActionMenuOpen = actionTriggerState === 'menu_open';
   const shouldExpandTrigger = canUseActionTrigger && actionTriggerState === 'hover_expanded';
@@ -475,8 +515,8 @@ export function ChatPanel({
       completed: 'Final Convergence',
     };
     return settings.language === 'ar'
-      ? (labelsAr[key] || key)
-      : (labelsEn[key] || key);
+      ? (labelsAr[key] || 'مرحلة جارية')
+      : (labelsEn[key] || 'In-progress phase');
   }, [phaseState?.currentPhaseKey, settings.language]);
   const effectivePostAction: 'make_acceptable' | 'bring_to_world' =
     recommendedPostAction
@@ -701,6 +741,7 @@ export function ChatPanel({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (lockComposerByProgress && !showRetry) return;
     if (!inputValue.trim()) return;
 
     onSendMessage(inputValue);
@@ -776,19 +817,21 @@ export function ChatPanel({
   }, [actionTriggerState, canUseActionTrigger]);
 
   const executePrimaryControl = useCallback(() => {
+    if (lockComposerByProgress && !showRetry) return;
     if (!primaryControl || primaryControl.disabled) return;
     setActionPending('primary');
     primaryControl.onClick?.();
     beginCloseActionMenu();
-  }, [beginCloseActionMenu, primaryControl]);
+  }, [beginCloseActionMenu, lockComposerByProgress, primaryControl, showRetry]);
 
   const executeSecondaryControl = useCallback(() => {
+    if (lockComposerByProgress && !showRetry) return;
     if (primaryControl?.secondary?.onClick && !primaryControl.secondary.disabled) {
       setActionPending('secondary');
       primaryControl.secondary.onClick();
     }
     beginCloseActionMenu();
-  }, [beginCloseActionMenu, primaryControl]);
+  }, [beginCloseActionMenu, lockComposerByProgress, primaryControl, showRetry]);
 
   const handleSendButtonClick = useCallback(() => {
     if (showRetry) {
@@ -796,6 +839,7 @@ export function ChatPanel({
       onRetryLlm?.();
       return;
     }
+    if (lockComposerByProgress) return;
     if (inputValue.trim()) {
       setActionPending(null);
       onSendMessage(inputValue);
@@ -831,28 +875,92 @@ export function ChatPanel({
     onSendMessage,
     primaryControl,
     executePrimaryControl,
+    lockComposerByProgress,
     settings.autoFocusInput,
     showRetry,
   ]);
 
   const statusLabel = reasoningActive
     ? settings.language === 'ar'
-      ? 'الوكلاء بيفكروا دلوقتي...'
+      ? 'الوكلاء يفكرون الآن...'
       : 'Agents are reasoning...'
     : isSummarizing
     ? settings.language === 'ar'
-      ? 'الوكلاء خلصوا، جاري التلخيص...'
+      ? 'انتهى التفكير، جارٍ التلخيص...'
       : 'Agents finished; summarizing now...'
     : '';
 
-  const thinkingLabel =
-    searchState?.status === 'searching'
-      ? settings.language === 'ar'
-        ? 'Search'
-        : 'Searching'
-      : settings.language === 'ar'
-      ? 'Reasoning'
-      : 'Reasoning';
+  const thinkingLabel = searchState?.status === 'searching'
+    ? (settings.language === 'ar' ? 'جاري البحث' : 'Searching')
+    : (settings.language === 'ar' ? 'جاري التفكير' : 'Reasoning');
+
+  const uiProgressActive = Boolean(uiProgress?.active);
+  const activeBusyStage: BusyStage | null = uiProgressActive ? uiProgress?.stage ?? null : null;
+  const activeBusyElapsedMs = uiProgressActive ? uiProgress?.elapsedMs : undefined;
+  const activeBusyTimeoutMs = uiProgressActive && activeBusyStage === 'prestart_research'
+    ? uiProgress?.timeoutMs
+    : undefined;
+  const busyStageLabel = useMemo(() => {
+    if (!activeBusyStage) return '';
+    const labelsAr: Record<BusyStage, string> = {
+      extracting_schema: 'تحليل الفكرة',
+      detecting_mode: 'فهم نوع الرسالة',
+      assistant_reply: 'تجهيز الرد',
+      prestart_research: 'تحليل المصادر قبل البدء',
+      starting_simulation: 'بدء المحاكاة',
+      checking_session: 'فحص الجلسة',
+    };
+    const labelsEn: Record<BusyStage, string> = {
+      extracting_schema: 'Analyzing idea',
+      detecting_mode: 'Detecting message mode',
+      assistant_reply: 'Preparing reply',
+      prestart_research: 'Pre-start research',
+      starting_simulation: 'Starting simulation',
+      checking_session: 'Checking session',
+    };
+    return settings.language === 'ar'
+      ? (labelsAr[activeBusyStage] || 'جارٍ المعالجة')
+      : (labelsEn[activeBusyStage] || 'Processing');
+  }, [activeBusyStage, settings.language]);
+  const busyElapsedLabel = useMemo(() => {
+    if (typeof activeBusyElapsedMs !== 'number') return '';
+    const totalSec = Math.max(0, Math.floor(activeBusyElapsedMs / 1000));
+    const minutes = Math.floor(totalSec / 60);
+    const seconds = totalSec % 60;
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  }, [activeBusyElapsedMs]);
+  const busyProgressPct = useMemo(() => {
+    if (activeBusyStage !== 'prestart_research') return null;
+    if (typeof activeBusyElapsedMs !== 'number' || typeof activeBusyTimeoutMs !== 'number' || activeBusyTimeoutMs <= 0) {
+      return null;
+    }
+    return Math.max(0, Math.min(100, (activeBusyElapsedMs / activeBusyTimeoutMs) * 100));
+  }, [activeBusyElapsedMs, activeBusyStage, activeBusyTimeoutMs]);
+  const busyTimeoutContextLabel = useMemo(() => {
+    if (activeBusyStage !== 'prestart_research') return '';
+    if (typeof activeBusyElapsedMs !== 'number' || typeof activeBusyTimeoutMs !== 'number' || activeBusyTimeoutMs <= 0) {
+      return '';
+    }
+    const remainingMs = Math.max(0, activeBusyTimeoutMs - activeBusyElapsedMs);
+    if (remainingMs <= 0) {
+      return settings.language === 'ar' ? 'سيتم المتابعة تلقائيًا الآن' : 'Auto-continue now';
+    }
+    const totalSec = Math.ceil(remainingMs / 1000);
+    const minutes = Math.floor(totalSec / 60);
+    const seconds = totalSec % 60;
+    const mmss = `${minutes}:${String(seconds).padStart(2, '0')}`;
+    return settings.language === 'ar'
+      ? `متابعة تلقائية بعد ${mmss}`
+      : `Auto-continue in ${mmss}`;
+  }, [activeBusyElapsedMs, activeBusyStage, activeBusyTimeoutMs, settings.language]);
+  const showBusyStageBar = Boolean(uiProgressActive && activeBusyStage && busyStageLabel);
+  const progressLiveAnnouncement = useMemo(() => {
+    if (!showBusyStageBar) return '';
+    const parts = [busyStageLabel];
+    if (busyElapsedLabel) parts.push(busyElapsedLabel);
+    if (busyTimeoutContextLabel) parts.push(busyTimeoutContextLabel);
+    return parts.join(' | ');
+  }, [busyElapsedLabel, busyStageLabel, busyTimeoutContextLabel, showBusyStageBar]);
 
   const thinkingSteps = useMemo(() => {
     if (searchState?.status === 'searching') {
@@ -870,6 +978,7 @@ export function ChatPanel({
   }, [searchState?.status, settings.language]);
 
   const thinkingActive = Boolean(isThinking || searchState?.status === 'searching' || reasoningActive);
+  const showInlineDisclosure = !uiProgressActive && thinkingActive;
   const stepsKey = useMemo(() => thinkingSteps.join('|'), [thinkingSteps]);
 
   useEffect(() => {
@@ -888,6 +997,7 @@ export function ChatPanel({
     ? [thinkingSteps[thinkingStepIndex] || thinkingSteps[0]]
     : [];
 
+  const phaseFallbackLabel = settings.language === 'ar' ? 'مرحلة جارية' : 'In-progress phase';
   const phaseLabelMap = useMemo(() => ({
     'Information Shock': settings.language === 'ar' ? 'الآراء الفردية' : 'Individual Opinions',
     'Polarization Phase': settings.language === 'ar' ? 'النقاش' : 'Discussion',
@@ -1089,7 +1199,7 @@ export function ChatPanel({
     <div className="glass-panel h-full flex flex-col min-h-0">
       {/* -------------------- MESSAGE LIST -------------------- */}
       <div
-        className="messages-container scrollbar-thin pb-6"
+        className="messages-container scrollbar-thin"
         ref={scrollRef}
         data-testid={isReasoningView ? 'reasoning-messages' : 'chat-messages'}
         onScroll={() => {
@@ -1174,7 +1284,7 @@ export function ChatPanel({
             )}
 
             {/* Inline thinking / searching row */}
-            {(isThinking || searchState?.status === 'searching' || reasoningActive) && (
+            {showInlineDisclosure && (
               <InlineDisclosure
                 label={thinkingLabel}
                 steps={visibleThinkingStep}
@@ -1190,7 +1300,7 @@ export function ChatPanel({
                 {phaseState?.currentPhaseKey && (
                   <div className="text-xs text-muted-foreground">
                     {settings.language === 'ar' ? 'المرحلة الحالية:' : 'Current phase:'}{' '}
-                    <span className="text-foreground font-medium">{phaseLabel || phaseState.currentPhaseKey}</span>
+                    <span className="text-foreground font-medium">{phaseLabel || phaseFallbackLabel}</span>
                     {typeof phaseState.progressPct === 'number' && (
                       <span className="ml-2 text-primary">{Math.round(phaseState.progressPct)}%</span>
                     )}
@@ -1201,7 +1311,7 @@ export function ChatPanel({
                     <div className="text-xs text-muted-foreground">
                       {settings.language === 'ar' ? 'مصادر البحث المباشرة' : 'Live research sources'}
                     </div>
-                    {activeResearchStartedAt && (
+                    {activeResearchStartedAt && !uiProgressActive && (
                       <div className="rounded-md border border-primary/30 bg-primary/10 px-2 py-2 space-y-1">
                         <div className="text-[11px] text-primary inline-flex items-center gap-1.5">
                           <Loader2 className="w-3 h-3 animate-spin" />
@@ -1258,7 +1368,7 @@ export function ChatPanel({
                       };
                       const statusAr: Record<string, string> = {
                         running: 'جاري',
-                        completed: 'مكتمل',
+                        completed: 'ظ…ظƒطھظ…ظ„',
                         failed: 'فشل',
                       };
                       const statusEn: Record<string, string> = {
@@ -1529,7 +1639,7 @@ export function ChatPanel({
               </div>
             )}
 
-            {statusLabel && <div className="status-chip">{statusLabel}</div>}
+            {statusLabel && !uiProgressActive && <div className="status-chip">{statusLabel}</div>}
 
             {hasPendingPreflight && pendingPreflightQuestion && (
               <div className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 p-3 space-y-3">
@@ -1691,7 +1801,7 @@ export function ChatPanel({
                     <div className="mt-2 space-y-2 text-xs text-cyan-100/80">
                       {pendingClarification.supportingSnippets.slice(0, 3).map((snippet, idx) => (
                         <div key={`${pendingClarification.questionId}-snippet-${idx}`} className="leading-relaxed">
-                          • {snippet}
+                          â€¢ {snippet}
                         </div>
                       ))}
                     </div>
@@ -1791,7 +1901,7 @@ export function ChatPanel({
                       <div className="space-y-1">
                         {postActionResult.steps.slice(0, 4).map((step) => (
                           <div key={step} className="text-xs text-muted-foreground">
-                            • {step}
+                            â€¢ {step}
                           </div>
                         ))}
                       </div>
@@ -1879,7 +1989,7 @@ export function ChatPanel({
                 <div key={group.phase} className="space-y-3">
                   <div className="flex items-center justify-between gap-2 flex-wrap">
                     <div className="text-xs uppercase tracking-wide text-muted-foreground/80">
-                      {phaseLabelMap[group.phase] ?? group.phase}
+                      {phaseLabelMap[group.phase] ?? phaseFallbackLabel}
                     </div>
                     <div className="flex items-center gap-1.5">
                       {Array.from(new Set(group.items.map((entry) => entry.iteration)))
@@ -2013,7 +2123,7 @@ export function ChatPanel({
       </div>
 
       {/* -------------------- JUMP-TO-LATEST BUTTON -------------------- */}
-      {!isReasoningView && !isNearBottom && (
+      {!isReasoningView && !isNearBottom && !showBusyStageBar && (
         <button
           type="button"
           onClick={() => {
@@ -2029,6 +2139,33 @@ export function ChatPanel({
       {/* -------------------- INPUT AREA (CHAT TAB) -------------------- */}
       {!isReasoningView ? (
         <div className="chat-input-container">
+          <div className="sr-only" aria-live="polite" aria-atomic="true">
+            {progressLiveAnnouncement}
+          </div>
+          {showBusyStageBar && (
+            <div className="mb-2 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2.5 space-y-1.5" role="status">
+              <div className="flex items-center justify-between gap-3 text-sm">
+                <span className="inline-flex items-center gap-1.5 text-primary font-medium">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  {busyStageLabel}
+                </span>
+                {busyElapsedLabel && (
+                  <span className="text-muted-foreground font-medium">{busyElapsedLabel}</span>
+                )}
+              </div>
+              {busyTimeoutContextLabel && (
+                <div className="text-xs text-muted-foreground">{busyTimeoutContextLabel}</div>
+              )}
+              {typeof busyProgressPct === 'number' && (
+                <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
+                  <div
+                    className="h-full bg-primary transition-all duration-500"
+                    style={{ width: `${busyProgressPct}%` }}
+                  />
+                </div>
+              )}
+            </div>
+          )}
           {/* Quick-reply chips */}
           {quickReplies && quickReplies.length > 0 && (
             <div className="quick-replies">
@@ -2037,6 +2174,7 @@ export function ChatPanel({
                   key={reply.value}
                   type="button"
                   className="quick-reply-btn"
+                  disabled={lockComposerByProgress}
                   onClick={() => onQuickReply?.(reply.value)}
                 >
                   {reply.label}
@@ -2050,7 +2188,7 @@ export function ChatPanel({
               <Button
                 type="button"
                 onClick={executePrimaryControl}
-                disabled={Boolean(primaryControl.disabled) || actionPending !== null}
+                disabled={lockComposerByProgress || Boolean(primaryControl.disabled) || actionPending !== null}
                 className="h-10 w-full justify-center rounded-lg bg-emerald-600/85 hover:bg-emerald-600 text-white"
               >
                 {actionPending === 'primary'
@@ -2061,7 +2199,7 @@ export function ChatPanel({
               <Button
                 type="button"
                 onClick={executeSecondaryControl}
-                disabled={Boolean(primaryControl.secondary.disabled) || actionPending !== null}
+                disabled={lockComposerByProgress || Boolean(primaryControl.secondary.disabled) || actionPending !== null}
                 className="h-10 w-full justify-center rounded-lg bg-red-600/85 hover:bg-red-600 text-white"
               >
                 {actionPending === 'secondary'
@@ -2073,7 +2211,7 @@ export function ChatPanel({
           )}
 
           <form ref={inputWrapperRef} onSubmit={handleSubmit} className="chat-input-wrapper relative">
-            {primaryControl && !inputValue.trim() && (
+            {primaryControl && !inputValue.trim() && !showBusyStageBar && (
               <div className="pointer-events-none absolute top-[-30px] max-w-[72%] rounded-md border border-border/50 bg-card/80 px-2 py-1 text-[11px] leading-4 text-muted-foreground truncate [inset-inline-end:0]">
                 {primaryControl.description || primaryControl.label}
               </div>
@@ -2083,7 +2221,7 @@ export function ChatPanel({
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               dir={settings.language === 'ar' ? 'rtl' : 'ltr'}
-              disabled={showRetry}
+              disabled={showRetry || lockComposerByProgress}
               placeholder={
                 isWaitingForLocationChoice
                   ? settings.language === 'ar'
@@ -2127,7 +2265,7 @@ export function ChatPanel({
                         type="button"
                         size="sm"
                         onClick={executePrimaryControl}
-                        disabled={primaryControl.disabled || actionPending !== null}
+                        disabled={lockComposerByProgress || primaryControl.disabled || actionPending !== null}
                         className={cn(
                           'control-menu-item control-menu-item-primary',
                           primaryControl.tone === 'success' && 'bg-success/15 border-success/30 text-success hover:bg-success/20',
@@ -2148,7 +2286,7 @@ export function ChatPanel({
                         type="button"
                         size="sm"
                         onClick={executeSecondaryControl}
-                        disabled={Boolean(primaryControl.secondary?.disabled) || actionPending !== null}
+                        disabled={lockComposerByProgress || Boolean(primaryControl.secondary?.disabled) || actionPending !== null}
                         className="control-menu-item control-menu-item-secondary border border-border bg-card/90 text-foreground hover:bg-card"
                         title={primaryControl.secondary?.label || (settings.language === 'ar' ? 'إغلاق' : 'Close')}
                       >
@@ -2170,7 +2308,9 @@ export function ChatPanel({
               <Button
                 type="button"
                 size="icon"
-                disabled={showRetry ? !onRetryLlm : (!inputValue.trim() && (!primaryControl || showBinaryDecisionBar))}
+                disabled={showRetry
+                  ? !onRetryLlm
+                  : (lockComposerByProgress || (!inputValue.trim() && (!primaryControl || showBinaryDecisionBar)))}
                 className={cn(
                   'send-btn control-trigger-btn',
                   canUseActionTrigger && 'is-ready',

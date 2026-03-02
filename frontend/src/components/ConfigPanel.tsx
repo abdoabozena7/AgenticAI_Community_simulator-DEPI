@@ -1,9 +1,8 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Flag, Lightbulb, Target, Zap } from 'lucide-react';
+import { AlertTriangle, Flag, Target, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Slider } from '@/components/ui/slider';
-import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { CATEGORY_OPTIONS, AUDIENCE_OPTIONS, GOAL_OPTIONS, MATURITY_LEVELS } from '@/components/TopBar';
 import { UserInput } from '@/types/simulation';
@@ -212,18 +211,20 @@ export function ConfigPanel({
             const label = language === 'ar' ? AUDIENCE_LABELS_AR[aud] || aud : aud;
             const selected = value.targetAudience.includes(aud);
             return (
-              <Badge
+              <button
                 key={aud}
+                type="button"
                 onClick={() => toggleAudience(aud)}
                 className={cn(
-                  'cursor-pointer text-xs border',
+                  'px-2.5 py-1 rounded-full text-xs border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
                   selected
                     ? 'bg-primary/80 text-primary-foreground border-primary'
-                    : 'bg-secondary/60 text-muted-foreground border-border/40'
+                    : 'bg-secondary/60 text-muted-foreground border-border/40 hover:bg-secondary'
                 )}
+                aria-pressed={selected}
               >
                 {label}
-              </Badge>
+              </button>
             );
           })}
         </div>
@@ -293,18 +294,20 @@ export function ConfigPanel({
             const label = language === 'ar' ? GOAL_LABELS_AR[goal] || goal : goal;
             const selected = value.goals.includes(goal);
             return (
-              <Badge
+              <button
                 key={goal}
+                type="button"
                 onClick={() => toggleGoal(goal)}
                 className={cn(
-                  'cursor-pointer text-xs border',
+                  'px-2.5 py-1 rounded-full text-xs border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
                   selected
                     ? 'bg-accent/80 text-accent-foreground border-accent'
-                    : 'bg-secondary/60 text-muted-foreground border-border/40'
+                    : 'bg-secondary/60 text-muted-foreground border-border/40 hover:bg-secondary'
                 )}
+                aria-pressed={selected}
               >
                 {label}
-              </Badge>
+              </button>
             );
           })}
         </div>

@@ -124,24 +124,40 @@ const NeuralNetwork = ({ agents, activePulses }: NeuralNetworkProps) => {
     }
   });
 
+  const agentById = useMemo(() => {
+    const index = new Map<string, Agent>();
+    for (const agent of agents) {
+      index.set(agent.id, agent);
+    }
+    return index;
+  }, [agents]);
+
   const connections = useMemo(() => {
     const conns: { from: Agent; to: Agent; key: string }[] = [];
-    agents.forEach(agent => {
-      agent.connections.forEach(targetId => {
-        const target = agents.find(a => a.id === targetId);
+    agents.forEach((agent) => {
+      agent.connections.forEach((targetId) => {
+        const target = agentById.get(targetId);
         if (target) {
           conns.push({ from: agent, to: target, key: `${agent.id}-${targetId}` });
         }
       });
     });
     return conns;
-  }, [agents]);
+  }, [agentById, agents]);
+
+  const activePulseMap = useMemo(() => {
+    const pulseMap = new Map<string, Connection>();
+    for (const pulse of activePulses) {
+      pulseMap.set(`${pulse.from}-${pulse.to}`, pulse);
+    }
+    return pulseMap;
+  }, [activePulses]);
 
   return (
     <group ref={groupRef}>
       {/* Connections */}
       {connections.map(({ from, to, key }) => {
-        const pulse = activePulses.find(p => p.from === from.id && p.to === to.id);
+        const pulse = activePulseMap.get(key);
         return (
           <ConnectionLine
             key={key}
@@ -164,9 +180,10 @@ const NeuralNetwork = ({ agents, activePulses }: NeuralNetworkProps) => {
 interface SimulationArenaProps {
   agents: Agent[];
   activePulses: Connection[];
+  language?: 'ar' | 'en';
 }
 
-export const SimulationArena = ({ agents, activePulses }: SimulationArenaProps) => {
+export const SimulationArena = ({ agents, activePulses, language = 'en' }: SimulationArenaProps) => {
   const [contextLost, setContextLost] = useState(false);
   const [canvasKey, setCanvasKey] = useState(0);
   const [autoRestoreState, setAutoRestoreState] = useState<'idle' | 'retrying' | 'failed'>('idle');
@@ -225,28 +242,28 @@ export const SimulationArena = ({ agents, activePulses }: SimulationArenaProps) 
       <div className="absolute top-4 left-4 z-10 flex flex-col gap-2 p-3 rounded-lg bg-card/80 backdrop-blur-sm border border-border">
         <div className="flex items-center gap-2">
           <div className="w-3 h-3 rounded-full bg-[#22c55e]" />
-          <span className="text-xs text-muted-foreground">Accepted</span>
+          <span className="text-xs text-muted-foreground">{language === 'ar' ? 'مقبول' : 'Accepted'}</span>
         </div>
         <div className="flex items-center gap-2">
           <div className="w-3 h-3 rounded-full bg-[#ef4444]" />
-          <span className="text-xs text-muted-foreground">Rejected</span>
+          <span className="text-xs text-muted-foreground">{language === 'ar' ? 'مرفوض' : 'Rejected'}</span>
         </div>
         <div className="flex items-center gap-2">
           <div className="w-3 h-3 rounded-full bg-[#6b7280]" />
-          <span className="text-xs text-muted-foreground">Neutral</span>
+          <span className="text-xs text-muted-foreground">{language === 'ar' ? 'محايد' : 'Neutral'}</span>
         </div>
       </div>
       
       {/* Stats overlay */}
       <div
         className="absolute top-4 right-4 z-10 flex items-center gap-2 p-2 rounded-lg bg-card/80 backdrop-blur-sm border border-border"
-        dir="ltr"
+        dir={language === 'ar' ? 'rtl' : 'ltr'}
       >
         <div className="px-2 py-1 rounded-md bg-secondary/60 text-xs text-muted-foreground">
-          Agents: {agents.length}
+          {language === 'ar' ? 'الوكلاء' : 'Agents'}: {agents.length}
         </div>
         <div className="px-2 py-1 rounded-md bg-secondary/60 text-xs text-muted-foreground">
-          Connections: {agents.reduce((acc, a) => acc + a.connections.length, 0)}
+          {language === 'ar' ? 'الاتصالات' : 'Connections'}: {agents.reduce((acc, a) => acc + a.connections.length, 0)}
         </div>
       </div>
       
@@ -282,8 +299,12 @@ export const SimulationArena = ({ agents, activePulses }: SimulationArenaProps) 
           <div className="rounded-lg border border-border bg-card/90 p-4 text-center space-y-3 max-w-xs">
             <div className="text-sm text-foreground">
               {autoRestoreState === 'retrying'
-                ? 'WebGL context lost. Switching to static fallback and retrying renderer...'
-                : 'WebGL context lost. Static fallback is active; controls remain available.'}
+                ? (language === 'ar'
+                    ? 'فُقد اتصال WebGL. التحويل لوضع ثابت مع إعادة محاولة تهيئة العارض...'
+                    : 'WebGL context lost. Switching to static fallback and retrying renderer...')
+                : (language === 'ar'
+                    ? 'فُقد اتصال WebGL. الوضع الثابت نشط ويمكنك متابعة التحكم.'
+                    : 'WebGL context lost. Static fallback is active; controls remain available.')}
             </div>
             <button
               type="button"
@@ -295,7 +316,9 @@ export const SimulationArena = ({ agents, activePulses }: SimulationArenaProps) 
                 setCanvasKey((prev) => prev + 1);
               }}
             >
-              {autoRestoreState === 'retrying' ? 'Retrying renderer...' : 'Retry renderer'}
+              {autoRestoreState === 'retrying'
+                ? (language === 'ar' ? 'جارٍ إعادة المحاولة...' : 'Retrying renderer...')
+                : (language === 'ar' ? 'إعادة تشغيل العارض' : 'Retry renderer')}
             </button>
           </div>
         </div>
