@@ -126,7 +126,7 @@ export function ConfigPanel({
   };
 
   return (
-    <div className="h-full min-h-0 overflow-y-auto p-4 space-y-4 scrollbar-thin">
+    <div className="h-full min-h-0 overflow-y-auto overflow-x-hidden space-y-3 p-3 scrollbar-thin">
       <div>
         <h2 className="text-lg font-semibold text-foreground">
           {language === 'ar' ? 'إعدادات الفكرة' : 'Configuration'}
@@ -143,7 +143,7 @@ export function ConfigPanel({
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 gap-3">
         <div className="space-y-2">
           <label className="text-sm text-muted-foreground">
             {language === 'ar' ? 'الدولة' : 'Country'}

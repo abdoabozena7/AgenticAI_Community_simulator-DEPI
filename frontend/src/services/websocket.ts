@@ -8,6 +8,12 @@ export type MessageType =
   | 'research_update'
   | 'clarification_request'
   | 'clarification_resolved'
+  | 'coach_detected'
+  | 'coach_options_ready'
+  | 'coach_patch_preview_ready'
+  | 'coach_patch_applied'
+  | 'coach_rerun_started'
+  | 'coach_resolved'
   | 'chat_event';
 
 export interface ReasoningStepEvent {
@@ -163,6 +169,13 @@ export interface ChatEventEvent {
   timestamp?: number;
 }
 
+export interface CoachInterventionEvent {
+  type: 'coach_detected' | 'coach_options_ready' | 'coach_patch_preview_ready' | 'coach_patch_applied' | 'coach_rerun_started' | 'coach_resolved';
+  simulation_id?: string;
+  event_seq?: number;
+  coach_intervention?: Record<string, unknown>;
+}
+
 export type WebSocketEvent =
   | ReasoningStepEvent
   | ReasoningDebugEvent
@@ -173,6 +186,7 @@ export type WebSocketEvent =
   | ResearchUpdateEvent
   | ClarificationRequestEvent
   | ClarificationResolvedEvent
+  | CoachInterventionEvent
   | ChatEventEvent;
 
 type EventCallback = (event: WebSocketEvent) => void;
@@ -186,16 +200,46 @@ class WebSocketService {
   private reconnectDelay = 1000;
   private currentSimulationId: string | null = null;
   private allowReconnect = true;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private connectionNonce = 0;
+
+  private clearReconnectTimer() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
 
   connect(url: string): Promise<void> {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN && this.url === url) {
+      return Promise.resolve();
+    }
+
     this.url = url;
     this.allowReconnect = true;
-    
+    this.clearReconnectTimer();
+    this.connectionNonce += 1;
+    const nonce = this.connectionNonce;
+
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      try {
+        this.ws.close();
+      } catch {
+        // Ignore close errors while replacing a stale socket.
+      }
+      this.ws = null;
+    }
+
     return new Promise((resolve, reject) => {
       try {
-        this.ws = new WebSocket(url);
+        const socket = new WebSocket(url);
+        this.ws = socket;
 
-        this.ws.onopen = () => {
+        socket.onopen = () => {
+          if (nonce !== this.connectionNonce || socket !== this.ws) {
+            socket.close();
+            return;
+          }
           console.log('WebSocket connected');
           this.reconnectAttempts = 0;
           if (this.currentSimulationId) {
@@ -204,7 +248,10 @@ class WebSocketService {
           resolve();
         };
 
-        this.ws.onmessage = (event) => {
+        socket.onmessage = (event) => {
+          if (nonce !== this.connectionNonce || socket !== this.ws) {
+            return;
+          }
           try {
             const data: WebSocketEvent = JSON.parse(event.data);
             this.notifyListeners(data);
@@ -213,20 +260,27 @@ class WebSocketService {
           }
         };
 
-        this.ws.onerror = (error) => {
+        socket.onerror = (error) => {
+          if (nonce !== this.connectionNonce || socket !== this.ws) {
+            return;
+          }
           console.error('WebSocket error:', error);
           reject(error);
         };
 
-        this.ws.onclose = (event) => {
+        socket.onclose = (event) => {
+          if (nonce !== this.connectionNonce || socket !== this.ws) {
+            return;
+          }
           console.log(`WebSocket closed (code=${event.code}, reason=${event.reason || 'n/a'})`);
+          this.ws = null;
           if (!this.allowReconnect) return;
           if (event.code === 1008) {
             // Policy/auth close; avoid blind reconnect storm with same stale token.
             console.warn('WebSocket closed due to authorization/policy (1008). Skipping auto-reconnect.');
             return;
           }
-          this.attemptReconnect();
+          this.attemptReconnect(nonce);
         };
       } catch (error) {
         reject(error);
@@ -234,12 +288,19 @@ class WebSocketService {
     });
   }
 
-  private attemptReconnect() {
+  private attemptReconnect(nonce: number) {
+    if (nonce !== this.connectionNonce) {
+      return;
+    }
     if (this.reconnectAttempts < this.maxReconnectAttempts) {
       this.reconnectAttempts++;
       console.log(`Attempting to reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
-      
-      setTimeout(() => {
+
+      this.clearReconnectTimer();
+      this.reconnectTimer = setTimeout(() => {
+        if (nonce !== this.connectionNonce || !this.allowReconnect) {
+          return;
+        }
         this.connect(this.url).catch(console.error);
       }, this.reconnectDelay * this.reconnectAttempts);
     }
@@ -293,6 +354,8 @@ class WebSocketService {
 
   disconnect() {
     this.allowReconnect = false;
+    this.clearReconnectTimer();
+    this.connectionNonce += 1;
     if (this.ws) {
       this.ws.close();
       this.ws = null;

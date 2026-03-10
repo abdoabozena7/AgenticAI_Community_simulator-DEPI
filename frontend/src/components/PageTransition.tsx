@@ -2,6 +2,9 @@
  import { useLocation } from 'react-router-dom';
  import { ReactNode } from 'react';
  
+ export const PAGE_TRANSITION_CUSTOM_X_PX = 0;
+ export const PAGE_TRANSITION_CUSTOM_Y_PX = 0;
+ 
  interface PageTransitionProps {
    children: ReactNode;
  }

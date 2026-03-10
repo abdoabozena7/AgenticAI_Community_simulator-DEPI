@@ -314,6 +314,41 @@ CREATE TABLE IF NOT EXISTS simulation_chat_events (
     REFERENCES simulations(simulation_id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS guided_workflows (
+  workflow_id VARCHAR(36) PRIMARY KEY,
+  user_id BIGINT NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'awaiting_input',
+  current_stage VARCHAR(64) NOT NULL DEFAULT 'context_scope',
+  state_json LONGTEXT NOT NULL,
+  attached_simulation_id VARCHAR(36) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_guided_workflows_user (user_id),
+  INDEX idx_guided_workflows_stage (current_stage),
+  INDEX idx_guided_workflows_sim (attached_simulation_id),
+  CONSTRAINT fk_guided_workflows_user FOREIGN KEY (user_id)
+    REFERENCES users(id) ON DELETE SET NULL,
+  CONSTRAINT fk_guided_workflows_sim FOREIGN KEY (attached_simulation_id)
+    REFERENCES simulations(simulation_id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS persona_library_records (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NULL,
+  place_key VARCHAR(191) NOT NULL,
+  place_label VARCHAR(255) NOT NULL,
+  scope VARCHAR(32) NOT NULL DEFAULT 'global',
+  source_policy VARCHAR(32) NOT NULL DEFAULT 'open_socials',
+  persona_count INT NOT NULL DEFAULT 0,
+  payload_json LONGTEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_persona_library_user_place (user_id, place_key),
+  INDEX idx_persona_library_place (place_key),
+  CONSTRAINT fk_persona_library_user FOREIGN KEY (user_id)
+    REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS developer_suite_runs (
   id VARCHAR(36) PRIMARY KEY,
   user_id BIGINT NOT NULL,

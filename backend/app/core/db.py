@@ -367,6 +367,46 @@ def _apply_migrations(cursor: mysql.connector.cursor.MySQLCursor) -> None:
             "('free_daily_tokens', '2500') "
             "ON DUPLICATE KEY UPDATE setting_value=setting_value"
         ),
+        (
+            "CREATE TABLE IF NOT EXISTS guided_workflows ("
+            "workflow_id VARCHAR(36) PRIMARY KEY, "
+            "user_id BIGINT NULL, "
+            "status VARCHAR(24) NOT NULL DEFAULT 'awaiting_input', "
+            "current_stage VARCHAR(64) NOT NULL DEFAULT 'context_scope', "
+            "state_json LONGTEXT NOT NULL, "
+            "attached_simulation_id VARCHAR(36) NULL, "
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, "
+            "INDEX idx_guided_workflows_user (user_id), "
+            "INDEX idx_guided_workflows_stage (current_stage), "
+            "INDEX idx_guided_workflows_sim (attached_simulation_id), "
+            "CONSTRAINT fk_guided_workflows_user FOREIGN KEY (user_id) "
+            "REFERENCES users(id) ON DELETE SET NULL, "
+            "CONSTRAINT fk_guided_workflows_sim FOREIGN KEY (attached_simulation_id) "
+            "REFERENCES simulations(simulation_id) ON DELETE SET NULL"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        ),
+        "ALTER TABLE guided_workflows ADD COLUMN attached_simulation_id VARCHAR(36) NULL AFTER state_json",
+        (
+            "CREATE TABLE IF NOT EXISTS persona_library_records ("
+            "id BIGINT AUTO_INCREMENT PRIMARY KEY, "
+            "user_id BIGINT NULL, "
+            "place_key VARCHAR(191) NOT NULL, "
+            "place_label VARCHAR(255) NOT NULL, "
+            "scope VARCHAR(32) NOT NULL DEFAULT 'global', "
+            "source_policy VARCHAR(32) NOT NULL DEFAULT 'open_socials', "
+            "persona_count INT NOT NULL DEFAULT 0, "
+            "payload_json LONGTEXT NOT NULL, "
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, "
+            "UNIQUE KEY uq_persona_library_user_place (user_id, place_key), "
+            "INDEX idx_persona_library_place (place_key), "
+            "CONSTRAINT fk_persona_library_user FOREIGN KEY (user_id) "
+            "REFERENCES users(id) ON DELETE SET NULL"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        ),
+        "ALTER TABLE persona_library_records ADD COLUMN source_policy VARCHAR(32) NOT NULL DEFAULT 'open_socials' AFTER scope",
+        "ALTER TABLE persona_library_records ADD COLUMN persona_count INT NOT NULL DEFAULT 0 AFTER source_policy",
     ]
     for stmt in migrations:
         try:
@@ -668,6 +708,16 @@ async def fetch_simulation_snapshot(simulation_id: str) -> Optional[Dict[str, An
         if isinstance(checkpoint_meta, dict)
         else None
     )
+    checkpoint_coach_intervention = (
+        checkpoint_meta.get("coach_intervention")
+        if isinstance(checkpoint_meta, dict)
+        else None
+    )
+    checkpoint_coach_history = (
+        checkpoint_meta.get("coach_history")
+        if isinstance(checkpoint_meta, dict)
+        else None
+    )
     checkpoint_search_quality = (
         checkpoint_meta.get("search_quality")
         if isinstance(checkpoint_meta, dict)
@@ -827,7 +877,7 @@ async def fetch_simulation_snapshot(simulation_id: str) -> Optional[Dict[str, An
     ended_at_iso = _iso_datetime(sim_row.get("ended_at"))
     summary_text = sim_row.get("summary")
     last_error = (checkpoint_row or {}).get("last_error")
-    blocked_resume_reasons = {"paused_clarification_needed", "paused_research_review"}
+    blocked_resume_reasons = {"paused_clarification_needed", "paused_research_review", "paused_coach_intervention"}
     can_resume = status_value in {"error", "paused"} and str(checkpoint_status_reason or "").strip().lower() not in blocked_resume_reasons
 
     return {
@@ -856,6 +906,8 @@ async def fetch_simulation_snapshot(simulation_id: str) -> Optional[Dict[str, An
         "pending_clarification": checkpoint_pending_clarification if isinstance(checkpoint_pending_clarification, dict) else None,
         "can_answer_clarification": bool(isinstance(checkpoint_pending_clarification, dict) and checkpoint_pending_clarification),
         "pending_research_review": checkpoint_pending_research_review if isinstance(checkpoint_pending_research_review, dict) else None,
+        "coach_intervention": checkpoint_coach_intervention if isinstance(checkpoint_coach_intervention, dict) else None,
+        "coach_history": checkpoint_coach_history if isinstance(checkpoint_coach_history, list) else [],
         "checkpoint": checkpoint_data,
     }
 
@@ -1145,6 +1197,199 @@ async def fetch_chat_events(simulation_id: str) -> List[Dict[str, Any]]:
             }
         )
     return items
+
+
+async def upsert_guided_workflow(
+    workflow_id: str,
+    state: Dict[str, Any],
+    *,
+    user_id: Optional[int] = None,
+    status: Optional[str] = None,
+    current_stage: Optional[str] = None,
+    attached_simulation_id: Optional[str] = None,
+) -> None:
+    payload = json.dumps(state, ensure_ascii=False)
+    safe_status = str(status or state.get("status") or "awaiting_input")[:24]
+    safe_stage = str(current_stage or state.get("current_stage") or "context_scope")[:64]
+    await execute(
+        "INSERT INTO guided_workflows (workflow_id, user_id, status, current_stage, state_json, attached_simulation_id) "
+        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "ON DUPLICATE KEY UPDATE "
+        "user_id=COALESCE(VALUES(user_id), user_id), "
+        "status=VALUES(status), "
+        "current_stage=VALUES(current_stage), "
+        "state_json=VALUES(state_json), "
+        "attached_simulation_id=VALUES(attached_simulation_id), "
+        "updated_at=CURRENT_TIMESTAMP",
+        (workflow_id, user_id, safe_status, safe_stage, payload, attached_simulation_id),
+    )
+
+
+async def fetch_guided_workflow(workflow_id: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    rows = await execute(
+        "SELECT workflow_id, user_id, status, current_stage, state_json, attached_simulation_id, created_at, updated_at "
+        "FROM guided_workflows WHERE workflow_id=%s",
+        (workflow_id,),
+        fetch=True,
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    owner_id = row.get("user_id")
+    if owner_id is not None and user_id is not None and int(owner_id) != int(user_id):
+        return None
+    state = _safe_json(row.get("state_json"), {})
+    if not isinstance(state, dict):
+        state = {}
+    state.setdefault("workflow_id", row.get("workflow_id"))
+    state.setdefault("status", row.get("status") or "awaiting_input")
+    state.setdefault("current_stage", row.get("current_stage") or "context_scope")
+    state.setdefault("created_at", _iso_datetime(row.get("created_at")))
+    state["updated_at"] = _iso_datetime(row.get("updated_at"))
+    if row.get("attached_simulation_id"):
+        simulation = state.get("simulation")
+        if not isinstance(simulation, dict):
+            simulation = {}
+        simulation["attached_simulation_id"] = row.get("attached_simulation_id")
+        state["simulation"] = simulation
+    return state
+
+
+async def fetch_guided_workflow_by_simulation(
+    simulation_id: str,
+    *,
+    user_id: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    safe_simulation_id = str(simulation_id or "").strip()
+    if not safe_simulation_id:
+        return None
+    rows = await execute(
+        "SELECT workflow_id FROM guided_workflows "
+        "WHERE attached_simulation_id=%s AND (user_id <=> %s OR user_id IS NULL) "
+        "ORDER BY CASE current_stage "
+        "WHEN 'ready_to_start' THEN 8 "
+        "WHEN 'review' THEN 7 "
+        "WHEN 'persona_synthesis' THEN 6 "
+        "WHEN 'location_research' THEN 5 "
+        "WHEN 'idea_research' THEN 4 "
+        "WHEN 'clarification' THEN 3 "
+        "WHEN 'schema_intake' THEN 2 "
+        "WHEN 'context_scope' THEN 1 "
+        "ELSE 0 END DESC, "
+        "updated_at DESC LIMIT 1",
+        (safe_simulation_id, user_id),
+        fetch=True,
+    )
+    if not rows:
+        return None
+    workflow_id = rows[0].get("workflow_id")
+    if not workflow_id:
+        return None
+    return await fetch_guided_workflow(str(workflow_id), user_id=user_id)
+
+
+async def upsert_persona_library_record(
+    *,
+    user_id: Optional[int],
+    place_key: str,
+    place_label: str,
+    scope: str,
+    source_policy: str,
+    payload: Dict[str, Any],
+) -> None:
+    safe_place_key = str(place_key or "").strip().lower()[:191]
+    if not safe_place_key:
+        return
+    safe_label = str(place_label or safe_place_key)[:255]
+    safe_scope = str(scope or "global")[:32]
+    safe_policy = str(source_policy or "open_socials")[:32]
+    persona_count = len(payload.get("personas") or []) if isinstance(payload, dict) else 0
+    await execute(
+        "INSERT INTO persona_library_records (user_id, place_key, place_label, scope, source_policy, persona_count, payload_json) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+        "ON DUPLICATE KEY UPDATE "
+        "place_label=VALUES(place_label), "
+        "scope=VALUES(scope), "
+        "source_policy=VALUES(source_policy), "
+        "persona_count=VALUES(persona_count), "
+        "payload_json=VALUES(payload_json), "
+        "updated_at=CURRENT_TIMESTAMP",
+        (
+            user_id,
+            safe_place_key,
+            safe_label,
+            safe_scope,
+            safe_policy,
+            persona_count,
+            json.dumps(payload, ensure_ascii=False),
+        ),
+    )
+
+
+async def fetch_persona_library_record(
+    *,
+    user_id: Optional[int],
+    place_key: str,
+) -> Optional[Dict[str, Any]]:
+    safe_place_key = str(place_key or "").strip().lower()
+    if not safe_place_key:
+        return None
+    query = (
+        "SELECT id, user_id, place_key, place_label, scope, source_policy, persona_count, payload_json, created_at, updated_at "
+        "FROM persona_library_records WHERE user_id <=> %s AND place_key=%s LIMIT 1"
+    )
+    rows = await execute(query, (user_id, safe_place_key), fetch=True)
+    if not rows:
+        return None
+    row = rows[0]
+    return {
+        "id": row.get("id"),
+        "user_id": row.get("user_id"),
+        "place_key": row.get("place_key"),
+        "place_label": row.get("place_label"),
+        "scope": row.get("scope") or "global",
+        "source_policy": row.get("source_policy") or "open_socials",
+        "persona_count": int(row.get("persona_count") or 0),
+        "payload": _safe_json(row.get("payload_json"), {}),
+        "created_at": _iso_datetime(row.get("created_at")),
+        "updated_at": _iso_datetime(row.get("updated_at")),
+    }
+
+
+async def list_persona_library_records(
+    *,
+    user_id: Optional[int],
+    place_query: Optional[str] = None,
+    limit: int = 10,
+) -> List[Dict[str, Any]]:
+    safe_limit = max(1, min(50, int(limit or 10)))
+    like = f"%{str(place_query or '').strip().lower()}%" if place_query else None
+    params: List[Any] = [user_id]
+    query = (
+        "SELECT id, user_id, place_key, place_label, scope, source_policy, persona_count, payload_json, created_at, updated_at "
+        "FROM persona_library_records WHERE user_id <=> %s"
+    )
+    if like:
+        query += " AND (LOWER(place_key) LIKE %s OR LOWER(place_label) LIKE %s)"
+        params.extend([like, like])
+    query += " ORDER BY updated_at DESC LIMIT %s"
+    params.append(safe_limit)
+    rows = await execute(query, params, fetch=True) or []
+    return [
+        {
+            "id": row.get("id"),
+            "user_id": row.get("user_id"),
+            "place_key": row.get("place_key"),
+            "place_label": row.get("place_label"),
+            "scope": row.get("scope") or "global",
+            "source_policy": row.get("source_policy") or "open_socials",
+            "persona_count": int(row.get("persona_count") or 0),
+            "payload": _safe_json(row.get("payload_json"), {}),
+            "created_at": _iso_datetime(row.get("created_at")),
+            "updated_at": _iso_datetime(row.get("updated_at")),
+        }
+        for row in rows
+    ]
 
 
 async def insert_reasoning_steps_bulk(simulation_id: str, steps: List[Dict[str, Any]]) -> None:

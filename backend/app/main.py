@@ -35,6 +35,21 @@ from .api import court as court_routes
 from .api import admin as admin_routes
 from .api import health as health_routes
 from .api import devlab as devlab_routes
+from .api import guided_workflow as guided_workflow_routes
+
+
+def _allowed_origins() -> list[str]:
+    configured = os.getenv("ALLOWED_ORIGINS", "").strip()
+    if configured:
+        return [origin.strip() for origin in configured.split(",") if origin.strip()]
+    return [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+    ]
 
 
 def create_app() -> FastAPI:
@@ -55,11 +70,11 @@ def create_app() -> FastAPI:
     load_dotenv(env_path)
 
     app = FastAPI(title="Social Simulation Backend")
-    # Allow all origins in development. For production, set
-    # appropriate allowed origins.
+    allowed_origins = _allowed_origins()
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=allowed_origins,
+        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -78,6 +93,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_routes.router)
     app.include_router(devlab_routes.router)
     app.include_router(health_routes.router)
+    app.include_router(guided_workflow_routes.router)
 
     @app.on_event("startup")
     async def startup_event() -> None:

@@ -229,6 +229,87 @@ export interface PendingResearchReview {
   required: boolean;
 }
 
+export type SimulationBlockerTag =
+  | 'competitive_parity'
+  | 'unclear_value'
+  | 'unclear_target'
+  | 'market_demand'
+  | 'feasibility_scalability'
+  | 'evidence_gap'
+  | string;
+
+export interface CoachEvidenceRef {
+  id: string;
+  source: 'agent' | 'research';
+  label?: string;
+  quote: string;
+  messageId?: string;
+  stepUid?: string | null;
+  eventSeq?: number | null;
+  agentId?: string;
+  agentLabel?: string;
+  sourceUrl?: string | null;
+  sourceDomain?: string | null;
+  reasonTag?: string | null;
+}
+
+export interface CoachSuggestion {
+  suggestionId: string;
+  kind: string;
+  title: string;
+  oneLiner: string;
+  rationale: string;
+  tradeoff?: string;
+  ctaLabel?: string;
+  evidenceRefIds: string[];
+  contextPatch: Record<string, unknown>;
+  rerunFromStage: string;
+  estimatedEtaDeltaSeconds: number;
+}
+
+export interface CoachPatchPreview {
+  contextPatch: Record<string, unknown>;
+  rerunFromStage: string;
+  guideMessage: string;
+  selectedSuggestionId?: string | null;
+  neutralizedText?: string | null;
+  notes?: string[];
+  estimatedEtaDeltaSeconds?: number | null;
+}
+
+export interface CoachIntervention {
+  interventionId: string;
+  simulationId?: string;
+  blockerTag: SimulationBlockerTag;
+  blockerSummary: string;
+  severity: 'medium' | 'high' | string;
+  decisionAxis?: string | null;
+  shouldPause: boolean;
+  uiState: 'observing' | 'diagnosed' | 'options_ready' | 'applying_patch' | 'rerunning' | 'resolved' | string;
+  guideMessage?: string;
+  phaseKey?: string | null;
+  agentCitations: CoachEvidenceRef[];
+  researchEvidence: CoachEvidenceRef[];
+  suggestions: CoachSuggestion[];
+  patchPreview?: CoachPatchPreview | null;
+  customFix?: {
+    raw_text?: string;
+    neutralized_text?: string;
+    field_updates?: Record<string, unknown>;
+    notes?: string[];
+    steering_filtered?: boolean;
+    apply_mode?: 'factual_update' | 'needs_review' | 'filtered' | string;
+  } | null;
+  continueBlocked?: boolean;
+  createdAt?: number | null;
+  resolvedAt?: number | null;
+  resolution?: string | null;
+  history?: Array<{
+    type: string;
+    label?: string;
+  }>;
+}
+
 export interface UserInput {
   idea: string;
   category: string;
@@ -245,3 +326,164 @@ export interface UserInput {
 export type SimulationStatus = 'idle' | 'configuring' | 'running' | 'paused' | 'completed' | 'error';
 
 export type ResearchGateMode = 'none' | 'prestart_review' | 'runtime_review';
+
+export type WorkflowStage =
+  | 'context_scope'
+  | 'schema_intake'
+  | 'clarification'
+  | 'idea_research'
+  | 'location_research'
+  | 'persona_synthesis'
+  | 'review'
+  | 'ready_to_start';
+
+export type WorkflowStatus = 'awaiting_input' | 'in_progress' | 'paused' | 'ready';
+
+export interface WorkflowGuideMessage {
+  id: string;
+  role: 'guide';
+  tone?: 'guide' | 'status' | 'correction';
+  content: string;
+  stage?: WorkflowStage | string;
+  timestamp: number;
+}
+
+export interface WorkflowClarificationQuestion {
+  id: string;
+  axis: string;
+  prompt: string;
+  reason?: string;
+  answer_type: 'text';
+}
+
+export interface GuidedWorkflowDraftContext {
+  idea: string;
+  category: string;
+  targetAudience: string[];
+  country: string;
+  city: string;
+  placeName: string;
+  riskAppetite: number;
+  ideaMaturity: 'concept' | 'prototype' | 'mvp' | 'launched' | string;
+  goals: string[];
+  contextScope: '' | 'specific_place' | 'internet' | 'global';
+  language?: 'ar' | 'en';
+  valuePromise?: string;
+  adoptionTrigger?: string;
+}
+
+export interface WorkflowResearchSource {
+  title?: string;
+  url?: string;
+  domain?: string;
+  snippet?: string;
+  favicon_url?: string;
+  score?: number;
+}
+
+export interface GuidedWorkflowCorrection {
+  raw_text: string;
+  neutralized_text: string;
+  field_updates?: Record<string, unknown>;
+  notes?: string[];
+  steering_filtered?: boolean;
+  apply_mode?: 'factual_update' | 'needs_review' | 'filtered';
+  timestamp: number;
+}
+
+export interface GuidedWorkflowPersonaSnapshot {
+  title: string;
+  place_key: string;
+  place_label: string;
+  scope: string;
+  source_policy: string;
+  source?: string;
+  personas: Array<{
+    id: string;
+    label: string;
+    stance: 'accept' | 'reject' | 'neutral' | string;
+    summary: string;
+    motivations: string[];
+    concerns: string[];
+    source_signals?: string[];
+  }>;
+}
+
+export interface GuidedWorkflowState {
+  workflow_id: string;
+  status: WorkflowStatus;
+  current_stage: WorkflowStage;
+  current_stage_status: string;
+  stage_eta_seconds: number;
+  estimated_total_seconds: number;
+  required_fields: string[];
+  context_options: Array<{
+    id: GuidedWorkflowDraftContext['contextScope'];
+    label: string;
+    description: string;
+  }>;
+  draft_context: GuidedWorkflowDraftContext;
+  guide_messages: WorkflowGuideMessage[];
+  stage_history: Array<{
+    stage: WorkflowStage | string;
+    status: string;
+    eta_seconds?: number;
+    summary?: string;
+    started_at?: number;
+    completed_at?: number | null;
+  }>;
+  clarification_questions?: WorkflowClarificationQuestion[] | null;
+  clarification_answers?: Record<string, string>;
+  idea_research?: {
+    query?: string;
+    summary?: string;
+    highlights?: string[];
+    sources?: WorkflowResearchSource[];
+    provider?: string;
+    quality?: Record<string, unknown>;
+  } | null;
+  location_research?: {
+    query_plan?: string[];
+    summary?: string;
+    signals?: string[];
+    sources?: WorkflowResearchSource[];
+    place_label?: string;
+    source_policy?: string;
+  } | null;
+  persona_snapshot?: GuidedWorkflowPersonaSnapshot | null;
+  persona_library?: {
+    place_key?: string;
+    place_label?: string;
+    source?: string;
+  } | null;
+  review?: {
+    title?: string;
+    summary?: string;
+    research_highlights?: string[];
+    location_summary?: string;
+    persona_count?: number;
+    persona_title?: string;
+    applied_corrections?: GuidedWorkflowCorrection[];
+    estimated_runtime_seconds?: number;
+    ready_to_start?: boolean;
+  } | null;
+  review_approved?: boolean;
+  last_correction?: GuidedWorkflowCorrection | null;
+  corrections?: GuidedWorkflowCorrection[];
+  verification?: {
+    stage?: string;
+    ok?: boolean;
+    checked_at?: number;
+  };
+  simulation?: {
+    attached_simulation_id?: string | null;
+    debate_session?: {
+      status?: string;
+      watch_ready?: boolean;
+      message?: string;
+    };
+  };
+  pause_reason?: string | null;
+  created_at?: number | string;
+  updated_at?: number | string;
+}

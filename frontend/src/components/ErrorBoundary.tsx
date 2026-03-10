@@ -1,5 +1,8 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 
+export const ERROR_BOUNDARY_CUSTOM_X_PX = 0;
+export const ERROR_BOUNDARY_CUSTOM_Y_PX = 0;
+
 interface ErrorBoundaryProps {
   children: ReactNode;
 }

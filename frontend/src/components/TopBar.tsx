@@ -10,6 +10,9 @@ import { Slider } from '@/components/ui/slider';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 
+export const TOP_BAR_CUSTOM_X_PX = 0;
+export const TOP_BAR_CUSTOM_Y_PX = 0;
+
 interface TopBarProps {
   selectedCategory?: string;
   selectedAudiences?: string[];

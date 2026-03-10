@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { startTransition, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { Header } from '@/components/Header';
 import {
@@ -8,18 +8,23 @@ import {
   MATURITY_LEVELS,
 } from '@/components/TopBar';
 import { ChatPanel } from '@/components/ChatPanel';
+import { GuidedSimulationPanel } from '@/components/GuidedSimulationPanel';
 import { ConfigPanel, SocietyControls } from '@/components/ConfigPanel';
 import { SimulationArena } from '@/components/SimulationArena';
 import { MetricsPanel } from '@/components/MetricsPanel';
 import { IterationTimeline } from '@/components/IterationTimeline';
 import { useSimulation } from '@/hooks/useSimulation';
-import { ChatMessage, PendingIdeaConfirmation, PreflightQuestion, UserInput } from '@/types/simulation';
+import { useGuidedWorkflow } from '@/hooks/useGuidedWorkflow';
+import { ChatMessage, GuidedWorkflowDraftContext, PendingIdeaConfirmation, PreflightQuestion, UserInput } from '@/types/simulation';
 import { websocketService } from '@/services/websocket';
 import { apiService, clearAuthTokens, SearchResponse, SimulationConfig, SimulationPreflightNextResponse, SocietyCatalogResponse, UserMe } from '@/services/api';
 import { cn } from '@/lib/utils';
 import { addIdeaLogEntry, updateIdeaLogEntry } from '@/lib/ideaLog';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { useTheme } from '@/contexts/ThemeContext';
+
+const CHAT_PANEL_DESKTOP_MIN_WIDTH_PX = 260;
+const METRICS_PANEL_DESKTOP_MIN_WIDTH_PX = 320;
 
 const CATEGORY_LABEL_BY_VALUE = new Map(
   CATEGORY_OPTIONS.map((label) => [label.toLowerCase(), label])
@@ -220,6 +225,11 @@ const Index = () => {
     return Boolean(routeAutoStart || pendingAutoStart || pendingIdea);
   })();
   const simulation = useSimulation({ suppressAutoRestore });
+  const guidedWorkflow = useGuidedWorkflow({
+    suppressAutoRestore: Boolean(requestedSimulationId || simulation.simulationId),
+  });
+  const guidedWorkflowState = guidedWorkflow.workflow;
+  const guidedWorkflowLoading = guidedWorkflow.loading;
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [userInput, setUserInput] = useState<UserInput>({
     idea: '',
@@ -243,6 +253,7 @@ const Index = () => {
   const [isWaitingForCountry, setIsWaitingForCountry] = useState(false);
   const [isWaitingForLocationChoice, setIsWaitingForLocationChoice] = useState(false);
   const [locationChoice, setLocationChoice] = useState<'yes' | 'no' | null>(null);
+  const [guidedContextScope, setGuidedContextScope] = useState<GuidedWorkflowDraftContext['contextScope']>('');
   const [hasStarted, setHasStarted] = useState(false);
   const [autoStartPending, setAutoStartPending] = useState(false);
   const summaryRef = useRef<string | null>(null);
@@ -278,6 +289,7 @@ const Index = () => {
   const [reportBusy, setReportBusy] = useState(false);
   const [resumeBusy, setResumeBusy] = useState(false);
   const [pauseBusy, setPauseBusy] = useState(false);
+  const [coachBusy, setCoachBusy] = useState(false);
   const [researchReviewBusy, setResearchReviewBusy] = useState(false);
   const [clarificationBusy, setClarificationBusy] = useState(false);
   const [preflightBusy, setPreflightBusy] = useState(false);
@@ -323,6 +335,8 @@ const Index = () => {
     followup_seed?: Record<string, unknown>;
   } | null>(null);
   const [reasoningActive, setReasoningActive] = useState(false);
+  const [debateInviteVisible, setDebateInviteVisible] = useState(false);
+  const [highlightedReasoningMessageIds, setHighlightedReasoningMessageIds] = useState<string[]>([]);
   const [selectedStanceFilter, setSelectedStanceFilter] = useState<'accepted' | 'rejected' | 'neutral' | null>(null);
   const [filteredAgents, setFilteredAgents] = useState<{
     agent_id: string;
@@ -335,6 +349,10 @@ const Index = () => {
   const [creditNotice, setCreditNotice] = useState<string | null>(null);
   const [meSnapshot, setMeSnapshot] = useState<UserMe | null>(null);
   const reasoningTimerRef = useRef<number | null>(null);
+  const debateInviteShownForSimulationRef = useRef<string | null>(null);
+  const guidedWorkflowBootstrappedForSimulationRef = useRef<string | null>(null);
+  const guidedWorkflowAttachRequestRef = useRef<string | null>(null);
+  const guidedWorkflowStartingSimulationRef = useRef(false);
   const autoReasoningSwitchedRef = useRef(false);
   const userOverrodeAutoRef = useRef(false);
   const configLockHintAtRef = useRef(0);
@@ -396,6 +414,31 @@ const Index = () => {
     preflight_assumptions: string[];
   } | null>(null);
 
+  const guidedDraftInput = useMemo<GuidedWorkflowDraftContext>(() => ({
+    idea: userInput.idea,
+    category: userInput.category,
+    targetAudience: userInput.targetAudience,
+    country: userInput.country,
+    city: userInput.city,
+    placeName: userInput.city || userInput.country,
+    riskAppetite: userInput.riskAppetite,
+    ideaMaturity: userInput.ideaMaturity,
+    goals: userInput.goals,
+    contextScope: guidedContextScope,
+    language: settings.language,
+  }), [
+    guidedContextScope,
+    settings.language,
+    userInput.category,
+    userInput.city,
+    userInput.country,
+    userInput.goals,
+    userInput.idea,
+    userInput.ideaMaturity,
+    userInput.riskAppetite,
+    userInput.targetAudience,
+  ]);
+
   const beginUiBusy = useCallback((stage: UiBusyStage) => {
     const token = uiBusyTokenRef.current + 1;
     uiBusyTokenRef.current = token;
@@ -430,6 +473,102 @@ const Index = () => {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [searchState.startedAt, searchState.status]);
+
+  useEffect(() => {
+    const simulationId = simulation.simulationId;
+    if (!simulationId) {
+      guidedWorkflowBootstrappedForSimulationRef.current = null;
+      return;
+    }
+    if (guidedWorkflowLoading) return;
+    if (guidedWorkflowStartingSimulationRef.current) return;
+    if (guidedWorkflowBootstrappedForSimulationRef.current === simulationId) return;
+    if (guidedWorkflowState?.simulation?.attached_simulation_id === simulationId) {
+      guidedWorkflowBootstrappedForSimulationRef.current = simulationId;
+      return;
+    }
+    guidedWorkflowBootstrappedForSimulationRef.current = simulationId;
+    void guidedWorkflow.restoreBySimulation(simulationId).catch(() => {
+      if (guidedWorkflowBootstrappedForSimulationRef.current === simulationId) {
+        guidedWorkflowBootstrappedForSimulationRef.current = null;
+      }
+    });
+  }, [
+    guidedWorkflow.restoreBySimulation,
+    guidedWorkflowLoading,
+    guidedWorkflowState?.simulation?.attached_simulation_id,
+    simulation.simulationId,
+  ]);
+
+  useEffect(() => {
+    if (guidedWorkflowState || guidedWorkflowLoading) return;
+    if (simulation.simulationId) {
+      return;
+    }
+    void guidedWorkflow.ensureStarted({
+      draftContext: guidedDraftInput,
+      language: settings.language,
+    }).catch(() => undefined);
+  }, [
+    guidedDraftInput,
+    guidedWorkflow.ensureStarted,
+    guidedWorkflow.restoreBySimulation,
+    guidedWorkflowLoading,
+    guidedWorkflowState,
+    settings.language,
+    simulation.simulationId,
+  ]);
+
+  useEffect(() => {
+    const draft = guidedWorkflowState?.draft_context;
+    if (!draft) return;
+    setGuidedContextScope((prev) => (prev === draft.contextScope ? prev : draft.contextScope));
+    setLocationChoice((prev) => {
+      const next = draft.contextScope === 'specific_place' ? 'yes' : draft.contextScope ? 'no' : null;
+      return prev === next ? prev : next;
+    });
+    setUserInput((prev) => {
+      const next = {
+        ...prev,
+        idea: draft.idea || prev.idea,
+        category: draft.category || prev.category,
+        targetAudience: draft.targetAudience?.length ? draft.targetAudience : prev.targetAudience,
+        country: draft.country ?? prev.country,
+        city: draft.city ?? prev.city,
+        riskAppetite: typeof draft.riskAppetite === 'number' ? draft.riskAppetite : prev.riskAppetite,
+        ideaMaturity: (draft.ideaMaturity as UserInput['ideaMaturity']) || prev.ideaMaturity,
+        goals: draft.goals?.length ? draft.goals : prev.goals,
+      };
+      const changed = JSON.stringify(prev) !== JSON.stringify(next);
+      return changed ? next : prev;
+    });
+  }, [guidedWorkflowState?.draft_context]);
+
+  useEffect(() => {
+    const simulationId = simulation.simulationId;
+    const workflowId = guidedWorkflowState?.workflow_id;
+    if (!simulationId || !workflowId) {
+      guidedWorkflowAttachRequestRef.current = null;
+      return;
+    }
+    const attachKey = `${workflowId}:${simulationId}`;
+    if (guidedWorkflowState.simulation?.attached_simulation_id === simulationId) {
+      guidedWorkflowAttachRequestRef.current = attachKey;
+      return;
+    }
+    if (guidedWorkflowAttachRequestRef.current === attachKey) return;
+    guidedWorkflowAttachRequestRef.current = attachKey;
+    void guidedWorkflow.attachSimulation(simulationId).catch(() => {
+      if (guidedWorkflowAttachRequestRef.current === attachKey) {
+        guidedWorkflowAttachRequestRef.current = null;
+      }
+    });
+  }, [
+    guidedWorkflow.attachSimulation,
+    guidedWorkflowState?.simulation?.attached_simulation_id,
+    guidedWorkflowState?.workflow_id,
+    simulation.simulationId,
+  ]);
 
   useEffect(() => {
     const syncRealtimeConnectionState = () => {
@@ -643,15 +782,11 @@ const Index = () => {
 
   useEffect(() => {
     if (!requestedSimulationId) return;
-    if (
-      loadedFromQueryRef.current === requestedSimulationId
-      && simulation.simulationId === requestedSimulationId
-    ) {
-      return;
-    }
+    if (simulation.simulationId && simulation.simulationId !== requestedSimulationId) return;
+    if (loadedFromQueryRef.current === requestedSimulationId) return;
     loadedFromQueryRef.current = requestedSimulationId;
     setAutoStartPending(false);
-      simulation.loadSimulation(requestedSimulationId).catch((err: unknown) => {
+    simulation.loadSimulation(requestedSimulationId).catch((err: unknown) => {
       if (isAuthError(err)) {
         handleSessionExpired();
         return;
@@ -669,7 +804,6 @@ const Index = () => {
     isAuthError,
     requestedSimulationId,
     settings.language,
-    simulation,
     simulation.loadSimulation,
     simulation.simulationId,
   ]);
@@ -1376,6 +1510,208 @@ const Index = () => {
     return payload;
   }, [preflightContextKey, researchContext, researchIdea, settings.language, simulationSpeed, selectedStartPath, societyControls]);
 
+  const buildGuidedSimulationConfig = useCallback((input: UserInput) => {
+    const config = buildConfig(input);
+    const workflowDraft = guidedWorkflowState?.draft_context;
+    const review = guidedWorkflowState?.review;
+    const ideaResearch = guidedWorkflowState?.idea_research;
+    const locationResearch = guidedWorkflowState?.location_research;
+    const personaSnapshot = guidedWorkflowState?.persona_snapshot;
+    config.research_summary = review?.summary || ideaResearch?.summary || config.research_summary;
+    config.research_sources = (ideaResearch?.sources || config.research_sources || []) as SearchResponse['results'];
+    config.preflight_ready = true;
+    config.preflight_summary = review?.summary || config.preflight_summary || config.research_summary || input.idea;
+    config.preflight_answers = {
+      context_scope: workflowDraft?.contextScope || guidedContextScope,
+      value_promise: workflowDraft?.valuePromise || null,
+      adoption_trigger: workflowDraft?.adoptionTrigger || null,
+    };
+    config.preflight_clarity_score = 1;
+    config.preflight_assumptions = [];
+    config.seed_context = {
+      ...(config.seed_context || {}),
+      guided_workflow: {
+        workflow_id: guidedWorkflowState?.workflow_id || null,
+        context_scope: workflowDraft?.contextScope || guidedContextScope,
+        place_name: workflowDraft?.placeName || input.city || input.country || '',
+        review_summary: review?.summary || '',
+        location_summary: locationResearch?.summary || '',
+        persona_snapshot: personaSnapshot || null,
+        corrections: guidedWorkflowState?.corrections || [],
+      },
+    };
+    return config;
+  }, [buildConfig, guidedContextScope, guidedWorkflowState]);
+
+  const applyCoachContextPatch = useCallback((baseInput: UserInput, patch: Record<string, unknown>) => {
+    const nextInput: UserInput = { ...baseInput };
+    let nextLocationChoice = locationChoice;
+    let nextContextScope = guidedContextScope;
+
+    const readString = (...values: unknown[]) => {
+      for (const value of values) {
+        if (typeof value === 'string') {
+          const trimmed = value.trim();
+          if (trimmed) return trimmed;
+        }
+      }
+      return '';
+    };
+
+    const patchedIdea = readString(patch.idea);
+    if (patchedIdea) nextInput.idea = patchedIdea;
+
+    const patchedCategory = normalizeCategoryValue(readString(patch.category));
+    if (patchedCategory) nextInput.category = patchedCategory;
+
+    const patchedCity = readString(patch.city);
+    const patchedCountry = readString(patch.country);
+    const patchedPlace = readString(patch.placeName, patch.place_name, patch.place);
+    if (patchedCity || patchedCountry || patchedPlace) {
+      nextInput.city = patchedCity || (!patchedCountry && patchedPlace ? patchedPlace : nextInput.city);
+      nextInput.country = patchedCountry || nextInput.country;
+      nextLocationChoice = 'yes';
+      nextContextScope = 'specific_place';
+    }
+
+    const patchedAudience = normalizeOptionList(
+      patch.targetAudience ?? patch.target_audience ?? patch.target_segment,
+      AUDIENCE_OPTIONS,
+    );
+    if (patchedAudience.length) nextInput.targetAudience = patchedAudience;
+
+    const patchedGoals = normalizeOptionList(patch.goals, GOAL_OPTIONS);
+    if (patchedGoals.length) nextInput.goals = patchedGoals;
+
+    const patchedRisk = normalizeRiskValue(
+      typeof patch.riskAppetite === 'number'
+        ? patch.riskAppetite
+        : (typeof patch.risk_appetite === 'number' ? patch.risk_appetite : undefined),
+    );
+    if (typeof patchedRisk === 'number') nextInput.riskAppetite = patchedRisk;
+
+    const patchedMaturity = normalizeMaturityValue(
+      readString(patch.ideaMaturity, patch.idea_maturity),
+    );
+    if (patchedMaturity) nextInput.ideaMaturity = patchedMaturity;
+
+    const patchedScope = readString(patch.contextScope, patch.context_scope, patch.location_scope);
+    if (patchedScope === 'specific_place' || patchedScope === 'internet' || patchedScope === 'global') {
+      nextContextScope = patchedScope;
+      nextLocationChoice = patchedScope === 'specific_place' ? 'yes' : 'no';
+    }
+
+    return {
+      nextInput,
+      nextLocationChoice,
+      nextContextScope,
+      };
+    }, [guidedContextScope, locationChoice]);
+
+  const buildUserInputFromSimulationContext = useCallback((context: Record<string, unknown>): UserInput => {
+    const readString = (...values: unknown[]) => {
+      for (const value of values) {
+        if (typeof value === 'string') {
+          const trimmed = value.trim();
+          if (trimmed) return trimmed;
+        }
+      }
+      return '';
+    };
+
+    const readList = (...values: unknown[]) => {
+      for (const value of values) {
+        if (Array.isArray(value)) {
+          const cleaned = value
+            .map((item) => String(item || '').trim())
+            .filter(Boolean);
+          if (cleaned.length) return cleaned;
+        }
+      }
+      return [] as string[];
+    };
+
+    const audience = normalizeOptionList(
+      readList(context.targetAudience, context.target_audience),
+      AUDIENCE_OPTIONS,
+    );
+    const goals = normalizeOptionList(readList(context.goals), GOAL_OPTIONS);
+
+    const rawRisk = typeof context.riskAppetite === 'number'
+      ? context.riskAppetite
+      : (typeof context.risk_appetite === 'number' ? context.risk_appetite : undefined);
+    const normalizedRisk = typeof rawRisk === 'number'
+      ? (rawRisk <= 1 ? Math.round(rawRisk * 100) : Math.round(rawRisk))
+      : (userInput.riskAppetite ?? 50);
+
+    const rawAgentCount = typeof context.agentCount === 'number'
+      ? context.agentCount
+      : (typeof context.agent_count === 'number' ? context.agent_count : undefined);
+
+    return {
+      idea: readString(context.idea) || userInput.idea,
+      category: normalizeCategoryValue(readString(context.category)) || userInput.category || DEFAULT_CATEGORY,
+      targetAudience: audience.length ? audience : userInput.targetAudience,
+      country: readString(context.country) || userInput.country,
+      city: readString(context.city) || userInput.city,
+      riskAppetite: normalizedRisk,
+      ideaMaturity: normalizeMaturityValue(readString(context.ideaMaturity, context.idea_maturity)) || userInput.ideaMaturity || 'concept',
+      goals: goals.length ? goals : userInput.goals,
+      agentCount: typeof rawAgentCount === 'number' && Number.isFinite(rawAgentCount)
+        ? Math.max(1, Math.round(rawAgentCount))
+        : userInput.agentCount,
+    };
+  }, [userInput]);
+
+  const handleGuidedDraftChange = useCallback((updates: Partial<GuidedWorkflowDraftContext>) => {
+    setUserInput((prev) => ({
+      ...prev,
+      ...(typeof updates.idea === 'string' ? { idea: updates.idea } : {}),
+      ...(typeof updates.category === 'string' ? { category: updates.category } : {}),
+      ...(Array.isArray(updates.targetAudience) ? { targetAudience: updates.targetAudience } : {}),
+      ...(typeof updates.country === 'string' ? { country: updates.country } : {}),
+      ...(typeof updates.city === 'string' ? { city: updates.city } : {}),
+      ...(typeof updates.riskAppetite === 'number' ? { riskAppetite: updates.riskAppetite } : {}),
+      ...(typeof updates.ideaMaturity === 'string' ? { ideaMaturity: updates.ideaMaturity as UserInput['ideaMaturity'] } : {}),
+      ...(Array.isArray(updates.goals) ? { goals: updates.goals } : {}),
+    }));
+  }, []);
+
+  const handleGuidedChooseScope = useCallback((scope: GuidedWorkflowDraftContext['contextScope']) => {
+    setGuidedContextScope(scope);
+    setLocationChoice(scope === 'specific_place' ? 'yes' : scope ? 'no' : null);
+    void guidedWorkflow.updateContextScope(scope, scope === 'specific_place' ? (userInput.city || userInput.country) : undefined).catch(() => undefined);
+  }, [guidedWorkflow, userInput.city, userInput.country]);
+
+  const handleGuidedSubmitSchema = useCallback(async () => {
+    await guidedWorkflow.submitSchema({
+      ...guidedDraftInput,
+      placeName: guidedDraftInput.contextScope === 'specific_place'
+        ? (guidedDraftInput.city || guidedDraftInput.country || guidedDraftInput.placeName)
+        : '',
+    }).catch(() => undefined);
+  }, [guidedDraftInput, guidedWorkflow]);
+
+  const handleGuidedSubmitClarifications = useCallback(async (answers: Array<{ questionId: string; answer: string }>) => {
+    await guidedWorkflow.answerClarifications(answers).catch(() => undefined);
+  }, [guidedWorkflow]);
+
+  const handleGuidedApproveReview = useCallback(async () => {
+    await guidedWorkflow.approveReview().catch(() => undefined);
+  }, [guidedWorkflow]);
+
+  const handleGuidedPauseWorkflow = useCallback(() => {
+    void guidedWorkflow.pause(settings.language === 'ar' ? 'تم إيقاف الـworkflow مؤقتًا بواسطة المستخدم.' : 'Workflow paused by user.').catch(() => undefined);
+  }, [guidedWorkflow, settings.language]);
+
+  const handleGuidedResumeWorkflow = useCallback(() => {
+    void guidedWorkflow.resume().catch(() => undefined);
+  }, [guidedWorkflow]);
+
+  const handleGuidedCorrection = useCallback(async (text: string) => {
+    await guidedWorkflow.submitCorrection(text).catch(() => undefined);
+  }, [guidedWorkflow]);
+
   const getMissingForStart = useCallback((input: UserInput, overrideChoice?: 'yes' | 'no' | null) => {
     const missing: string[] = [];
     if (!input.idea.trim()) missing.push('idea');
@@ -1853,6 +2189,341 @@ const Index = () => {
     settings.language,
     societyControls,
     startChoiceKey,
+    simulation,
+    userInput,
+  ]);
+
+  const handleGuidedStartSimulation = useCallback(async () => {
+    if (!guidedWorkflow.canStartSimulation) return;
+    if (simulation.status === 'running') return;
+    const config = buildGuidedSimulationConfig(userInput);
+    setHasStarted(true);
+    setDebateInviteVisible(false);
+    const startBusyToken = beginUiBusy('starting_simulation');
+    guidedWorkflowStartingSimulationRef.current = true;
+    try {
+      addSystemMessage(settings.language === 'ar' ? 'Starting guided simulation...' : 'Starting guided simulation...');
+      const response = await simulation.startSimulation(config, { throwOnError: true });
+      const simulationId = typeof response === 'object' && response && 'simulation_id' in response
+        ? String(response.simulation_id || '')
+        : '';
+      if (simulationId) {
+        await guidedWorkflow.attachSimulation(simulationId).catch(() => undefined);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to start simulation';
+      addSystemMessage(`${settings.language === 'ar' ? 'تعذر بدء المحاكاة الموجهة.' : 'Failed to start guided simulation.'} ${msg}`.trim());
+    } finally {
+      guidedWorkflowStartingSimulationRef.current = false;
+      endUiBusy(startBusyToken);
+    }
+  }, [
+    addSystemMessage,
+    beginUiBusy,
+    buildGuidedSimulationConfig,
+    endUiBusy,
+    guidedWorkflow,
+    settings.language,
+    simulation,
+    userInput,
+  ]);
+
+  const handleApplyGuidedCorrectionToSimulation = useCallback(async () => {
+    if (!guidedWorkflowState?.last_correction || guidedWorkflowState.last_correction.apply_mode !== 'factual_update') return;
+    const rerunBusyToken = beginUiBusy('starting_simulation');
+    guidedWorkflowStartingSimulationRef.current = true;
+    try {
+      if (simulation.status === 'running' && simulation.simulationId) {
+        try {
+          await simulation.pauseSimulation(
+            simulation.simulationId,
+            settings.language === 'ar' ? 'Pausing current run to apply factual correction.' : 'Pausing current run to apply factual correction.'
+          );
+        } catch {
+          // Best-effort pause before rerun.
+        }
+      }
+      const nextConfig = buildGuidedSimulationConfig(userInput);
+      if (simulation.simulationId) {
+        nextConfig.parent_simulation_id = simulation.simulationId;
+      }
+      const response = await simulation.startSimulation(nextConfig, { carryOver: true, throwOnError: true }).catch(() => null);
+      const nextSimulationId = typeof response === 'object' && response && 'simulation_id' in response
+        ? String(response.simulation_id || '')
+        : '';
+      if (nextSimulationId) {
+        await guidedWorkflow.attachSimulation(nextSimulationId).catch(() => undefined);
+      }
+    } finally {
+      guidedWorkflowStartingSimulationRef.current = false;
+      endUiBusy(rerunBusyToken);
+    }
+  }, [beginUiBusy, buildGuidedSimulationConfig, endUiBusy, guidedWorkflow.attachSimulation, guidedWorkflowState?.last_correction, settings.language, simulation, userInput]);
+
+  const handleOpenCoachEvidence = useCallback((messageIds: string[]) => {
+    const nextIds = Array.from(new Set(messageIds.map((item) => item.trim()).filter(Boolean)));
+    if (!nextIds.length) return;
+    setDebateInviteVisible(false);
+    setHighlightedReasoningMessageIds(nextIds);
+    startTransition(() => {
+      setActivePanel('reasoning');
+    });
+  }, []);
+
+  const handleCoachRequestMoreIdeas = useCallback(async () => {
+    const simulationId = simulation.simulationId;
+    const interventionId = simulation.coachIntervention?.interventionId;
+    if (!simulationId || !interventionId || coachBusy) return;
+    setCoachBusy(true);
+    try {
+      await simulation.respondToCoachIntervention({
+        simulationId,
+        interventionId,
+        action: 'request_more_ideas',
+      });
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'جهزت 5 اقتراحات بديلة مبنية على نفس الاعتراض الحالي.'
+          : 'Prepared 5 alternative fixes grounded in the same blocker.'
+      );
+      startTransition(() => {
+        setActivePanel('chat');
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
+      addSystemMessage(
+        settings.language === 'ar'
+          ? `تعذر تحديث الاقتراحات.${msg}`.trim()
+          : `Failed to refresh coach suggestions.${msg}`.trim()
+      );
+    } finally {
+      setCoachBusy(false);
+    }
+  }, [addSystemMessage, coachBusy, settings.language, simulation]);
+
+  const handleCoachContinueWithoutChange = useCallback(async () => {
+    const simulationId = simulation.simulationId;
+    const interventionId = simulation.coachIntervention?.interventionId;
+    if (!simulationId || !interventionId || coachBusy) return;
+    setCoachBusy(true);
+    try {
+      const response = await simulation.respondToCoachIntervention({
+        simulationId,
+        interventionId,
+        action: 'continue_without_change',
+      });
+      addSystemMessage(
+        response?.guide_message
+          || (settings.language === 'ar'
+            ? 'تم استكمال المحاكاة دون تعديل السياق الحالي.'
+            : 'Simulation resumed without changing the current context.')
+      );
+      setHighlightedReasoningMessageIds([]);
+      startTransition(() => {
+        setActivePanel('chat');
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
+      addSystemMessage(
+        settings.language === 'ar'
+          ? `تعذر استكمال المحاكاة.${msg}`.trim()
+          : `Failed to continue the simulation.${msg}`.trim()
+      );
+    } finally {
+      setCoachBusy(false);
+    }
+  }, [addSystemMessage, coachBusy, settings.language, simulation]);
+
+  const handleCoachApplySuggestion = useCallback(async (suggestionId: string) => {
+    const simulationId = simulation.simulationId;
+    const interventionId = simulation.coachIntervention?.interventionId;
+    if (!simulationId || !interventionId || !suggestionId || coachBusy) return;
+    setCoachBusy(true);
+    try {
+      const response = await simulation.respondToCoachIntervention({
+        simulationId,
+        interventionId,
+        action: 'apply_suggestion',
+        suggestionId,
+      });
+      addSystemMessage(
+        response?.guide_message
+          || (settings.language === 'ar'
+            ? 'تم تجهيز تعديل السياق. راجع الفرق ثم أعد التشغيل.'
+            : 'Context patch is ready. Review it, then rerun.')
+      );
+      startTransition(() => {
+        setActivePanel('chat');
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
+      addSystemMessage(
+        settings.language === 'ar'
+          ? `تعذر تجهيز التعديل.${msg}`.trim()
+          : `Failed to prepare the coach patch.${msg}`.trim()
+      );
+    } finally {
+      setCoachBusy(false);
+    }
+  }, [addSystemMessage, coachBusy, settings.language, simulation]);
+
+  const handleCoachCustomFix = useCallback(async (text: string) => {
+    const simulationId = simulation.simulationId;
+    const interventionId = simulation.coachIntervention?.interventionId;
+    if (!simulationId || !interventionId || !text.trim() || coachBusy) return;
+    setCoachBusy(true);
+    try {
+      const response = await simulation.respondToCoachIntervention({
+        simulationId,
+        interventionId,
+        action: 'custom_fix',
+        customText: text.trim(),
+      });
+      addSystemMessage(
+        response?.neutralized_text
+          || response?.guide_message
+          || (settings.language === 'ar'
+            ? 'تمت فلترة التعديل إلى صياغة محايدة. راجع الفرق قبل الإعادة.'
+            : 'The custom fix was neutralized into factual context. Review the patch before rerun.')
+      );
+      startTransition(() => {
+        setActivePanel('chat');
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
+      addSystemMessage(
+        settings.language === 'ar'
+          ? `تعذر تطبيق التعديل الحر.${msg}`.trim()
+          : `Failed to process the custom fix.${msg}`.trim()
+      );
+    } finally {
+      setCoachBusy(false);
+    }
+  }, [addSystemMessage, coachBusy, settings.language, simulation]);
+
+  const handleCoachConfirmRerun = useCallback(async () => {
+      const simulationId = simulation.simulationId;
+      const intervention = simulation.coachIntervention;
+      const patchPreview = intervention?.patchPreview;
+      if (!simulationId || !intervention?.interventionId || !patchPreview || coachBusy) return;
+
+    const rerunBusyToken = beginUiBusy('starting_simulation');
+      guidedWorkflowStartingSimulationRef.current = true;
+      setCoachBusy(true);
+
+      try {
+        const contextResponse = await apiService.getSimulationContext(simulationId).catch(() => null);
+        const simulationContext = contextResponse?.user_context && typeof contextResponse.user_context === 'object'
+          ? contextResponse.user_context
+          : {};
+        const baseInput = Object.keys(simulationContext).length
+          ? buildUserInputFromSimulationContext(simulationContext)
+          : userInput;
+        const { nextInput, nextLocationChoice, nextContextScope } = applyCoachContextPatch(
+          baseInput,
+          patchPreview.contextPatch || {},
+        );
+        const preservedResearchSummary = typeof simulationContext.research_summary === 'string'
+          ? simulationContext.research_summary
+          : '';
+        const preservedResearchSources = Array.isArray(simulationContext.research_sources)
+          ? simulationContext.research_sources as SearchResponse['results']
+          : [];
+        const preservedResearchStructured = simulationContext.research_structured && typeof simulationContext.research_structured === 'object'
+          ? simulationContext.research_structured as SearchResponse['structured']
+          : undefined;
+        const currentSeedContext = simulationContext.seed_context && typeof simulationContext.seed_context === 'object'
+          ? simulationContext.seed_context as Record<string, unknown>
+          : {};
+
+        setUserInput(nextInput);
+        setGuidedContextScope(nextContextScope);
+        setLocationChoice(nextLocationChoice);
+        if (preservedResearchSummary || preservedResearchSources.length || preservedResearchStructured) {
+          setResearchIdea(nextInput.idea.trim());
+          setResearchContext({
+            summary: preservedResearchSummary,
+            sources: preservedResearchSources,
+            structured: preservedResearchStructured,
+          });
+        }
+        setMissingFields(getMissingForStart(nextInput, nextLocationChoice));
+        setPendingConfigReview(false);
+        setPendingResearchReview(false);
+      setIsWaitingForLocationChoice(false);
+      setIsWaitingForCountry(false);
+      setIsWaitingForCity(false);
+      setHighlightedReasoningMessageIds([]);
+      setDebateInviteVisible(false);
+      setHasStarted(true);
+      startTransition(() => {
+        setActivePanel('chat');
+      });
+
+      addSystemMessage(
+        patchPreview.guideMessage
+          || (settings.language === 'ar'
+            ? 'أعدت صياغة السياق وسأبدأ جولة جديدة من أقرب مرحلة مناسبة.'
+              : 'Context patch applied. Starting a fresh run from the closest valid stage.')
+        );
+
+        const nextConfig: SimulationConfig = {
+          ...(simulationContext as SimulationConfig),
+          ...((patchPreview.contextPatch || {}) as Partial<SimulationConfig>),
+          idea: nextInput.idea.trim(),
+          category: nextInput.category || DEFAULT_CATEGORY,
+          targetAudience: nextInput.targetAudience,
+          country: nextInput.country.trim(),
+          city: nextInput.city.trim(),
+          riskAppetite: (nextInput.riskAppetite ?? 50) / 100,
+          ideaMaturity: nextInput.ideaMaturity ?? 'concept',
+          goals: nextInput.goals,
+          agentCount: nextInput.agentCount,
+          language: typeof simulationContext.language === 'string' ? simulationContext.language as 'ar' | 'en' : settings.language,
+          research_summary: preservedResearchSummary || undefined,
+          research_sources: preservedResearchSources,
+          research_structured: preservedResearchStructured,
+        };
+        nextConfig.parent_simulation_id = simulationId;
+        nextConfig.seed_context = {
+          ...currentSeedContext,
+          coach_intervention_id: intervention.interventionId,
+          coach_suggestion_id: patchPreview.selectedSuggestionId || null,
+          coach_context_patch: patchPreview.contextPatch,
+        coach_neutralized_text: patchPreview.neutralizedText || null,
+        coach_rerun_from_stage: patchPreview.rerunFromStage,
+      };
+
+      const response = await simulation.startSimulation(nextConfig, { carryOver: true, throwOnError: true }).catch(() => null);
+      const nextSimulationId = typeof response === 'object' && response && 'simulation_id' in response
+        ? String(response.simulation_id || '')
+        : '';
+      if (nextSimulationId) {
+        await guidedWorkflow.attachSimulation(nextSimulationId).catch(() => undefined);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
+      addSystemMessage(
+        settings.language === 'ar'
+          ? `تعذر بدء جولة التعديل الجديدة.${msg}`.trim()
+          : `Failed to start the coach rerun.${msg}`.trim()
+      );
+    } finally {
+      guidedWorkflowStartingSimulationRef.current = false;
+      endUiBusy(rerunBusyToken);
+      setCoachBusy(false);
+    }
+    }, [
+      addSystemMessage,
+      apiService,
+      applyCoachContextPatch,
+      beginUiBusy,
+      buildUserInputFromSimulationContext,
+      coachBusy,
+      endUiBusy,
+      getMissingForStart,
+      guidedWorkflow,
+      settings.language,
     simulation,
     userInput,
   ]);
@@ -3384,45 +4055,41 @@ If rejection is about competition or location, suggest searching for a better lo
   }, [navigate]);
 
   const handleManualPanelSwitch = useCallback((panel: 'chat' | 'reasoning' | 'config') => {
-    if (autoReasoningSwitchedRef.current && panel !== 'reasoning') {
-      userOverrodeAutoRef.current = true;
-    }
     if (panel === 'config') {
+      setHighlightedReasoningMessageIds([]);
       requestConfigPanel();
       return;
     }
-    setActivePanel(panel);
+    if (panel !== 'reasoning') {
+      setHighlightedReasoningMessageIds([]);
+    } else {
+      setDebateInviteVisible(false);
+    }
+    startTransition(() => {
+      setActivePanel(panel);
+    });
   }, [requestConfigPanel]);
 
   useEffect(() => {
     if (simulation.status === 'running') return;
-    autoReasoningSwitchedRef.current = false;
-    userOverrodeAutoRef.current = false;
+    debateInviteShownForSimulationRef.current = null;
+    setDebateInviteVisible(false);
   }, [simulation.status]);
 
   useEffect(() => {
-    if (simulation.status !== 'running' || !reasoningActive) return;
-    if (activePanel !== 'chat') return;
-    if (autoReasoningSwitchedRef.current) return;
-    autoReasoningSwitchedRef.current = true;
-    userOverrodeAutoRef.current = false;
-    setActivePanel('reasoning');
-  }, [activePanel, reasoningActive, simulation.status]);
-
-  useEffect(() => {
-    if (simulation.status !== 'running' || reasoningActive) return;
-    if (!autoReasoningSwitchedRef.current) return;
-    if (userOverrodeAutoRef.current) {
-      autoReasoningSwitchedRef.current = false;
-      userOverrodeAutoRef.current = false;
+    const simulationId = simulation.simulationId;
+    if (
+      simulation.status !== 'running'
+      || !simulationId
+      || !reasoningActive
+      || simulation.reasoningFeed.length < 2
+    ) {
       return;
     }
-    if (activePanel === 'reasoning') {
-      setActivePanel('chat');
-    }
-    autoReasoningSwitchedRef.current = false;
-    userOverrodeAutoRef.current = false;
-  }, [activePanel, reasoningActive, simulation.status]);
+    if (debateInviteShownForSimulationRef.current === simulationId) return;
+    debateInviteShownForSimulationRef.current = simulationId;
+    setDebateInviteVisible(true);
+  }, [reasoningActive, simulation.reasoningFeed.length, simulation.simulationId, simulation.status]);
 
   useEffect(() => {
     if (
@@ -3442,6 +4109,12 @@ If rejection is about competition or location, suggest searching for a better lo
       && simulation.statusReason === 'paused_clarification_needed'
       && simulation.pendingClarification?.questionId
     );
+    const needsCoachAction = Boolean(
+      simulation.simulationId
+      && simulation.status === 'paused'
+      && simulation.statusReason === 'paused_coach_intervention'
+      && simulation.coachIntervention?.interventionId
+    );
     const needsResearchReview = Boolean(
       simulation.simulationId
       && simulation.status === 'paused'
@@ -3449,9 +4122,10 @@ If rejection is about competition or location, suggest searching for a better lo
       && simulation.researchGate === 'runtime_review'
       && simulation.pendingResearchReview?.cycleId
     );
-    if (!needsClarification && !needsResearchReview) return;
+    if (!needsClarification && !needsCoachAction && !needsResearchReview) return;
     setActivePanel('chat');
   }, [
+    simulation.coachIntervention,
     simulation.pendingClarification,
     simulation.pendingResearchReview,
     simulation.researchGate,
@@ -3459,6 +4133,10 @@ If rejection is about competition or location, suggest searching for a better lo
     simulation.status,
     simulation.statusReason,
   ]);
+
+  useEffect(() => {
+    setHighlightedReasoningMessageIds([]);
+  }, [simulation.simulationId]);
 
   useEffect(() => {
     if (simulation.status !== 'paused' || simulation.statusReason !== 'paused_credits_exhausted') return;
@@ -3499,12 +4177,21 @@ If rejection is about competition or location, suggest searching for a better lo
     && simulation.researchGate === 'runtime_review'
     && simulation.pendingResearchReview?.cycleId
   );
+  const isCoachPause = Boolean(
+    simulation.simulationId
+    && simulation.status === 'paused'
+    && simulation.statusReason === 'paused_coach_intervention'
+    && simulation.coachIntervention?.interventionId
+  );
   const clarificationBannerText = settings.language === 'ar'
     ? 'المحاكاة متوقفة مؤقتًا لأن الوكلاء يحتاجون توضيحًا منك قبل الاستكمال.'
     : 'Simulation is paused because agents require clarification before continuing.';
   const researchReviewBannerText = settings.language === 'ar'
     ? 'تم إيقاف المحاكاة مؤقتًا لمراجعة روابط البحث. اختر روابط ثم واصل الاستخراج.'
     : 'Simulation is paused for research review. Select URLs then continue scraping.';
+  const coachBannerText = settings.language === 'ar'
+    ? 'أوقفنا المحاكاة لأن الوكلاء وصلوا لاعتراض متقارب يحتاج قرارًا منك قبل الإعادة.'
+    : 'Simulation is paused because agents converged on a blocker and need your decision before rerun.';
   const quickReplies = pendingUpdate
     ? [
         { label: settings.language === 'ar' ? 'نعم' : 'Yes', value: 'yes' },
@@ -3570,6 +4257,21 @@ If rejection is about competition or location, suggest searching for a better lo
         description: settings.language === 'ar' ? 'استخدم بطاقة مراجعة الروابط داخل الدردشة' : 'Use the URL review card in chat',
         disabled: false,
         busy: researchReviewBusy,
+        tone: 'warning' as const,
+        icon: 'sparkles' as const,
+        onClick: () => { setActivePanel('chat'); },
+      };
+    }
+
+    if (isCoachPause) {
+      return {
+        key: 'coach_required',
+        label: settings.language === 'ar' ? 'راجع تشخيص الأوركستريتور' : 'Review orchestrator diagnosis',
+        description: settings.language === 'ar'
+          ? 'افتح الدليل لمراجعة الأدلة والاقتراحات أو الاستكمال بدون تعديل.'
+          : 'Open the guide to inspect evidence, fixes, or continue without changes.',
+        disabled: false,
+        busy: coachBusy,
         tone: 'warning' as const,
         icon: 'sparkles' as const,
         onClick: () => { setActivePanel('chat'); },
@@ -3704,6 +4406,7 @@ If rejection is about competition or location, suggest searching for a better lo
       onClick: () => { void handleConfigSubmit(); },
     };
   }, [
+    coachBusy,
     clarificationBusy,
     handleConfigSubmit,
     handleConfirmStart,
@@ -3713,6 +4416,7 @@ If rejection is about competition or location, suggest searching for a better lo
     handleRetryPrestartResearch,
     handleSearchRetry,
     isClarificationPause,
+    isCoachPause,
     isPrestartSearchActive,
     isResearchReviewPause,
     isRunActive,
@@ -3776,26 +4480,26 @@ If rejection is about competition or location, suggest searching for a better lo
   }, [getMissingForStart, isConfigLocked, notifyConfigLocked]);
 
   const sidePanel = (
-    <div className="h-full min-h-0 rounded-2xl border border-border/50 bg-card/20 overflow-hidden flex flex-col">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-border/40 bg-background/50 backdrop-blur">
-        <div className="flex gap-2 flex-wrap">
+    <div className="panel-mobile-shell h-full min-h-0 rounded-[28px] border border-border/50 bg-card/20 overflow-hidden flex flex-col">
+      <div className="sticky top-0 z-10 border-b border-border/40 bg-background/80 px-3 py-3 backdrop-blur-xl">
+        <div className="grid grid-cols-3 gap-2">
           <button
             type="button"
             onClick={() => handleManualPanelSwitch('chat')}
             className={cn(
-              'px-3 py-1.5 rounded-full text-xs font-medium transition',
+              'h-10 rounded-full px-2 text-xs font-semibold transition',
               activePanel === 'chat'
                 ? 'bg-primary text-primary-foreground'
                 : 'bg-secondary/60 text-muted-foreground hover:text-foreground',
             )}
           >
-            {settings.language === 'ar' ? 'الدردشة' : 'Chat'}
+            {settings.language === 'ar' ? 'الدليل' : 'Guide'}
           </button>
           <button
             type="button"
             onClick={() => handleManualPanelSwitch('reasoning')}
             className={cn(
-              'px-3 py-1.5 rounded-full text-xs font-medium transition',
+              'h-10 rounded-full px-2 text-xs font-semibold transition',
               activePanel === 'reasoning'
                 ? 'bg-primary text-primary-foreground'
                 : 'bg-secondary/60 text-muted-foreground hover:text-foreground',
@@ -3809,7 +4513,7 @@ If rejection is about competition or location, suggest searching for a better lo
             disabled={isConfigLocked}
             title={isConfigLocked ? configLockReason : undefined}
             className={cn(
-              'px-3 py-1.5 rounded-full text-xs font-medium transition disabled:opacity-50 disabled:cursor-not-allowed',
+              'h-10 rounded-full px-2 text-xs font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed',
               activePanel === 'config'
                 ? 'bg-primary text-primary-foreground'
                 : 'bg-secondary/60 text-muted-foreground hover:text-foreground',
@@ -3819,7 +4523,8 @@ If rejection is about competition or location, suggest searching for a better lo
           </button>
         </div>
       </div>
-      <div className="min-h-0 flex-1" dir={settings.language === 'ar' ? 'rtl' : 'ltr'}>
+      <div className="relative min-h-0 flex-1 overflow-hidden" dir={settings.language === 'ar' ? 'rtl' : 'ltr'}>
+        <div key={activePanel} className="panel-mobile-screen h-full min-h-0 overflow-hidden">
         {activePanel === 'config' ? (
           <ConfigPanel
             value={userInput}
@@ -3839,11 +4544,12 @@ If rejection is about competition or location, suggest searching for a better lo
             societyAssistantAnswer={societyAssistantAnswer}
             onAskSocietyAssistant={handleAskSocietyAssistant}
           />
-        ) : (
+        ) : activePanel === 'reasoning' ? (
           <ChatPanel
-            viewMode={activePanel === 'reasoning' ? 'reasoning' : 'chat'}
+            viewMode="reasoning"
             messages={chatMessages}
             reasoningFeed={simulation.reasoningFeed}
+            highlightReasoningMessageIds={highlightedReasoningMessageIds}
             reasoningDebug={simulation.reasoningDebug}
             onSendMessage={handleSendMessage}
             onSelectOption={handleOptionSelect}
@@ -3890,7 +4596,41 @@ If rejection is about competition or location, suggest searching for a better lo
             onStartFollowupFromPostAction={() => { void handleStartFollowupFromAction(); }}
             settings={settings}
           />
+        ) : (
+          <GuidedSimulationPanel
+            workflow={guidedWorkflowState}
+            loading={guidedWorkflowLoading}
+            simulationStatus={simulation.status}
+            debateReady={debateInviteVisible}
+            reasoningCount={simulation.reasoningFeed.length}
+            language={settings.language}
+            coachIntervention={simulation.coachIntervention}
+            coachBusy={coachBusy}
+            draftInput={guidedDraftInput}
+            onDraftChange={handleGuidedDraftChange}
+            onChooseScope={handleGuidedChooseScope}
+            onSubmitSchema={handleGuidedSubmitSchema}
+            onSubmitClarifications={handleGuidedSubmitClarifications}
+            onApproveReview={handleGuidedApproveReview}
+            onPauseWorkflow={handleGuidedPauseWorkflow}
+            onResumeWorkflow={handleGuidedResumeWorkflow}
+            onSubmitCorrection={handleGuidedCorrection}
+            onOpenCoachEvidence={handleOpenCoachEvidence}
+            onCoachApplySuggestion={handleCoachApplySuggestion}
+            onCoachRequestMoreIdeas={() => { void handleCoachRequestMoreIdeas(); }}
+            onCoachContinueWithoutChange={() => { void handleCoachContinueWithoutChange(); }}
+            onCoachCustomFix={(text) => { void handleCoachCustomFix(text); }}
+            onCoachConfirmRerun={() => { void handleCoachConfirmRerun(); }}
+            onStartSimulation={() => { void handleGuidedStartSimulation(); }}
+            onOpenReasoning={() => {
+              setDebateInviteVisible(false);
+              handleManualPanelSwitch('reasoning');
+            }}
+            onOpenConfig={() => { handleManualPanelSwitch('config'); }}
+            onApplyCorrectionToSimulation={() => { void handleApplyGuidedCorrectionToSimulation(); }}
+          />
         )}
+        </div>
       </div>
     </div>
   );
@@ -3967,18 +4707,27 @@ If rejection is about competition or location, suggest searching for a better lo
         </div>
       )}
       {isClarificationPause && (
-        <div className="mx-4 mt-3 rounded-2xl border border-cyan-400/30 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100">
-          <p>{clarificationBannerText}</p>
+        <div className="mx-4 mt-3 rounded-xl border border-orange-400/35 bg-orange-500/12 px-4 py-2 text-xs text-orange-100">
+          <p className="leading-5">{clarificationBannerText}</p>
           {simulation.pendingClarification?.reasonSummary && (
-            <p className="text-xs text-cyan-200/80 mt-1">{simulation.pendingClarification.reasonSummary}</p>
+            <p className="mt-0.5 text-[11px] leading-5 text-orange-100/75">{simulation.pendingClarification.reasonSummary}</p>
           )}
         </div>
       )}
       {isResearchReviewPause && (
-        <div className="mx-4 mt-3 rounded-2xl border border-cyan-400/30 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100">
-          <p>{researchReviewBannerText}</p>
+        <div className="mx-4 mt-3 rounded-xl border border-orange-400/35 bg-orange-500/12 px-4 py-2 text-xs text-orange-100">
+          <p className="leading-5">{researchReviewBannerText}</p>
           {simulation.pendingResearchReview?.gapSummary && (
-            <p className="text-xs text-cyan-200/80 mt-1">{simulation.pendingResearchReview.gapSummary}</p>
+            <p className="mt-0.5 text-[11px] leading-5 text-orange-100/75">{simulation.pendingResearchReview.gapSummary}</p>
+          )}
+        </div>
+      )}
+      {isCoachPause && simulation.coachIntervention && (
+        <div className="mx-4 mt-3 rounded-xl border border-orange-400/35 bg-orange-500/12 px-4 py-2 text-xs text-orange-100">
+          <p className="leading-5">{coachBannerText}</p>
+          <p className="mt-0.5 text-[11px] leading-5 text-orange-100/80">{simulation.coachIntervention.blockerSummary}</p>
+          {simulation.coachIntervention.guideMessage && (
+            <p className="mt-0.5 text-[11px] leading-5 text-orange-100/70">{simulation.coachIntervention.guideMessage}</p>
           )}
         </div>
       )}
@@ -4044,7 +4793,9 @@ If rejection is about competition or location, suggest searching for a better lo
         </div>
       )}
       <div className="flex-1 min-h-0 overflow-y-auto xl:overflow-hidden p-3 md:p-4">
-        <div className="min-h-full xl:h-full grid grid-cols-1 xl:grid-cols-[minmax(260px,22%)_minmax(0,1fr)_minmax(320px,28%)] gap-4 min-h-0">
+          <div
+            className={`min-h-full xl:h-full grid grid-cols-1 xl:grid-cols-[minmax(${CHAT_PANEL_DESKTOP_MIN_WIDTH_PX}px,22%)_minmax(0,1fr)_minmax(${METRICS_PANEL_DESKTOP_MIN_WIDTH_PX}px,28%)] gap-4 min-h-0`}
+          >
           <div className={cn('min-h-0 h-[84dvh] xl:h-full', isArabic ? 'xl:order-3' : 'xl:order-1')}>
             {metricsPane}
           </div>

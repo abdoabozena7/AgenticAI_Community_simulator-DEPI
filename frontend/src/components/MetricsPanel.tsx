@@ -4,6 +4,9 @@ import { Progress } from '@/components/ui/progress';
 import { SimulationMetrics } from '@/types/simulation';
 import { cn } from '@/lib/utils';
 
+export const METRICS_PANEL_CUSTOM_X_PX = 0;
+export const METRICS_PANEL_CUSTOM_Y_PX = 0;
+
 interface MetricsPanelProps {
   metrics: SimulationMetrics;
   language: 'ar' | 'en';

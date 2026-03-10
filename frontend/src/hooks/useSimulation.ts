@@ -1,11 +1,11 @@
 ﻿import { useState, useCallback, useEffect, useReducer, useRef } from 'react';
 import { websocketService, WebSocketEvent, MetricsEvent, ReasoningStepEvent, ReasoningDebugEvent, AgentsEvent } from '@/services/websocket';
-import { apiService, clearAuthTokens, SimulationConfig, SimulationStateResponse } from '@/services/api';
-import { Agent, ReasoningMessage, ReasoningDebug, SimulationMetrics, SimulationStatus, SimulationChatEvent, PendingClarification, PendingResearchReview } from '@/types/simulation';
+import { apiService, clearAuthTokens, getRealtimeBaseUrl, SimulationConfig, SimulationStateResponse } from '@/services/api';
+import { Agent, ReasoningMessage, ReasoningDebug, SimulationMetrics, SimulationStatus, SimulationChatEvent, PendingClarification, PendingResearchReview, CoachIntervention } from '@/types/simulation';
 
 interface SimulationState {
   status: SimulationStatus;
-  statusReason: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_research_review' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'error' | 'completed' | null;
+  statusReason: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_research_review' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'paused_coach_intervention' | 'error' | 'completed' | null;
   policyMode: 'normal' | 'safety_guard_hard';
   policyReason: string | null;
   searchQuality: {
@@ -46,6 +46,14 @@ interface SimulationState {
   pendingClarification: PendingClarification | null;
   canAnswerClarification: boolean;
   pendingResearchReview: PendingResearchReview | null;
+  coachIntervention: CoachIntervention | null;
+  coachHistory: Array<{
+    interventionId?: string;
+    blockerTag?: string;
+    blockerSummary?: string;
+    resolution?: string | null;
+    resolvedAt?: number | null;
+  }>;
   researchGate: 'none' | 'prestart_review' | 'runtime_review';
   researchGateCycleId: string | null;
   researchGateVersion: number | null;
@@ -72,6 +80,7 @@ type SimulationAction =
   | { type: 'SET_RESUME_META'; payload: { canResume: boolean; resumeReason: string | null } }
   | { type: 'SET_CLARIFICATION'; payload: { pendingClarification: PendingClarification | null; canAnswerClarification: boolean } }
   | { type: 'SET_RESEARCH_REVIEW'; payload: PendingResearchReview | null }
+  | { type: 'SET_COACH'; payload: { coachIntervention: CoachIntervention | null; coachHistory: SimulationState['coachHistory'] } }
   | { type: 'SET_RESEARCH_GATE'; payload: { gate: SimulationState['researchGate']; cycleId: string | null; version: number | null } }
   | { type: 'SET_PULSES'; payload: { from: string; to: string; active: boolean; pulseProgress: number }[] }
   | { type: 'ADD_PULSES'; payload: { from: string; to: string; active: boolean; pulseProgress: number }[] }
@@ -111,6 +120,8 @@ const initialState: SimulationState = {
   pendingClarification: null,
   canAnswerClarification: false,
   pendingResearchReview: null,
+  coachIntervention: null,
+  coachHistory: [],
   researchGate: 'none',
   researchGateCycleId: null,
   researchGateVersion: null,
@@ -167,6 +178,132 @@ const createPosition = (seed: string, index: number, total: number): [number, nu
   ];
 };
 
+const mapCoachIntervention = (raw: SimulationStateResponse['coach_intervention'] | null | undefined): CoachIntervention | null => {
+  if (!raw || typeof raw !== 'object') return null;
+  const interventionId = String(raw.intervention_id || '').trim();
+  if (!interventionId) return null;
+  const mapEvidence = (items: unknown): CoachIntervention['agentCitations'] => (
+    Array.isArray(items)
+      ? items
+          .map((entry) => {
+            if (!entry || typeof entry !== 'object') return null;
+            const record = entry as Record<string, unknown>;
+            const evidenceId = String(record.id || '').trim();
+            const quote = String(record.quote || '').trim();
+            if (!evidenceId || !quote) return null;
+            return {
+              id: evidenceId,
+              source: record.source === 'research' ? 'research' : 'agent',
+              label: typeof record.label === 'string' ? record.label : undefined,
+              quote,
+              messageId: typeof record.message_id === 'string' ? record.message_id : undefined,
+              stepUid: typeof record.step_uid === 'string' ? record.step_uid : null,
+              eventSeq: typeof record.event_seq === 'number' ? record.event_seq : null,
+              agentId: typeof record.agent_id === 'string' ? record.agent_id : undefined,
+              agentLabel: typeof record.agent_label === 'string' ? record.agent_label : undefined,
+              sourceUrl: typeof record.source_url === 'string' ? record.source_url : null,
+              sourceDomain: typeof record.source_domain === 'string' ? record.source_domain : null,
+              reasonTag: typeof record.reason_tag === 'string' ? record.reason_tag : null,
+            };
+          })
+          .filter((item): item is CoachIntervention['agentCitations'][number] => Boolean(item))
+      : []
+  );
+  const mapSuggestions = (items: unknown): CoachIntervention['suggestions'] => (
+    Array.isArray(items)
+      ? items
+          .map((entry) => {
+            if (!entry || typeof entry !== 'object') return null;
+            const record = entry as Record<string, unknown>;
+            const suggestionId = String(record.suggestion_id || '').trim();
+            const title = String(record.title || '').trim();
+            if (!suggestionId || !title) return null;
+            return {
+              suggestionId,
+              kind: String(record.kind || '').trim(),
+              title,
+              oneLiner: String(record.one_liner || '').trim(),
+              rationale: String(record.rationale || '').trim(),
+              tradeoff: typeof record.tradeoff === 'string' ? record.tradeoff : undefined,
+              ctaLabel: typeof record.cta_label === 'string' ? record.cta_label : undefined,
+              evidenceRefIds: Array.isArray(record.evidence_ref_ids)
+                ? record.evidence_ref_ids.map((item) => String(item || '').trim()).filter(Boolean)
+                : [],
+              contextPatch: record.context_patch && typeof record.context_patch === 'object'
+                ? record.context_patch as Record<string, unknown>
+                : {},
+              rerunFromStage: typeof record.rerun_from_stage === 'string' ? record.rerun_from_stage : 'idea_research',
+              estimatedEtaDeltaSeconds: Number(record.estimated_eta_delta_seconds || 0) || 0,
+            };
+          })
+          .filter((item): item is CoachIntervention['suggestions'][number] => Boolean(item))
+      : []
+  );
+  const patchPreviewRaw = raw.patch_preview;
+  const patchPreview: CoachPatchPreview | null =
+    patchPreviewRaw && typeof patchPreviewRaw === 'object'
+      ? {
+          contextPatch: patchPreviewRaw.context_patch && typeof patchPreviewRaw.context_patch === 'object'
+            ? patchPreviewRaw.context_patch as Record<string, unknown>
+            : {},
+          rerunFromStage: typeof patchPreviewRaw.rerun_from_stage === 'string' ? patchPreviewRaw.rerun_from_stage : 'idea_research',
+          guideMessage: typeof patchPreviewRaw.guide_message === 'string' ? patchPreviewRaw.guide_message : '',
+          selectedSuggestionId: typeof patchPreviewRaw.selected_suggestion_id === 'string' ? patchPreviewRaw.selected_suggestion_id : null,
+          neutralizedText: typeof patchPreviewRaw.neutralized_text === 'string' ? patchPreviewRaw.neutralized_text : null,
+          notes: Array.isArray(patchPreviewRaw.notes)
+            ? patchPreviewRaw.notes.map((item) => String(item || '').trim()).filter(Boolean)
+            : [],
+          estimatedEtaDeltaSeconds: typeof patchPreviewRaw.estimated_eta_delta_seconds === 'number' ? patchPreviewRaw.estimated_eta_delta_seconds : null,
+        }
+      : null;
+  return {
+    interventionId,
+    simulationId: typeof raw.simulation_id === 'string' ? raw.simulation_id : undefined,
+    blockerTag: String(raw.blocker_tag || '').trim(),
+    blockerSummary: String(raw.blocker_summary || '').trim(),
+    severity: String(raw.severity || 'medium'),
+    decisionAxis: typeof raw.decision_axis === 'string' ? raw.decision_axis : null,
+    shouldPause: Boolean(raw.should_pause),
+    uiState: String(raw.ui_state || 'options_ready'),
+    guideMessage: typeof raw.guide_message === 'string' ? raw.guide_message : undefined,
+    phaseKey: typeof raw.phase_key === 'string' ? raw.phase_key : null,
+    agentCitations: mapEvidence(raw.agent_citations),
+    researchEvidence: mapEvidence(raw.research_evidence),
+    suggestions: mapSuggestions(raw.suggestions),
+    patchPreview,
+    customFix: raw.custom_fix && typeof raw.custom_fix === 'object'
+      ? {
+          raw_text: typeof raw.custom_fix.raw_text === 'string' ? raw.custom_fix.raw_text : undefined,
+          neutralized_text: typeof raw.custom_fix.neutralized_text === 'string' ? raw.custom_fix.neutralized_text : undefined,
+          field_updates: raw.custom_fix.field_updates && typeof raw.custom_fix.field_updates === 'object'
+            ? raw.custom_fix.field_updates as Record<string, unknown>
+            : undefined,
+          notes: Array.isArray(raw.custom_fix.notes)
+            ? raw.custom_fix.notes.map((item) => String(item || '').trim()).filter(Boolean)
+            : [],
+          steering_filtered: Boolean(raw.custom_fix.steering_filtered),
+          apply_mode: typeof raw.custom_fix.apply_mode === 'string' ? raw.custom_fix.apply_mode : undefined,
+        }
+      : null,
+    continueBlocked: Boolean(raw.continue_blocked),
+    createdAt: typeof raw.created_at === 'number' ? raw.created_at : null,
+    resolvedAt: typeof raw.resolved_at === 'number' ? raw.resolved_at : null,
+    resolution: typeof raw.resolution === 'string' ? raw.resolution : null,
+    history: Array.isArray(raw.history)
+      ? raw.history
+          .map((item) => {
+            if (!item || typeof item !== 'object') return null;
+            const record = item as Record<string, unknown>;
+            return {
+              type: String(record.type || '').trim(),
+              label: typeof record.label === 'string' ? record.label : undefined,
+            };
+          })
+          .filter((item): item is NonNullable<CoachIntervention['history']>[number] => Boolean(item?.type))
+      : [],
+  };
+};
+
 const mapOpinionToStatus = (opinion: string): Agent['status'] => {
   if (opinion === 'accept') return 'accepted';
   if (opinion === 'reject') return 'rejected';
@@ -212,7 +349,27 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
       };
 
     case 'SET_SIMULATION_ID':
-      return { ...state, simulationId: action.payload };
+      if (state.simulationId === action.payload) {
+        return state;
+      }
+      return {
+        ...state,
+        simulationId: action.payload,
+        lastEventSeq: 0,
+        currentPhaseKey: null,
+        phaseProgressPct: 0,
+        statusReason: null,
+        summary: null,
+        pendingClarification: null,
+        canAnswerClarification: false,
+        pendingResearchReview: null,
+        coachIntervention: null,
+        coachHistory: [],
+        researchGate: 'none',
+        researchGateCycleId: null,
+        researchGateVersion: null,
+        activePulses: [],
+      };
 
     case 'SET_PHASE':
       return {
@@ -450,6 +607,14 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
       };
     }
 
+    case 'SET_COACH': {
+      return {
+        ...state,
+        coachIntervention: action.payload.coachIntervention,
+        coachHistory: action.payload.coachHistory,
+      };
+    }
+
     case 'SET_RESEARCH_GATE': {
       return {
         ...state,
@@ -626,10 +791,7 @@ export function useSimulation(options?: UseSimulationOptions) {
   }, [clearPolling]);
 
   const ensureSocketConnection = useCallback(async () => {
-    const apiBase = (import.meta.env.VITE_API_URL || '') as string;
-    const wsBase = (import.meta.env.VITE_WS_URL as string | undefined)
-      || apiBase
-      || 'http://localhost:8000';
+    const wsBase = getRealtimeBaseUrl();
     const token = await apiService.ensureAccessTokenFresh(45);
     if (!token) {
       handleUnauthorizedState();
@@ -665,7 +827,12 @@ export function useSimulation(options?: UseSimulationOptions) {
   }, [handleUnauthorizedState]);
 
   const applyStateResponse = useCallback((stateResponse: SimulationStateResponse, options?: { appendReasoning?: boolean }) => {
-    if (typeof stateResponse.event_seq === 'number' && stateResponse.event_seq < stateRef.current.lastEventSeq) {
+    const responseSimulationId = typeof stateResponse.simulation_id === 'string'
+      ? stateResponse.simulation_id.trim()
+      : '';
+    const activeSimulationId = stateRef.current.simulationId?.trim() || '';
+    const isSameSimulation = !responseSimulationId || !activeSimulationId || responseSimulationId === activeSimulationId;
+    if (typeof stateResponse.event_seq === 'number' && isSameSimulation && stateResponse.event_seq < stateRef.current.lastEventSeq) {
       return;
     }
     const rawIteration = stateResponse.metrics?.iteration ?? 0;
@@ -873,6 +1040,23 @@ export function useSimulation(options?: UseSimulationOptions) {
       type: 'SET_RESEARCH_REVIEW',
       payload: mappedPendingResearch && mappedPendingResearch.cycleId ? mappedPendingResearch : null,
     });
+    const mappedCoachIntervention = mapCoachIntervention(stateResponse.coach_intervention);
+    const mappedCoachHistory = Array.isArray(stateResponse.coach_history)
+      ? stateResponse.coach_history.map((item) => ({
+          interventionId: typeof item?.intervention_id === 'string' ? item.intervention_id : undefined,
+          blockerTag: typeof item?.blocker_tag === 'string' ? item.blocker_tag : undefined,
+          blockerSummary: typeof item?.blocker_summary === 'string' ? item.blocker_summary : undefined,
+          resolution: typeof item?.resolution === 'string' ? item.resolution : null,
+          resolvedAt: typeof item?.resolved_at === 'number' ? item.resolved_at : null,
+        }))
+      : [];
+    dispatch({
+      type: 'SET_COACH',
+      payload: {
+        coachIntervention: mappedCoachIntervention,
+        coachHistory: mappedCoachHistory,
+      },
+    });
     const rawGate = String(stateResponse.research_gate || '').trim().toLowerCase();
     const normalizedGate: SimulationState['researchGate'] =
       rawGate === 'runtime_review'
@@ -900,7 +1084,7 @@ export function useSimulation(options?: UseSimulationOptions) {
         ?? (stateResponse.status === 'running'
           ? 'running'
           : stateResponse.status === 'paused'
-            ? 'interrupted'
+            ? (mappedCoachIntervention ? 'paused_coach_intervention' : 'interrupted')
             : stateResponse.status === 'error'
               ? 'error'
               : 'completed'),
@@ -1207,6 +1391,38 @@ export function useSimulation(options?: UseSimulationOptions) {
         dispatch({ type: 'SET_STATUS', payload: 'running' });
         dispatch({ type: 'SET_STATUS_REASON', payload: 'running' });
         break;
+      case 'coach_detected':
+      case 'coach_options_ready':
+      case 'coach_patch_preview_ready':
+      case 'coach_patch_applied':
+      case 'coach_rerun_started': {
+        const mappedCoach = mapCoachIntervention(
+          event.coach_intervention as SimulationStateResponse['coach_intervention']
+        );
+        dispatch({
+          type: 'SET_COACH',
+          payload: {
+            coachIntervention: mappedCoach,
+            coachHistory: stateRef.current.coachHistory,
+          },
+        });
+        dispatch({ type: 'SET_STATUS', payload: event.type === 'coach_rerun_started' ? 'running' : 'paused' });
+        dispatch({ type: 'SET_STATUS_REASON', payload: event.type === 'coach_rerun_started' ? 'running' : 'paused_coach_intervention' });
+        dispatch({ type: 'SET_RESUME_META', payload: { canResume: false, resumeReason: mappedCoach?.blockerSummary ?? null } });
+        break;
+      }
+      case 'coach_resolved':
+        dispatch({
+          type: 'SET_COACH',
+          payload: {
+            coachIntervention: null,
+            coachHistory: stateRef.current.coachHistory,
+          },
+        });
+        dispatch({ type: 'SET_STATUS', payload: 'running' });
+        dispatch({ type: 'SET_STATUS_REASON', payload: 'running' });
+        dispatch({ type: 'SET_RESUME_META', payload: { canResume: false, resumeReason: null } });
+        break;
       case 'chat_event':
         dispatch({
           type: 'ADD_CHAT_EVENT',
@@ -1236,6 +1452,7 @@ export function useSimulation(options?: UseSimulationOptions) {
     requestEpochRef.current = opEpoch;
     setError(null);
     latestWsIterationRef.current = 0;
+    clearPolling();
     carryOverRef.current.active = false;
     carryOverRef.current.skipInitial = false;
     carryOverRef.current.iterationOffset = 0;
@@ -1261,13 +1478,13 @@ export function useSimulation(options?: UseSimulationOptions) {
       requestEpochRef.current = opEpoch;
       setError(null);
       latestWsIterationRef.current = 0;
+      clearPolling();
       carryOverRef.current.active = Boolean(options?.carryOver);
       carryOverRef.current.skipInitial = Boolean(options?.carryOver);
       carryOverRef.current.iterationOffset = options?.carryOver
         ? stateRef.current.metrics.currentIteration
         : 0;
       if (!options?.carryOver) {
-        clearPolling();
         websocketService.setSimulationSubscription(null);
         dispatch({ type: 'RESET' });
       }
@@ -1321,6 +1538,7 @@ export function useSimulation(options?: UseSimulationOptions) {
       } else {
         clearPolling();
       }
+      return response;
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to start simulation';
       setError(message);
@@ -1330,6 +1548,7 @@ export function useSimulation(options?: UseSimulationOptions) {
       if (options?.throwOnError) {
         throw err;
       }
+      return null;
     }
   }, [applyStateResponse, beginPolling, clearPolling, ensureSocketConnection, fetchSimulationStateSafe]);
 
@@ -1461,6 +1680,64 @@ export function useSimulation(options?: UseSimulationOptions) {
     return response;
   }, [applyStateResponse, beginPolling, ensureSocketConnection, fetchSimulationStateSafe]);
 
+  const respondToCoachIntervention = useCallback(async (payload: {
+    simulationId: string;
+    interventionId: string;
+    action: 'apply_suggestion' | 'request_more_ideas' | 'continue_without_change' | 'custom_fix';
+    suggestionId?: string;
+    customText?: string;
+  }) => {
+    const simulationId = payload.simulationId?.trim();
+    if (!simulationId) return null;
+    const opEpoch = requestEpochRef.current + 1;
+    requestEpochRef.current = opEpoch;
+    setError(null);
+    if (payload.action === 'continue_without_change') {
+      dispatch({ type: 'SET_STATUS', payload: 'configuring' });
+    }
+    const response = await apiService.respondToCoachIntervention({
+      simulation_id: simulationId,
+      intervention_id: payload.interventionId,
+      action: payload.action,
+      suggestion_id: payload.suggestionId,
+      custom_text: payload.customText,
+    });
+    if (requestEpochRef.current !== opEpoch) return response;
+    if (payload.action === 'continue_without_change') {
+      await ensureSocketConnection();
+      if (requestEpochRef.current !== opEpoch) return response;
+      websocketService.setSimulationSubscription(simulationId);
+    }
+    const snapshot = await fetchSimulationStateSafe(simulationId).catch(() => null);
+    if (snapshot && (!snapshot.simulation_id || snapshot.simulation_id === simulationId)) {
+      applyStateResponse(snapshot);
+      if (snapshot.status === 'running') {
+        beginPolling(simulationId, opEpoch);
+      } else {
+        clearPolling();
+      }
+    } else if (response.coach_intervention) {
+      dispatch({
+        type: 'SET_COACH',
+        payload: {
+          coachIntervention: mapCoachIntervention(response.coach_intervention),
+          coachHistory: Array.isArray(response.coach_history)
+            ? response.coach_history.map((item) => ({
+                interventionId: typeof item?.intervention_id === 'string' ? item.intervention_id : undefined,
+                blockerTag: typeof item?.blocker_tag === 'string' ? item.blocker_tag : undefined,
+                blockerSummary: typeof item?.blocker_summary === 'string' ? item.blocker_summary : undefined,
+                resolution: typeof item?.resolution === 'string' ? item.resolution : null,
+                resolvedAt: typeof item?.resolved_at === 'number' ? item.resolved_at : null,
+              }))
+            : stateRef.current.coachHistory,
+        },
+      });
+      dispatch({ type: 'SET_STATUS', payload: payload.action === 'continue_without_change' ? 'running' : 'paused' });
+      dispatch({ type: 'SET_STATUS_REASON', payload: payload.action === 'continue_without_change' ? 'running' : 'paused_coach_intervention' });
+    }
+    return response;
+  }, [applyStateResponse, beginPolling, clearPolling, ensureSocketConnection, fetchSimulationStateSafe]);
+
   const stopSimulation = useCallback(() => {
     requestEpochRef.current += 1;
     clearPolling();
@@ -1540,6 +1817,7 @@ export function useSimulation(options?: UseSimulationOptions) {
     pauseSimulation,
     submitResearchAction,
     submitClarificationAnswer,
+    respondToCoachIntervention,
     stopSimulation,
     activePulses: state.activePulses,
   };

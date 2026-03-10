@@ -1,7 +1,40 @@
-const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1']);
+
+const resolveRuntimeBaseUrl = (configuredUrl?: string, fallbackPort = '8000') => {
+  const raw = (configuredUrl || '').trim();
+  if (!raw) {
+    if (typeof window === 'undefined') return `http://localhost:${fallbackPort}`;
+    const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+    const host = window.location.hostname || 'localhost';
+    return `${protocol}//${host}:${fallbackPort}`;
+  }
+
+  try {
+    const url = new URL(raw);
+    if (
+      typeof window !== 'undefined'
+      && LOOPBACK_HOSTS.has(url.hostname)
+      && LOOPBACK_HOSTS.has(window.location.hostname)
+      && url.hostname !== window.location.hostname
+    ) {
+      url.hostname = window.location.hostname;
+    }
+    return url.toString().replace(/\/$/, '');
+  } catch {
+    return raw.replace(/\/$/, '');
+  }
+};
+
+const API_BASE_URL = resolveRuntimeBaseUrl(import.meta.env.VITE_API_URL, '8000');
+const REALTIME_BASE_URL = resolveRuntimeBaseUrl(
+  (import.meta.env.VITE_WS_URL as string | undefined) || import.meta.env.VITE_API_URL,
+  '8000'
+);
 const ACCESS_TOKEN_KEY = 'agentic_access_token';
 const REFRESH_TOKEN_KEY = 'agentic_refresh_token';
 export const AUTH_CHANGED_EVENT = 'agentic-auth-changed';
+export const getApiBaseUrl = () => API_BASE_URL;
+export const getRealtimeBaseUrl = () => REALTIME_BASE_URL;
 
 const emitAuthChanged = () => {
   if (typeof window === 'undefined') return;
@@ -96,7 +129,7 @@ export interface SimulationConfig {
 export interface SimulationResponse {
   simulation_id: string;
   status: 'initializing' | 'running' | 'paused' | 'completed' | 'error';
-  status_reason?: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_research_review' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'error' | 'completed';
+  status_reason?: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_research_review' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'paused_coach_intervention' | 'error' | 'completed';
 }
 
 export interface SimulationResultResponse {
@@ -117,7 +150,7 @@ export interface SimulationResultResponse {
 export interface SimulationStateResponse {
   simulation_id: string;
   status: 'running' | 'paused' | 'completed' | 'error';
-  status_reason?: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_research_review' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'error' | 'completed';
+  status_reason?: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_research_review' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'paused_coach_intervention' | 'error' | 'completed';
   policy_mode?: 'normal' | 'safety_guard_hard';
   policy_reason?: string | null;
   search_quality?: {
@@ -176,6 +209,85 @@ export interface SimulationStateResponse {
     suggested_queries?: string[];
     required?: boolean;
   } | null;
+  coach_intervention?: {
+    intervention_id: string;
+    simulation_id?: string;
+    blocker_tag: string;
+    blocker_summary: string;
+    severity: 'medium' | 'high' | string;
+    decision_axis?: string | null;
+    should_pause: boolean;
+    ui_state: 'observing' | 'diagnosed' | 'options_ready' | 'applying_patch' | 'rerunning' | 'resolved' | string;
+    guide_message?: string;
+    phase_key?: string | null;
+    agent_citations?: Array<{
+      id: string;
+      source: 'agent' | 'research';
+      label?: string;
+      quote: string;
+      message_id?: string;
+      step_uid?: string | null;
+      event_seq?: number | null;
+      agent_id?: string;
+      agent_label?: string;
+      source_url?: string | null;
+      source_domain?: string | null;
+      reason_tag?: string | null;
+    }>;
+    research_evidence?: Array<{
+      id: string;
+      source: 'agent' | 'research';
+      label?: string;
+      quote: string;
+      source_url?: string | null;
+      source_domain?: string | null;
+    }>;
+    suggestions?: Array<{
+      suggestion_id: string;
+      kind: string;
+      title: string;
+      one_liner: string;
+      rationale: string;
+      tradeoff?: string;
+      cta_label?: string;
+      evidence_ref_ids?: string[];
+      context_patch?: Record<string, unknown>;
+      rerun_from_stage?: string;
+      estimated_eta_delta_seconds?: number;
+    }>;
+    patch_preview?: {
+      context_patch?: Record<string, unknown>;
+      rerun_from_stage?: string;
+      guide_message?: string;
+      selected_suggestion_id?: string | null;
+      neutralized_text?: string | null;
+      notes?: string[];
+      estimated_eta_delta_seconds?: number | null;
+    } | null;
+    custom_fix?: {
+      raw_text?: string;
+      neutralized_text?: string;
+      field_updates?: Record<string, unknown>;
+      notes?: string[];
+      steering_filtered?: boolean;
+      apply_mode?: string;
+    } | null;
+    continue_blocked?: boolean;
+    created_at?: number | null;
+    resolved_at?: number | null;
+    resolution?: string | null;
+    history?: Array<{
+      type: string;
+      label?: string;
+    }>;
+  } | null;
+  coach_history?: Array<{
+    intervention_id?: string;
+    blocker_tag?: string;
+    blocker_summary?: string;
+    resolution?: string | null;
+    resolved_at?: number | null;
+  }>;
   research_gate?: 'none' | 'prestart_review' | 'runtime_review';
   research_gate_cycle_id?: string | null;
   research_gate_version?: number | null;
@@ -488,7 +600,7 @@ export interface SimulationResearchActionResponse {
   conflict_reason?: 'already_running' | 'stale_cycle' | 'no_pending_review';
   simulation_id: string;
   status: 'running' | 'paused' | 'completed' | 'error';
-  status_reason?: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_research_review' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'error' | 'completed';
+  status_reason?: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_research_review' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'paused_coach_intervention' | 'error' | 'completed';
   pending_research_review?: SimulationStateResponse['pending_research_review'];
   state_snapshot?: {
     status?: 'running' | 'paused' | 'completed' | 'error';
@@ -513,6 +625,21 @@ export interface SimulationClarificationAnswerResponse {
   resumed: boolean;
   applied_answer: string;
   answer_source: 'custom' | 'option';
+}
+
+export interface SimulationCoachResponse {
+  ok: boolean;
+  simulation_id: string;
+  resumed?: boolean;
+  coach_intervention?: SimulationStateResponse['coach_intervention'];
+  coach_history?: SimulationStateResponse['coach_history'];
+  context_patch?: Record<string, unknown>;
+  rerun_from_stage?: string;
+  guide_message?: string;
+  applied_intervention_id?: string;
+  applied_suggestion_id?: string | null;
+  neutralized_text?: string;
+  notes?: string[];
 }
 
 export interface SimulationPostActionResponse {
@@ -568,6 +695,163 @@ export interface SimulationResearchSourcesResponse {
     meta_json?: Record<string, unknown> | null;
     timestamp?: number | null;
   }[];
+}
+
+export interface GuidedWorkflowStateResponse {
+  workflow_id: string;
+  status: 'awaiting_input' | 'in_progress' | 'paused' | 'ready';
+  current_stage: 'context_scope' | 'schema_intake' | 'clarification' | 'idea_research' | 'location_research' | 'persona_synthesis' | 'review' | 'ready_to_start';
+  current_stage_status: string;
+  stage_eta_seconds: number;
+  estimated_total_seconds: number;
+  required_fields: string[];
+  context_options: Array<{
+    id: '' | 'specific_place' | 'internet' | 'global';
+    label: string;
+    description: string;
+  }>;
+  draft_context: {
+    idea: string;
+    category: string;
+    targetAudience: string[];
+    country: string;
+    city: string;
+    placeName: string;
+    riskAppetite: number;
+    ideaMaturity: string;
+    goals: string[];
+    contextScope: '' | 'specific_place' | 'internet' | 'global';
+    language?: 'ar' | 'en';
+    valuePromise?: string;
+    adoptionTrigger?: string;
+  };
+  guide_messages: Array<{
+    id: string;
+    role: 'guide';
+    tone?: 'guide' | 'status' | 'correction';
+    content: string;
+    stage?: string;
+    timestamp: number;
+  }>;
+  stage_history: Array<{
+    stage: string;
+    status: string;
+    eta_seconds?: number;
+    summary?: string;
+    started_at?: number;
+    completed_at?: number | null;
+  }>;
+  clarification_questions?: Array<{
+    id: string;
+    axis: string;
+    prompt: string;
+    reason?: string;
+    answer_type: 'text';
+  }> | null;
+  clarification_answers?: Record<string, string>;
+  idea_research?: {
+    query?: string;
+    summary?: string;
+    highlights?: string[];
+    sources?: SearchResult[];
+    provider?: string;
+    quality?: Record<string, unknown>;
+  } | null;
+  location_research?: {
+    query_plan?: string[];
+    summary?: string;
+    signals?: string[];
+    sources?: SearchResult[];
+    place_label?: string;
+    source_policy?: string;
+  } | null;
+  persona_snapshot?: {
+    title: string;
+    place_key: string;
+    place_label: string;
+    scope: string;
+    source_policy: string;
+    source?: string;
+    personas: Array<{
+      id: string;
+      label: string;
+      stance: string;
+      summary: string;
+      motivations: string[];
+      concerns: string[];
+      source_signals?: string[];
+    }>;
+  } | null;
+  persona_library?: {
+    place_key?: string;
+    place_label?: string;
+    source?: string;
+  } | null;
+  review?: {
+    title?: string;
+    summary?: string;
+    research_highlights?: string[];
+    location_summary?: string;
+    persona_count?: number;
+    persona_title?: string;
+    applied_corrections?: Array<{
+      raw_text: string;
+      neutralized_text: string;
+      notes?: string[];
+      apply_mode?: string;
+      timestamp: number;
+    }>;
+    estimated_runtime_seconds?: number;
+    ready_to_start?: boolean;
+  } | null;
+  review_approved?: boolean;
+  last_correction?: {
+    raw_text: string;
+    neutralized_text: string;
+    field_updates?: Record<string, unknown>;
+    notes?: string[];
+    steering_filtered?: boolean;
+    apply_mode?: string;
+    timestamp: number;
+  } | null;
+  corrections?: Array<{
+    raw_text: string;
+    neutralized_text: string;
+    field_updates?: Record<string, unknown>;
+    notes?: string[];
+    steering_filtered?: boolean;
+    apply_mode?: string;
+    timestamp: number;
+  }>;
+  verification?: {
+    stage?: string;
+    ok?: boolean;
+    checked_at?: number;
+  };
+  simulation?: {
+    attached_simulation_id?: string | null;
+    debate_session?: {
+      status?: string;
+      watch_ready?: boolean;
+      message?: string;
+    };
+  };
+  pause_reason?: string | null;
+}
+
+export interface GuidedWorkflowPersonaLibraryResponse {
+  items: Array<{
+    id?: number;
+    place_key?: string;
+    place_label?: string;
+    scope?: string;
+    source_policy?: string;
+    persona_count?: number;
+    payload?: Record<string, unknown>;
+    created_at?: string;
+    updated_at?: string;
+  }>;
+  total: number;
 }
 
 export interface SimulationAnalyticsResponse {
@@ -1176,6 +1460,20 @@ class ApiService {
     });
   }
 
+  async respondToCoachIntervention(payload: {
+    simulation_id: string;
+    intervention_id: string;
+    action: 'apply_suggestion' | 'request_more_ideas' | 'continue_without_change' | 'custom_fix';
+    suggestion_id?: string;
+    custom_text?: string;
+  }): Promise<SimulationCoachResponse> {
+    return this.request<SimulationCoachResponse>('/simulation/coach/respond', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
   async requestPostAction(payload: {
     simulation_id: string;
     action: 'make_acceptable' | 'bring_to_world';
@@ -1211,6 +1509,123 @@ class ApiService {
       body: JSON.stringify({ simulation_id: simulationId, updates }),
       timeoutMs: ApiService.LONG_TIMEOUT_MS,
     });
+  }
+
+  async getSimulationContext(simulationId: string): Promise<{
+    simulation_id: string;
+    user_context: Record<string, unknown>;
+  }> {
+    return this.request(`/simulation/context?simulation_id=${encodeURIComponent(simulationId)}`, {
+      method: 'GET',
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async startGuidedWorkflow(payload: {
+    workflow_id?: string;
+    language: 'ar' | 'en';
+    draft_context: Record<string, unknown>;
+  }): Promise<GuidedWorkflowStateResponse> {
+    return this.request<GuidedWorkflowStateResponse>('/simulation/workflow/start', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async getGuidedWorkflowState(workflowId: string): Promise<GuidedWorkflowStateResponse> {
+    return this.request<GuidedWorkflowStateResponse>(`/simulation/workflow/state?workflow_id=${encodeURIComponent(workflowId)}`);
+  }
+
+  async getGuidedWorkflowStateBySimulation(simulationId: string): Promise<GuidedWorkflowStateResponse> {
+    return this.request<GuidedWorkflowStateResponse>(`/simulation/workflow/state?simulation_id=${encodeURIComponent(simulationId)}`);
+  }
+
+  async updateGuidedWorkflowContext(payload: {
+    workflow_id: string;
+    scope: '' | 'specific_place' | 'internet' | 'global';
+    place_name?: string;
+  }): Promise<GuidedWorkflowStateResponse> {
+    return this.request<GuidedWorkflowStateResponse>('/simulation/workflow/context', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async submitGuidedWorkflowSchema(payload: {
+    workflow_id: string;
+    updates: Record<string, unknown>;
+  }): Promise<GuidedWorkflowStateResponse> {
+    return this.request<GuidedWorkflowStateResponse>('/simulation/workflow/schema', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async answerGuidedWorkflowClarifications(payload: {
+    workflow_id: string;
+    answers: Array<{ question_id: string; answer: string }>;
+  }): Promise<GuidedWorkflowStateResponse> {
+    return this.request<GuidedWorkflowStateResponse>('/simulation/workflow/clarification', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async approveGuidedWorkflow(payload: { workflow_id: string }): Promise<GuidedWorkflowStateResponse> {
+    return this.request<GuidedWorkflowStateResponse>('/simulation/workflow/approve', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async pauseGuidedWorkflow(payload: { workflow_id: string; reason?: string }): Promise<GuidedWorkflowStateResponse> {
+    return this.request<GuidedWorkflowStateResponse>('/simulation/workflow/pause', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async resumeGuidedWorkflow(payload: { workflow_id: string }): Promise<GuidedWorkflowStateResponse> {
+    return this.request<GuidedWorkflowStateResponse>('/simulation/workflow/resume', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async applyGuidedWorkflowCorrection(payload: {
+    workflow_id: string;
+    text: string;
+  }): Promise<GuidedWorkflowStateResponse> {
+    return this.request<GuidedWorkflowStateResponse>('/simulation/workflow/correction', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async attachGuidedWorkflowSimulation(payload: {
+    workflow_id: string;
+    simulation_id: string;
+  }): Promise<GuidedWorkflowStateResponse> {
+    return this.request<GuidedWorkflowStateResponse>('/simulation/workflow/attach-simulation', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async listGuidedWorkflowPersonaLibrary(place = '', limit = 10): Promise<GuidedWorkflowPersonaLibraryResponse> {
+    const params = new URLSearchParams();
+    if (place) params.set('place', place);
+    params.set('limit', String(limit));
+    return this.request<GuidedWorkflowPersonaLibraryResponse>(`/simulation/workflow/personas?${params.toString()}`);
   }
 
   async listSimulations(limit = 25, offset = 0): Promise<SimulationListResponse> {

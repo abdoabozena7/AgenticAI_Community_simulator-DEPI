@@ -2,6 +2,9 @@ import { NavLink as RouterNavLink, NavLinkProps } from "react-router-dom";
 import { forwardRef } from "react";
 import { cn } from "@/lib/utils";
 
+export const NAV_LINK_CUSTOM_X_PX = 0;
+export const NAV_LINK_CUSTOM_Y_PX = 0;
+
 interface NavLinkCompatProps extends Omit<NavLinkProps, "className"> {
   className?: string;
   activeClassName?: string;

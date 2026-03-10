@@ -4,6 +4,9 @@ import { OrbitControls, PerspectiveCamera, Line, Sphere } from '@react-three/dre
 import * as THREE from 'three';
 import { Agent, Connection } from '@/types/simulation';
 
+export const SIMULATION_ARENA_CUSTOM_X_PX = 0;
+export const SIMULATION_ARENA_CUSTOM_Y_PX = 0;
+
 interface AgentNodeProps {
   agent: Agent;
   onClick?: (agent: Agent) => void;

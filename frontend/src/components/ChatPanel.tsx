@@ -33,6 +33,8 @@ interface ChatPanelProps {
   messages: ChatMessage[];
   /** stream of reasoning messages from the agents */
   reasoningFeed: ReasoningMessage[];
+  /** reasoning message ids to highlight */
+  highlightReasoningMessageIds?: string[];
   /** real-time debug rejections from LLM reasoning */
   reasoningDebug?: { id: string; agentShortId?: string; reason: string; stage?: string; attempt?: number; phase?: string; timestamp: number }[];
   /** send a new chat message */
@@ -309,6 +311,7 @@ function InlineDisclosure({
 export function ChatPanel({
   messages,
   reasoningFeed,
+  highlightReasoningMessageIds = [],
   reasoningDebug = [],
   onSendMessage,
   onSelectOption,
@@ -357,6 +360,7 @@ export function ChatPanel({
   const inputWrapperRef = useRef<HTMLFormElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const highlightedReasoningRef = useRef<string | null>(null);
 
   const [thinkingOpen, setThinkingOpen] = useState(false);
   const [isNearBottom, setIsNearBottom] = useState(true);
@@ -389,6 +393,7 @@ export function ChatPanel({
   const hasReasoningContent = reasoningFeed.length > 0;
   const reasoningUnavailable = !hasReasoningContent && !reasoningActive && isSimulationDone;
   const isReasoningView = viewMode === 'reasoning';
+  const highlightedReasoningIds = useMemo(() => new Set(highlightReasoningMessageIds), [highlightReasoningMessageIds]);
   const actionChoiceCount = primaryControl ? (1 + (primaryControl.secondary ? 1 : 0)) : 0;
   const showBinaryDecisionBar = Boolean(
     primaryControl
@@ -478,6 +483,19 @@ export function ChatPanel({
       ? `جاري البحث... بدء المحاكاة تلقائيًا بعد ${mmss} إذا استمر التأخير.`
       : `Research in progress... auto-starting simulation in ${mmss} if delays continue.`;
   }, [researchTimeoutRemainingMs, settings.language]);
+  useEffect(() => {
+    if (!isReasoningView) return;
+    if (!highlightReasoningMessageIds.length) return;
+    const firstId = highlightReasoningMessageIds[0];
+    if (!firstId || highlightedReasoningRef.current === firstId) return;
+    const safeSelector = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+      ? CSS.escape(firstId)
+      : firstId.replace(/"/g, '\\"');
+    const element = document.querySelector<HTMLElement>(`[data-reasoning-id="${safeSelector}"]`);
+    if (!element) return;
+    highlightedReasoningRef.current = firstId;
+    element.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [highlightReasoningMessageIds, isReasoningView, reasoningFeed.length]);
   const showLiveResearchCard = searchState?.status === 'searching';
   const phaseLabel = useMemo(() => {
     const key = phaseState?.currentPhaseKey?.trim();
@@ -1192,10 +1210,10 @@ export function ChatPanel({
   const safePreviewUrl = useMemo(() => toSafeHttpUrl(previewUrl), [previewUrl, toSafeHttpUrl]);
 
   return (
-    <div className="glass-panel h-full flex flex-col min-h-0">
+    <div className="glass-panel flex h-full min-h-0 flex-col overflow-hidden">
       {/* -------------------- MESSAGE LIST -------------------- */}
       <div
-        className="messages-container scrollbar-thin"
+        className="messages-container scrollbar-thin overflow-x-hidden"
         ref={scrollRef}
         data-testid={isReasoningView ? 'reasoning-messages' : 'chat-messages'}
         onScroll={() => {
@@ -2008,6 +2026,7 @@ export function ChatPanel({
                   {group.items.map((msg) => {
                     const idx = reasoningIndex.get(msg.id) ?? 0;
                     const side = idx % 2 === 0 ? 'user' : 'bot';
+                    const isHighlighted = highlightedReasoningIds.has(msg.id);
                     const opinion = msg.opinion ?? 'neutral';
                     const statusLabel =
                       opinion === 'accept'
@@ -2056,13 +2075,15 @@ export function ChatPanel({
                     return (
                       <div
                         key={msg.id}
+                        data-reasoning-id={msg.id}
                         className={cn('message message-compact reasoning', side)}
                       >
                         <div
                         className={cn(
                           'bubble bubble-compact',
                           bubbleBg,
-                          reasoningBubbleToneClass
+                          reasoningBubbleToneClass,
+                          isHighlighted && 'ring-2 ring-cyan-400/70 shadow-[0_0_0_1px_rgba(34,211,238,0.35)]'
                         )}
                         >
                           <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">

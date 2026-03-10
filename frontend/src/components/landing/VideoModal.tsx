@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { gsap } from 'gsap';
-import { Dialog, DialogContent } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { X } from 'lucide-react';
 import { AspectRatio } from '@/components/ui/aspect-ratio';
 
@@ -25,6 +25,10 @@ export function VideoModal({ isOpen, onClose }: VideoModalProps) {
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="max-w-4xl w-[90vw] p-0 bg-card border-border overflow-hidden rgb-shadow">
+        <DialogTitle className="sr-only">ASSET product demo</DialogTitle>
+        <DialogDescription className="sr-only">
+          Product walkthrough video for the ASSET landing page.
+        </DialogDescription>
         <div ref={contentRef} className="relative">
           {/* Close button */}
           <button

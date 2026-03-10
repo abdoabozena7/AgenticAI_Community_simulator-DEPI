@@ -296,17 +296,20 @@
   .messages-container {
     @apply flex-1 overflow-y-auto px-4 py-5 flex flex-col gap-4;
     min-height: 0;
+    overflow-x: hidden;
     --chat-composer-reserve: 6.75rem;
     padding-bottom: calc(var(--chat-composer-reserve) + env(safe-area-inset-bottom, 0px));
     scroll-padding-bottom: calc(var(--chat-composer-reserve) + 1rem + env(safe-area-inset-bottom, 0px));
     overscroll-behavior-y: auto;
     overscroll-behavior-x: none;
+    scrollbar-gutter: stable;
     touch-action: pan-y;
     -webkit-overflow-scrolling: touch;
   }
 
   .message {
     max-width: 85%;
+    min-width: 0;
     opacity: 0;
     transform: translateY(20px) scale(0.95);
     animation: messageIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
@@ -551,6 +554,7 @@
     display: flex;
     gap: 8px;
     align-items: center;
+    min-width: 0;
   }
 
   .search-action-anchor {
@@ -677,6 +681,56 @@
     gap: 8px;
     min-width: 44px;
     max-width: 75%;
+  }
+
+  .panel-mobile-shell {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+    contain: layout paint;
+    backface-visibility: hidden;
+  }
+
+  .panel-mobile-screen {
+    height: 100%;
+    min-height: 0;
+    min-width: 0;
+    contain: layout paint;
+    animation: panelScreenIn 220ms cubic-bezier(0.2, 0.9, 0.2, 1);
+    will-change: transform, opacity;
+  }
+
+  .panel-mobile-shell .messages-container {
+    padding-inline: 12px;
+    padding-top: 12px;
+    gap: 12px;
+  }
+
+  .panel-mobile-shell .message,
+  .panel-mobile-shell .message-compact {
+    max-width: 100%;
+  }
+
+  .panel-mobile-shell .bubble,
+  .panel-mobile-shell .bubble-compact,
+  .panel-mobile-shell .chat-message {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .panel-mobile-shell .chat-input-container {
+    padding-inline: 12px;
+  }
+
+  .panel-mobile-shell .control-trigger-stack {
+    width: 100%;
+    max-width: 100%;
+    align-items: stretch;
+  }
+
+  .panel-mobile-shell .control-trigger-hint {
+    max-width: 100%;
   }
 
   .control-trigger-hint {
@@ -849,6 +903,17 @@
 
   .control-trigger-stack {
     max-width: 82%;
+  }
+}
+
+@keyframes panelScreenIn {
+  0% {
+    opacity: 0;
+    transform: translate3d(8px, 0, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
   }
 }
 
@@ -1155,6 +1220,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .panel-mobile-screen,
   .control-trigger-btn,
   .control-trigger-label,
   .control-menu-reserved,

@@ -29,6 +29,15 @@ from ..core.ollama_client import generate_ollama
 from ..core.context_store import save_context
 from ..core.web_search import search_web
 from ..core.page_fetch import fetch_page
+from ..core.solution_coach_runtime import (
+    COACH_ACTIONS,
+    COACH_PAUSE_STATUS_REASON,
+    build_patch_preview,
+    build_post_action_make_acceptable,
+    build_runtime_coach_intervention,
+    neutralize_custom_fix,
+    normalize_language as normalize_coach_language,
+)
 from ..core import db as db_core
 from ..api.websocket import manager
 from pathlib import Path
@@ -51,6 +60,7 @@ _PAUSE_STATUS_REASONS = {
     "paused_research_review",
     "paused_credits_exhausted",
     "paused_clarification_needed",
+    COACH_PAUSE_STATUS_REASON,
 }
 
 # Reference to the loaded dataset (set in main module at startup)
@@ -418,6 +428,8 @@ def _init_state(simulation_id: str, user_id: Optional[int] = None) -> None:
         "pending_clarification": None,
         "can_answer_clarification": False,
         "pending_research_review": None,
+        "coach_intervention": None,
+        "coach_history": [],
     }
 
 
@@ -1007,12 +1019,14 @@ def _store_event(simulation_id: str, event_type: str, data: Dict[str, Any]) -> N
             "pending_clarification": None,
             "can_answer_clarification": False,
             "pending_research_review": None,
+            "coach_intervention": None,
+            "coach_history": [],
         },
     )
     incoming_event_seq = data.get("event_seq")
     if isinstance(incoming_event_seq, int):
         state["event_seq"] = max(int(state.get("event_seq") or 0), incoming_event_seq)
-    if event_type not in {"chat_event", "clarification_request", "clarification_resolved"}:
+    if event_type not in {"chat_event", "clarification_request", "clarification_resolved", "coach_detected", "coach_options_ready", "coach_patch_preview_ready", "coach_patch_applied", "coach_rerun_started", "coach_resolved"}:
         state["can_resume"] = False
         state["resume_reason"] = None
     if event_type in {"agents", "metrics", "reasoning_step"}:
@@ -1096,6 +1110,28 @@ def _store_event(simulation_id: str, event_type: str, data: Dict[str, Any]) -> N
         state["pending_clarification"] = None
         state["can_answer_clarification"] = False
         state["status_reason"] = "running"
+    elif event_type in {"coach_detected", "coach_options_ready", "coach_patch_preview_ready", "coach_patch_applied", "coach_rerun_started", "coach_resolved"}:
+        coach_payload = data.get("coach_intervention") if isinstance(data.get("coach_intervention"), dict) else data
+        history = state.setdefault("coach_history", [])
+        if not isinstance(history, list):
+            history = []
+            state["coach_history"] = history
+        if event_type == "coach_resolved":
+            if isinstance(coach_payload, dict) and coach_payload:
+                history.append(coach_payload)
+            state["coach_intervention"] = None
+            state["status_reason"] = "running"
+            state["can_resume"] = False
+            state["resume_reason"] = None
+        else:
+            if isinstance(coach_payload, dict) and coach_payload:
+                state["coach_intervention"] = coach_payload
+                if event_type in {"coach_patch_applied", "coach_rerun_started"}:
+                    history.append(coach_payload)
+            if event_type in {"coach_detected", "coach_options_ready", "coach_patch_preview_ready", "coach_patch_applied"}:
+                state["status_reason"] = COACH_PAUSE_STATUS_REASON
+                state["can_resume"] = False
+                state["resume_reason"] = coach_payload.get("blocker_summary") if isinstance(coach_payload, dict) else None
 
 
 def _state_has_progress(state: Dict[str, Any]) -> bool:
@@ -1119,6 +1155,12 @@ class _CreditsExhaustedPause(RuntimeError):
     def __init__(self, message: str, missing_credits: float) -> None:
         super().__init__(message)
         self.missing_credits = float(missing_credits or 0.0)
+
+
+class _CoachInterventionPause(RuntimeError):
+    def __init__(self, intervention: Dict[str, Any]) -> None:
+        super().__init__(str(intervention.get("blocker_summary") or "Coach intervention required"))
+        self.intervention = intervention
 
 
 def _billing_exhausted_message(missing_credits: float) -> str:
@@ -1179,6 +1221,8 @@ def _apply_snapshot_to_state(simulation_id: str, snapshot: Dict[str, Any], user_
         "pending_clarification": snapshot.get("pending_clarification") if isinstance(snapshot.get("pending_clarification"), dict) else None,
         "can_answer_clarification": bool(snapshot.get("can_answer_clarification")),
         "pending_research_review": snapshot.get("pending_research_review") if isinstance(snapshot.get("pending_research_review"), dict) else None,
+        "coach_intervention": snapshot.get("coach_intervention") if isinstance(snapshot.get("coach_intervention"), dict) else None,
+        "coach_history": snapshot.get("coach_history") if isinstance(snapshot.get("coach_history"), list) else [],
     }
     _simulation_state[simulation_id] = state
     return state
@@ -1297,6 +1341,37 @@ async def _persist_chat_event(
         event_seq=event_seq,
     )
     return event_data
+
+
+def _coach_history_from_meta(meta: Dict[str, Any]) -> List[Dict[str, Any]]:
+    history = meta.get("coach_history")
+    if isinstance(history, list):
+        return [item for item in history if isinstance(item, dict)][-20:]
+    return []
+
+
+def _coach_suppression_tags(meta: Dict[str, Any], phase_key: Optional[str]) -> set[str]:
+    suppressions = meta.get("coach_continue_without_change")
+    if not isinstance(suppressions, list):
+        return set()
+    phase = str(phase_key or "").strip().lower()
+    tags: set[str] = set()
+    for item in suppressions:
+        if not isinstance(item, dict):
+            continue
+        if phase and str(item.get("phase_key") or "").strip().lower() not in {"", phase}:
+            continue
+        tag = str(item.get("blocker_tag") or "").strip().lower()
+        if tag:
+            tags.add(tag)
+    return tags
+
+
+def _coach_excluded_titles(meta: Dict[str, Any]) -> set[str]:
+    titles = meta.get("coach_used_titles")
+    if not isinstance(titles, list):
+        return set()
+    return {str(item or "").strip().lower() for item in titles if str(item or "").strip()}
 
 
 def _build_search_query(user_context: Dict[str, Any]) -> str:
@@ -2290,7 +2365,7 @@ async def _run_research_loop(
         added_urls = research_loop_state.get("added_urls") if isinstance(research_loop_state.get("added_urls"), list) else []
         selected: List[Dict[str, Any]]
         if mode == "scrape_selected":
-            selected_lookup = {str(item.get("id") or "").strip() for item in selected_url_ids if str(item or "").strip()}
+            selected_lookup = {str(item or "").strip() for item in selected_url_ids if str(item or "").strip()}
             selected = [item for item in candidate_urls if str(item.get("id") or "").strip() in selected_lookup]
             for raw_url in added_urls:
                 url = str(raw_url or "").strip()
@@ -2834,6 +2909,48 @@ async def _start_background_simulation(
             if not billing.get("ok", True):
                 missing = float(billing.get("outstanding_credits") or 0.0)
                 raise _CreditsExhaustedPause(_billing_exhausted_message(missing), missing)
+        if event_type == "reasoning_step":
+            state = _simulation_state.setdefault(simulation_id, {})
+            if not isinstance(state.get("coach_intervention"), dict):
+                checkpoint_row = await db_core.fetch_simulation_checkpoint(simulation_id)
+                checkpoint = (checkpoint_row or {}).get("checkpoint") or {}
+                meta = checkpoint.get("meta") if isinstance(checkpoint.get("meta"), dict) else {}
+                if not isinstance(meta.get("coach_intervention"), dict):
+                    phase_key = str(
+                        event_data.get("phase")
+                        or (checkpoint_row or {}).get("current_phase_key")
+                        or meta.get("current_phase_key")
+                        or ""
+                    ).strip().lower() or None
+                    intervention = build_runtime_coach_intervention(
+                        simulation_id=simulation_id,
+                        user_context=user_context,
+                        reasoning_window=state.get("reasoning") if isinstance(state.get("reasoning"), list) else [],
+                        phase_key=phase_key,
+                        previous_history=_coach_history_from_meta(meta),
+                        blocked_tags=_coach_suppression_tags(meta, phase_key),
+                        exclude_titles=_coach_excluded_titles(meta),
+                    )
+                    if intervention:
+                        intervention["language"] = normalize_coach_language(user_context.get("language"))
+                        intervention["created_at"] = int(datetime.utcnow().timestamp() * 1000)
+                        diagnosed = dict(intervention)
+                        diagnosed["ui_state"] = "diagnosed"
+                        await _emit_live_event(
+                            simulation_id,
+                            "coach_detected",
+                            {
+                                "coach_intervention": diagnosed,
+                            },
+                        )
+                        await _emit_live_event(
+                            simulation_id,
+                            "coach_options_ready",
+                            {
+                                "coach_intervention": intervention,
+                            },
+                        )
+                        raise _CoachInterventionPause(intervention)
 
     async def run_and_store() -> None:
         nonlocal user_context
@@ -3114,6 +3231,68 @@ async def _start_background_simulation(
                         "reason_tag": reason_tag,
                     },
                 )
+        except _CoachInterventionPause as coach_exc:
+            intervention = dict(coach_exc.intervention or {})
+            blocker_summary = str(intervention.get("blocker_summary") or "Coach intervention required").strip()
+            current_phase = str(intervention.get("phase_key") or "").strip() or None
+            state = _simulation_state.setdefault(simulation_id, {})
+            coach_history = state.get("coach_history") if isinstance(state.get("coach_history"), list) else []
+            if intervention:
+                coach_history.append(intervention)
+            state["coach_history"] = coach_history[-20:]
+            state["coach_intervention"] = intervention
+            state["error"] = None
+            state["can_resume"] = False
+            state["resume_reason"] = blocker_summary
+            state["status_reason"] = COACH_PAUSE_STATUS_REASON
+
+            checkpoint_row = await db_core.fetch_simulation_checkpoint(simulation_id)
+            checkpoint = (checkpoint_row or {}).get("checkpoint") or {}
+            meta = checkpoint.get("meta") if isinstance(checkpoint.get("meta"), dict) else {}
+            meta["coach_intervention"] = intervention
+            meta["coach_history"] = state["coach_history"]
+            meta["status"] = "paused"
+            meta["status_reason"] = COACH_PAUSE_STATUS_REASON
+            meta["last_error"] = blocker_summary
+            meta["event_seq"] = max(int(meta.get("event_seq") or 0), int(state.get("event_seq") or 0))
+            checkpoint["meta"] = meta
+            phase_progress = (checkpoint_row or {}).get("phase_progress_pct")
+
+            await db_core.update_simulation(simulation_id=simulation_id, status="paused")
+            await db_core.upsert_simulation_checkpoint(
+                simulation_id=simulation_id,
+                checkpoint=checkpoint,
+                status="paused",
+                last_error=blocker_summary,
+                status_reason=COACH_PAUSE_STATUS_REASON,
+                current_phase_key=current_phase,
+                phase_progress_pct=float(phase_progress) if phase_progress is not None else None,
+                event_seq=int(meta.get("event_seq") or state.get("event_seq") or 0),
+            )
+            guide_message = str(intervention.get("guide_message") or "").strip()
+            if guide_message:
+                await _persist_chat_event(
+                    simulation_id=simulation_id,
+                    role="system",
+                    content=guide_message,
+                    meta={
+                        "kind": "coach_intervention",
+                        "intervention_id": intervention.get("intervention_id"),
+                        "blocker_tag": intervention.get("blocker_tag"),
+                        "required": True,
+                    },
+                    broadcast=True,
+                )
+            if user_id is not None:
+                await auth_core.log_audit(
+                    user_id,
+                    "simulation.coach_intervention_requested",
+                    {
+                        "simulation_id": simulation_id,
+                        "intervention_id": intervention.get("intervention_id"),
+                        "blocker_tag": intervention.get("blocker_tag"),
+                    },
+                )
         except asyncio.CancelledError:
             reason = _simulation_pause_reasons.pop(simulation_id, None) or "Simulation paused. You can resume anytime."
             state = _simulation_state.setdefault(simulation_id, {})
@@ -3384,6 +3563,12 @@ async def resume_simulation(payload: Dict[str, Any], authorization: str = Header
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Clarification answer is required before resume.",
+        )
+    pending_coach = checkpoint_meta.get("coach_intervention") if isinstance(checkpoint_meta.get("coach_intervention"), dict) else None
+    if pending_coach:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Coach action is required before resume.",
         )
     pending_research_review = checkpoint_meta.get("pending_research_review") if isinstance(checkpoint_meta.get("pending_research_review"), dict) else None
     if pending_research_review:
@@ -4000,6 +4185,271 @@ async def submit_clarification_answer(payload: Dict[str, Any], authorization: st
     }
 
 
+@router.post("/coach/respond")
+async def respond_to_coach_intervention(payload: Dict[str, Any], authorization: str = Header(None)) -> Dict[str, Any]:
+    simulation_id = str(payload.get("simulation_id") or "").strip()
+    intervention_id = str(payload.get("intervention_id") or "").strip()
+    action = str(payload.get("action") or "").strip().lower()
+    suggestion_id = str(payload.get("suggestion_id") or "").strip() or None
+    custom_text = str(payload.get("custom_text") or "").strip()
+    if not simulation_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="simulation_id is required")
+    if not intervention_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="intervention_id is required")
+    if action not in COACH_ACTIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="action must be apply_suggestion|request_more_ideas|continue_without_change|custom_fix",
+        )
+    if action == "apply_suggestion" and not suggestion_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="suggestion_id is required")
+    if action == "custom_fix" and not custom_text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="custom_text is required")
+
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if user:
+        if not auth_core.has_permission(user, "simulation:run"):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+        await _ensure_simulation_access(simulation_id, user)
+
+    if action != "continue_without_change" and _task_is_running(simulation_id):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Simulation is already running")
+
+    snapshot = await db_core.fetch_simulation_snapshot(simulation_id)
+    if not snapshot:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Simulation not found")
+
+    checkpoint_row = await db_core.fetch_simulation_checkpoint(simulation_id)
+    checkpoint = (checkpoint_row or {}).get("checkpoint") or {}
+    meta = checkpoint.get("meta") if isinstance(checkpoint.get("meta"), dict) else {}
+    intervention = meta.get("coach_intervention") if isinstance(meta.get("coach_intervention"), dict) else None
+    if not intervention:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No active coach intervention")
+    if str(intervention.get("intervention_id") or "").strip() != intervention_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Coach intervention no longer matches")
+
+    owner_id = await db_core.get_simulation_owner(simulation_id)
+    if simulation_id not in _simulation_state:
+        _apply_snapshot_to_state(simulation_id, snapshot, user_id=owner_id)
+    state = _simulation_state.setdefault(simulation_id, {})
+    user_context = await _fetch_simulation_context(simulation_id)
+    language = normalize_coach_language(user_context.get("language"))
+    intervention["language"] = language
+    current_phase = str(intervention.get("phase_key") or (checkpoint_row or {}).get("current_phase_key") or "").strip() or None
+    phase_progress = (checkpoint_row or {}).get("phase_progress_pct")
+    coach_history = state.get("coach_history") if isinstance(state.get("coach_history"), list) else []
+    if not coach_history:
+        coach_history = _coach_history_from_meta(meta)
+
+    if action == "request_more_ideas":
+        current_titles = {
+            str(item.get("title") or "").strip().lower()
+            for item in (intervention.get("suggestions") if isinstance(intervention.get("suggestions"), list) else [])
+            if isinstance(item, dict)
+        }
+        all_used_titles = _coach_excluded_titles(meta) | current_titles
+        refreshed = build_solution_suggestions(
+            user_context=user_context,
+            blocker_tag=str(intervention.get("blocker_tag") or "evidence_gap"),
+            language=language,
+            agent_citations=intervention.get("agent_citations") if isinstance(intervention.get("agent_citations"), list) else [],
+            research_evidence=intervention.get("research_evidence") if isinstance(intervention.get("research_evidence"), list) else [],
+            exclude_titles=all_used_titles,
+            count=5,
+        )
+        intervention["suggestions"] = refreshed
+        intervention["ui_state"] = "options_ready"
+        history_items = intervention.get("history") if isinstance(intervention.get("history"), list) else []
+        history_items.append({"type": "coach_options_ready", "label": "5 fixes ready"})
+        intervention["history"] = history_items[-20:]
+        meta["coach_intervention"] = intervention
+        meta["coach_used_titles"] = sorted(all_used_titles | {
+            str(item.get("title") or "").strip().lower()
+            for item in refreshed
+            if isinstance(item, dict)
+        })[-80:]
+        checkpoint["meta"] = meta
+        state["coach_intervention"] = intervention
+        await db_core.upsert_simulation_checkpoint(
+            simulation_id=simulation_id,
+            checkpoint=checkpoint,
+            status="paused",
+            last_error=str(intervention.get("blocker_summary") or "").strip() or None,
+            status_reason=COACH_PAUSE_STATUS_REASON,
+            current_phase_key=current_phase,
+            phase_progress_pct=float(phase_progress) if phase_progress is not None else None,
+            event_seq=int(meta.get("event_seq") or state.get("event_seq") or 0),
+        )
+        await _emit_live_event(
+            simulation_id,
+            "coach_options_ready",
+            {
+                "coach_intervention": intervention,
+            },
+        )
+        return {
+            "ok": True,
+            "simulation_id": simulation_id,
+            "coach_intervention": intervention,
+            "coach_history": coach_history,
+        }
+
+    if action == "continue_without_change":
+        suppression_rows = meta.get("coach_continue_without_change") if isinstance(meta.get("coach_continue_without_change"), list) else []
+        suppression_rows.append(
+            {
+                "blocker_tag": intervention.get("blocker_tag"),
+                "phase_key": current_phase,
+                "decided_at": int(datetime.utcnow().timestamp() * 1000),
+            }
+        )
+        resolved = dict(intervention)
+        resolved["ui_state"] = "resolved"
+        resolved["resolution"] = "continue_without_change"
+        resolved["resolved_at"] = int(datetime.utcnow().timestamp() * 1000)
+        coach_history.append(resolved)
+        state["coach_history"] = coach_history[-20:]
+        state["coach_intervention"] = None
+        state["can_resume"] = False
+        state["resume_reason"] = None
+        state["error"] = None
+        state["status_reason"] = "running"
+        meta["coach_continue_without_change"] = suppression_rows[-20:]
+        meta["coach_history"] = state["coach_history"]
+        meta.pop("coach_intervention", None)
+        meta["status"] = "running"
+        meta["status_reason"] = "running"
+        meta["last_error"] = None
+        checkpoint["meta"] = meta
+        await db_core.update_simulation(simulation_id=simulation_id, status="running")
+        await db_core.upsert_simulation_checkpoint(
+            simulation_id=simulation_id,
+            checkpoint=checkpoint,
+            status="running",
+            last_error=None,
+            status_reason="running",
+            current_phase_key=current_phase,
+            phase_progress_pct=float(phase_progress) if phase_progress is not None else None,
+            event_seq=int(meta.get("event_seq") or state.get("event_seq") or 0),
+        )
+        await _emit_live_event(
+            simulation_id,
+            "coach_resolved",
+            {
+                "coach_intervention": resolved,
+            },
+        )
+        await _persist_chat_event(
+            simulation_id=simulation_id,
+            role="system",
+            content=(
+                "استمرينا بدون تعديل مع تسجيل الاعتراض ومتابعة المحاكاة."
+                if language == "ar"
+                else "Continuing without changes. The blocker was logged and the simulation will proceed."
+            ),
+            meta={
+                "kind": "coach_continue_without_change",
+                "intervention_id": intervention_id,
+            },
+            broadcast=True,
+        )
+        await _start_background_simulation(
+            simulation_id=simulation_id,
+            user_context=user_context,
+            user_id=owner_id,
+            resume_checkpoint=checkpoint,
+        )
+        return {
+            "ok": True,
+            "simulation_id": simulation_id,
+            "resumed": True,
+            "coach_intervention": None,
+            "coach_history": state["coach_history"],
+        }
+
+    preview: Dict[str, Any]
+    response_payload: Dict[str, Any]
+    if action == "apply_suggestion":
+        suggestions = intervention.get("suggestions") if isinstance(intervention.get("suggestions"), list) else []
+        selected = next(
+            (item for item in suggestions if isinstance(item, dict) and str(item.get("suggestion_id") or "").strip() == suggestion_id),
+            None,
+        )
+        if not selected:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Suggestion not found")
+        preview = build_patch_preview(
+            intervention=intervention,
+            context_patch=selected.get("context_patch") if isinstance(selected.get("context_patch"), dict) else {},
+            selected_suggestion_id=suggestion_id,
+        )
+        intervention["ui_state"] = "applying_patch"
+        intervention["patch_preview"] = preview
+        history_items = intervention.get("history") if isinstance(intervention.get("history"), list) else []
+        history_items.append({"type": "coach_patch_preview_ready", "label": "Patch applied"})
+        intervention["history"] = history_items[-20:]
+        response_payload = {
+            "ok": True,
+            "simulation_id": simulation_id,
+            "coach_intervention": intervention,
+            "context_patch": preview["context_patch"],
+            "rerun_from_stage": preview["rerun_from_stage"],
+            "guide_message": preview["guide_message"],
+            "applied_intervention_id": intervention_id,
+            "applied_suggestion_id": suggestion_id,
+        }
+    else:
+        filtered = neutralize_custom_fix(custom_text, user_context)
+        preview = build_patch_preview(
+            intervention=intervention,
+            context_patch=filtered.get("field_updates") if isinstance(filtered.get("field_updates"), dict) else {},
+            neutralized_text=str(filtered.get("neutralized_text") or "").strip() or None,
+            notes=filtered.get("notes") if isinstance(filtered.get("notes"), list) else None,
+        )
+        intervention["ui_state"] = "applying_patch"
+        intervention["patch_preview"] = preview
+        intervention["custom_fix"] = filtered
+        history_items = intervention.get("history") if isinstance(intervention.get("history"), list) else []
+        history_items.append({"type": "coach_patch_preview_ready", "label": "Patch applied"})
+        intervention["history"] = history_items[-20:]
+        response_payload = {
+            "ok": True,
+            "simulation_id": simulation_id,
+            "coach_intervention": intervention,
+            "context_patch": preview["context_patch"],
+            "rerun_from_stage": preview["rerun_from_stage"],
+            "guide_message": preview["guide_message"],
+            "applied_intervention_id": intervention_id,
+            "applied_suggestion_id": None,
+            "neutralized_text": filtered.get("neutralized_text"),
+            "notes": filtered.get("notes") if isinstance(filtered.get("notes"), list) else [],
+        }
+
+    meta["coach_intervention"] = intervention
+    meta["coach_history"] = coach_history[-20:]
+    checkpoint["meta"] = meta
+    state["coach_intervention"] = intervention
+    state["coach_history"] = coach_history[-20:]
+    await db_core.upsert_simulation_checkpoint(
+        simulation_id=simulation_id,
+        checkpoint=checkpoint,
+        status="paused",
+        last_error=str(intervention.get("blocker_summary") or "").strip() or None,
+        status_reason=COACH_PAUSE_STATUS_REASON,
+        current_phase_key=current_phase,
+        phase_progress_pct=float(phase_progress) if phase_progress is not None else None,
+        event_seq=int(meta.get("event_seq") or state.get("event_seq") or 0),
+    )
+    await _emit_live_event(
+        simulation_id,
+        "coach_patch_preview_ready",
+        {
+            "coach_intervention": intervention,
+        },
+    )
+    return response_payload
+
+
 @router.post("/chat/event")
 async def append_chat_event(payload: Dict[str, Any], authorization: str = Header(None)) -> Dict[str, Any]:
     simulation_id = str(payload.get("simulation_id") or "").strip()
@@ -4081,6 +4531,27 @@ async def update_simulation_context(payload: Dict[str, Any], authorization: str 
     return {"simulation_id": simulation_id, "updated": True, "user_context": merged}
 
 
+@router.get("/context")
+async def get_simulation_context(simulation_id: str, authorization: str = Header(None)) -> Dict[str, Any]:
+    if not simulation_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="simulation_id is required")
+
+    auth_required = _auth_required()
+    user = await _resolve_user(authorization, require=auth_required)
+    if user:
+        if not auth_core.has_permission(user, "simulation:run"):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+        await _ensure_simulation_access(simulation_id, user)
+
+    current = await _fetch_simulation_context(simulation_id)
+    if not current:
+        snapshot = await db_core.fetch_simulation_snapshot(simulation_id)
+        if not snapshot:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Simulation not found")
+        current = {}
+    return {"simulation_id": simulation_id, "user_context": current}
+
+
 @router.post("/post-action")
 async def run_post_action(payload: Dict[str, Any], authorization: str = Header(None)) -> Dict[str, Any]:
     simulation_id = str(payload.get("simulation_id") or "").strip()
@@ -4121,6 +4592,13 @@ async def run_post_action(payload: Dict[str, Any], authorization: str = Header(N
         if isinstance(step, dict) and str(step.get("opinion") or "").lower() == "reject"
     ][:8]
     reject_block = "\n".join([f"- {item}" for item in reject_messages if item]) or "-"
+
+    if action == "make_acceptable":
+        return build_post_action_make_acceptable(
+            simulation_id=simulation_id,
+            user_context=user_context,
+            reasoning=reasoning,
+        )
 
     def _fallback_response() -> Dict[str, Any]:
         if action == "make_acceptable":
@@ -4335,7 +4813,7 @@ async def get_state(simulation_id: str, authorization: str = Header(None)) -> Di
         elif persisted_status == "paused":
             status_value = "paused"
             status_reason = persisted_reason if persisted_reason in _PAUSE_STATUS_REASONS else "paused_manual"
-            state["can_resume"] = status_reason not in {"paused_clarification_needed", "paused_research_review"}
+            state["can_resume"] = status_reason not in {"paused_clarification_needed", "paused_research_review", COACH_PAUSE_STATUS_REASON}
             state["resume_reason"] = (snapshot or {}).get("resume_reason") or state.get("error") or state.get("resume_reason")
             state["can_answer_clarification"] = bool(status_reason == "paused_clarification_needed")
         elif persisted_status == "running":
@@ -4397,6 +4875,10 @@ async def get_state(simulation_id: str, authorization: str = Header(None)) -> Di
                 pass
         if state.get("pending_clarification") is None and isinstance(snapshot.get("pending_clarification"), dict):
             state["pending_clarification"] = snapshot.get("pending_clarification")
+        if state.get("coach_intervention") is None and isinstance(snapshot.get("coach_intervention"), dict):
+            state["coach_intervention"] = snapshot.get("coach_intervention")
+        if (not state.get("coach_history")) and isinstance(snapshot.get("coach_history"), list):
+            state["coach_history"] = snapshot.get("coach_history")
         if (
             status_reason == "paused_research_review"
             and state.get("pending_research_review") is None
@@ -4428,6 +4910,8 @@ async def get_state(simulation_id: str, authorization: str = Header(None)) -> Di
         state["can_answer_clarification"] = False
     if status_reason != "paused_research_review":
         state["pending_research_review"] = None
+    if status_reason != COACH_PAUSE_STATUS_REASON:
+        state["coach_intervention"] = None
     pending_gate = state.get("pending_research_review") if isinstance(state.get("pending_research_review"), dict) else None
     gate_version_raw = (
         (pending_gate or {}).get("gate_version")
@@ -4701,5 +5185,3 @@ async def debug_version() -> Dict[str, Any]:
         return {"engine_sha": digest, "engine_path": str(engine_path)}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Failed to read engine.py: {exc}")
-
-
