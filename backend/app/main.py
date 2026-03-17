@@ -104,14 +104,12 @@ def create_app() -> FastAPI:
         state.
         """
         data_dir = os.path.join(os.path.dirname(__file__), "data")
-        # Load dataset and store reference in routes module. Importing
-        # here avoids circular import issues.
         from .api import routes  # local import to avoid circular dependency
         await init_db()
         await auth_core.ensure_admin_user()
         await auth_core.ensure_developer_user()
         await auth_core.ensure_default_user()
-        routes.dataset = load_dataset(data_dir)
+        routes.configure_orchestrator(load_dataset(data_dir))
 
     return app
 

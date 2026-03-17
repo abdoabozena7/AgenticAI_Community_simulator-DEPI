@@ -25,16 +25,63 @@ const resolveRuntimeBaseUrl = (configuredUrl?: string, fallbackPort = '8000') =>
   }
 };
 
-const API_BASE_URL = resolveRuntimeBaseUrl(import.meta.env.VITE_API_URL, '8000');
-const REALTIME_BASE_URL = resolveRuntimeBaseUrl(
-  (import.meta.env.VITE_WS_URL as string | undefined) || import.meta.env.VITE_API_URL,
-  '8000'
+const CONFIGURED_API_BASE_URL = resolveRuntimeBaseUrl(import.meta.env.VITE_API_URL, '8000');
+
+const resolveRealtimeBaseUrl = (configuredUrl?: string, apiBaseUrl?: string) => {
+  const raw = (configuredUrl || apiBaseUrl || '').trim();
+  if (!raw) {
+    const fallbackHttp = resolveRuntimeBaseUrl(undefined, '8000');
+    return fallbackHttp.replace(/^http/i, 'ws');
+  }
+  if (raw.startsWith('ws://') || raw.startsWith('wss://')) {
+    return raw.replace(/\/$/, '');
+  }
+  return resolveRuntimeBaseUrl(raw, '8000').replace(/^http/i, 'ws');
+};
+
+let activeApiBaseUrl = CONFIGURED_API_BASE_URL;
+let activeRealtimeBaseUrl = resolveRealtimeBaseUrl(
+  (import.meta.env.VITE_WS_URL as string | undefined) || undefined,
+  activeApiBaseUrl,
 );
+
+const buildApiBaseCandidates = () => {
+  const values: string[] = [];
+  const push = (value?: string) => {
+    const normalized = (value || '').trim().replace(/\/$/, '');
+    if (!normalized || values.includes(normalized)) return;
+    values.push(normalized);
+  };
+
+  push(activeApiBaseUrl);
+  push(CONFIGURED_API_BASE_URL);
+
+  if (typeof window !== 'undefined') {
+    const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+    const host = window.location.hostname || 'localhost';
+    push(`${protocol}//${host}:8000`);
+    push(window.location.origin);
+    if (LOOPBACK_HOSTS.has(host)) {
+      push('http://localhost:8000');
+      push('http://127.0.0.1:8000');
+    }
+  }
+
+  return values;
+};
+
+const rememberWorkingApiBase = (baseUrl: string) => {
+  activeApiBaseUrl = baseUrl.replace(/\/$/, '');
+  if (!(import.meta.env.VITE_WS_URL as string | undefined)) {
+    activeRealtimeBaseUrl = resolveRealtimeBaseUrl(undefined, activeApiBaseUrl);
+  }
+};
+
 const ACCESS_TOKEN_KEY = 'agentic_access_token';
 const REFRESH_TOKEN_KEY = 'agentic_refresh_token';
 export const AUTH_CHANGED_EVENT = 'agentic-auth-changed';
-export const getApiBaseUrl = () => API_BASE_URL;
-export const getRealtimeBaseUrl = () => REALTIME_BASE_URL;
+export const getApiBaseUrl = () => activeApiBaseUrl;
+export const getRealtimeBaseUrl = () => activeRealtimeBaseUrl;
 
 const emitAuthChanged = () => {
   if (typeof window === 'undefined') return;
@@ -948,6 +995,47 @@ class ApiService {
   private static readonly LONG_TIMEOUT_MS = 120000;
   private static readonly AUTH_TIMEOUT_MS = 12000;
 
+  private isTransportError(err: unknown): boolean {
+    if (!(err instanceof Error)) return false;
+    return err.name === 'TypeError' || /failed to fetch|networkerror|load failed/i.test(err.message);
+  }
+
+  private buildNetworkError(endpoint: string, attemptedBases: string[], originalError: unknown): Error {
+    const fallbackHint = attemptedBases[0] || activeApiBaseUrl;
+    const message =
+      `Unable to reach the backend for ${endpoint}. ` +
+      `Tried: ${attemptedBases.join(', ')}. ` +
+      `Check that the FastAPI server is running and that VITE_API_URL matches it. ` +
+      `Current fallback: ${fallbackHint}.`;
+    const err = new Error(message);
+    (err as Error & { cause?: unknown }).cause = originalError;
+    return err;
+  }
+
+  private async fetchWithFallback(
+    endpoint: string,
+    requestInit: RequestInit,
+    attemptedBases?: string[],
+  ): Promise<Response> {
+    const bases = attemptedBases || buildApiBaseCandidates();
+    let lastTransportError: unknown = null;
+
+    for (const baseUrl of bases) {
+      try {
+        const response = await fetch(`${baseUrl}${endpoint}`, requestInit);
+        rememberWorkingApiBase(baseUrl);
+        return response;
+      } catch (err) {
+        if (!this.isTransportError(err)) {
+          throw err;
+        }
+        lastTransportError = err;
+      }
+    }
+
+    throw this.buildNetworkError(endpoint, bases, lastTransportError);
+  }
+
   private async refreshTokens(): Promise<boolean> {
     const refreshToken = getStoredRefreshToken();
     if (!refreshToken) return false;
@@ -956,7 +1044,7 @@ class ApiService {
       const controller = new AbortController();
       const timer = window.setTimeout(() => controller.abort(), ApiService.AUTH_TIMEOUT_MS);
       try {
-        const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
+        const response = await this.fetchWithFallback('/auth/refresh', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ refresh_token: refreshToken }),
@@ -1008,7 +1096,7 @@ class ApiService {
       : timeoutController.signal;
 
     try {
-      const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      const response = await this.fetchWithFallback(endpoint, {
         ...requestInit,
         headers: {
           'Content-Type': 'application/json',
@@ -1040,6 +1128,9 @@ class ApiService {
       if (err?.name === 'AbortError') {
         const timeoutSeconds = Math.floor(timeoutMs / 1000);
         throw new Error(`Request timed out after ${timeoutSeconds}s. Please check the backend or increase timeout.`);
+      }
+      if (this.isTransportError(err)) {
+        throw this.buildNetworkError(endpoint, buildApiBaseCandidates(), err);
       }
       throw err;
     } finally {

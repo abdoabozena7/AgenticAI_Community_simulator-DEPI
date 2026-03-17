@@ -1,18 +1,19 @@
-import { startTransition, useState, useCallback, useEffect, useMemo, useRef, type CSSProperties } from 'react';
+import { startTransition, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { Header } from '@/components/Header';
 import {
+  TopBar,
   CATEGORY_OPTIONS,
   AUDIENCE_OPTIONS,
   GOAL_OPTIONS,
   MATURITY_LEVELS,
 } from '@/components/TopBar';
 import { ChatPanel } from '@/components/ChatPanel';
-import { GuidedSimulationPanel } from '@/components/GuidedSimulationPanel';
 import { ConfigPanel, SocietyControls } from '@/components/ConfigPanel';
 import { SimulationArena } from '@/components/SimulationArena';
 import { MetricsPanel } from '@/components/MetricsPanel';
 import { IterationTimeline } from '@/components/IterationTimeline';
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { useSimulation } from '@/hooks/useSimulation';
 import { useGuidedWorkflow } from '@/hooks/useGuidedWorkflow';
 import { ChatMessage, GuidedWorkflowDraftContext, PendingIdeaConfirmation, PreflightQuestion, UserInput } from '@/types/simulation';
@@ -23,8 +24,6 @@ import { addIdeaLogEntry, updateIdeaLogEntry } from '@/lib/ideaLog';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { useTheme } from '@/contexts/ThemeContext';
 
-const CHAT_PANEL_DESKTOP_MIN_WIDTH_PX = 260;
-const METRICS_PANEL_DESKTOP_MIN_WIDTH_PX = 320;
 
 const CATEGORY_LABEL_BY_VALUE = new Map(
   CATEGORY_OPTIONS.map((label) => [label.toLowerCase(), label])
@@ -3517,6 +3516,135 @@ Required sections:
     }
   }, [handleStart, runSearch, searchState, userInput.idea]);
 
+  const handleSearchUseLlm = useCallback(async () => {
+    if (searchState.status !== 'timeout') return;
+    const query = (searchState.query || userInput.idea || '').trim();
+    if (!query) return;
+
+    const timeoutMs = searchState.timeoutMs ?? SEARCH_TIMEOUT_BASE_MS;
+    const attempts = searchState.attempts ?? Math.max(1, searchAttemptRef.current);
+    const startedAt = Date.now();
+    const locationLabel = getSearchLocationLabel();
+
+    setSearchState({
+      status: 'searching',
+      stage: 'prestart_research',
+      query,
+      timeoutMs,
+      attempts,
+      startedAt,
+      elapsedMs: 0,
+    });
+    setIsConfigSearching(true);
+    addSystemMessage(
+      settings.language === 'ar'
+        ? 'تعذر الوصول إلى بحث مباشر كافٍ. سأستخدم النموذج البديل لتجهيز ملخص بحثي مبدئي حتى لا يتوقف التدفق.'
+        : 'Live search did not return enough data. I will use the fallback model to prepare a provisional research brief so the flow can continue.'
+    );
+
+    const systemPrompt = settings.language === 'ar'
+      ? 'أنت محلل سوق موجز داخل واجهة محاكاة. اكتب ملخصاً قصيراً وعملياً بالعربية فقط. كن صريحاً أن هذا تقدير استدلالي من النموذج البديل وليس تصفحاً مباشراً. ركز على السوق والمنافسة والطلب والتسعير والمخاطر.'
+      : 'You are a concise market analyst inside a simulation UI. Write a short practical brief in English only. Be explicit that this is a model-based estimate from the fallback model, not direct browsing. Focus on market presence, competition, demand, pricing, and risks.';
+    const prompt = settings.language === 'ar'
+      ? `الفكرة: ${query}
+المكان: ${locationLabel}
+التصنيف: ${userInput.category || 'غير محدد'}
+الجمهور: ${userInput.targetAudience.length ? userInput.targetAudience.join(', ') : 'غير محدد'}
+الأهداف: ${userInput.goals.length ? userInput.goals.join(', ') : 'غير محدد'}
+مرحلة الفكرة: ${userInput.ideaMaturity || 'غير محدد'}
+شهية المخاطرة: ${Math.max(0, Math.min(100, userInput.riskAppetite ?? 50))}%
+
+اكتب 4 إلى 6 جمل قصيرة تلخص تقديراً أولياً للسوق المحلي، مع الإشارة بوضوح إلى أن هذا fallback model estimate وليس بحث ويب مباشر.`
+      : `Idea: ${query}
+Location: ${locationLabel}
+Category: ${userInput.category || 'not set'}
+Audience: ${userInput.targetAudience.length ? userInput.targetAudience.join(', ') : 'not set'}
+Goals: ${userInput.goals.length ? userInput.goals.join(', ') : 'not set'}
+Maturity: ${userInput.ideaMaturity || 'not set'}
+Risk appetite: ${Math.max(0, Math.min(100, userInput.riskAppetite ?? 50))}%
+
+Write 4 to 6 short sentences that summarize an initial local market estimate. State clearly that this is a fallback model estimate, not live web browsing.`;
+
+    try {
+      const summaryText = normalizeAssistantText(String(await Promise.race([
+        apiService.generateMessage(prompt, systemPrompt),
+        new Promise<string>((_, reject) =>
+          setTimeout(() => reject(new Error('Fallback research timeout')), 12000)
+        ),
+      ])));
+
+      if (!summaryText) {
+        throw new Error('Empty fallback research summary');
+      }
+
+      setResearchIdea(query);
+      setResearchContext({
+        summary: summaryText,
+        sources: [],
+        structured: {
+          summary: summaryText,
+          evidence_cards: [summaryText],
+          gaps: settings.language === 'ar'
+            ? ['هذا الملخص مبني على استدلال النموذج البديل وليس صفحات ويب مباشرة']
+            : ['This brief is based on the fallback model rather than direct web pages'],
+        },
+      });
+      setSearchState({
+        status: 'complete',
+        query,
+        answer: summaryText,
+        provider: 'llm_fallback',
+        isLive: false,
+        results: [],
+        timeoutMs,
+        attempts,
+      });
+      searchPromptedRef.current = false;
+      addSystemMessage(summaryText);
+      await handleStart();
+    } catch (err: unknown) {
+      if (isAuthError(err)) {
+        handleSessionExpired();
+        return;
+      }
+      console.warn('Fallback research synthesis failed.', err);
+      setSearchState({
+        status: 'timeout',
+        stage: 'prestart_research',
+        query,
+        answer: '',
+        provider: 'none',
+        isLive: false,
+        results: [],
+        timeoutMs,
+        attempts,
+        startedAt,
+        elapsedMs: Date.now() - startedAt,
+      });
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'تعذر تجهيز fallback research حالياً. يمكنك إعادة البحث أو المحاولة مرة أخرى لاحقاً.'
+          : 'The fallback research brief could not be generated right now. You can retry the search or try again later.'
+      );
+    } finally {
+      setIsConfigSearching(false);
+    }
+  }, [
+    addSystemMessage,
+    getSearchLocationLabel,
+    handleSessionExpired,
+    handleStart,
+    isAuthError,
+    searchState,
+    settings.language,
+    userInput.category,
+    userInput.goals,
+    userInput.idea,
+    userInput.ideaMaturity,
+    userInput.riskAppetite,
+    userInput.targetAudience,
+  ]);
+
   const handleStartAnywayAfterWeakResearch = useCallback(async () => {
     const warningText = settings.language === 'ar'
       ? 'جودة البحث الحالية أقل من الحد المطلوب، وقد تكون دقة المحاكاة أقل. هل تريد بدء المحاكاة رغم ذلك؟'
@@ -4440,7 +4568,6 @@ If rejection is about competition or location, suggest searching for a better lo
     simulationActuallyStarted,
     userInput.idea,
   ]);
-  const isArabic = settings.language === 'ar';
   const uiProgress = useMemo(() => {
     if (searchState.status === 'searching') {
       return {
@@ -4461,6 +4588,31 @@ If rejection is about competition or location, suggest searching for a better lo
     };
   }, [searchState.elapsedMs, searchState.stage, searchState.status, searchState.timeoutMs, uiBusyElapsedMs, uiBusyStage]);
 
+  const topBarPhaseLabel = useMemo(() => {
+    const current = String(simulation.currentPhaseKey || '').toLowerCase();
+    if (current.includes('search') || current.includes('research') || current.includes('evidence')) {
+      return settings.language === 'ar' ? 'بحث الإنترنت' : 'Internet research';
+    }
+    if (current.includes('debate') || current.includes('deliberation') || current.includes('agent')) {
+      return settings.language === 'ar' ? 'نقاش الوكلاء' : 'Agent debate';
+    }
+    if (current.includes('convergence') || current.includes('resolution')) {
+      return settings.language === 'ar' ? 'التقارب' : 'Convergence';
+    }
+    if (current.includes('summary') || simulation.status === 'completed') {
+      return settings.language === 'ar' ? 'الخلاصة النهائية' : 'Final summary';
+    }
+    return settings.language === 'ar' ? 'استقبال الفكرة' : 'Idea intake';
+  }, [settings.language, simulation.currentPhaseKey, simulation.status]);
+
+  const topBarSearchLabel = useMemo(() => {
+    if (searchState.status === 'searching') return settings.language === 'ar' ? 'البحث يعمل الآن' : 'Search is running';
+    if (searchState.status === 'timeout') return settings.language === 'ar' ? 'انتهت مهلة البحث' : 'Search timed out';
+    if (searchState.status === 'error') return settings.language === 'ar' ? 'تعذر البحث' : 'Search failed';
+    if (searchState.status === 'complete') return settings.language === 'ar' ? 'اكتملت جولة البحث' : 'Search completed';
+    return settings.language === 'ar' ? 'جاهز للبحث' : 'Ready for search';
+  }, [searchState.status, settings.language]);
+
   const handleConfigChange = useCallback((updates: Partial<UserInput>) => {
     if (isConfigLocked) {
       notifyConfigLocked();
@@ -4479,52 +4631,93 @@ If rejection is about competition or location, suggest searching for a better lo
     });
   }, [getMissingForStart, isConfigLocked, notifyConfigLocked]);
 
+  const sharedChatPanelProps = {
+    messages: chatMessages,
+    reasoningFeed: simulation.reasoningFeed,
+    highlightReasoningMessageIds: highlightedReasoningMessageIds,
+    reasoningDebug: simulation.reasoningDebug,
+    onSendMessage: handleSendMessage,
+    onSelectOption: handleOptionSelect,
+    isWaitingForCity,
+    isWaitingForCountry,
+    isWaitingForLocationChoice,
+    searchState,
+    uiProgress,
+    isThinking: isChatThinking,
+    showRetry: llmBusy || searchState.status === 'timeout',
+    onRetryLlm: handleRetryLlm,
+    onSearchRetry: handleSearchRetry,
+    onSearchUseLlm: handleSearchUseLlm,
+    simulationStatus: simulation.status,
+    simulationError: simulation.error,
+    reasoningActive,
+    isSummarizing,
+    phaseState: {
+      currentPhaseKey: simulation.currentPhaseKey,
+      progressPct: simulation.phaseProgressPct,
+    },
+    researchSourcesLive: simulation.researchSources,
+    quickReplies: quickReplies || undefined,
+    onQuickReply: handleQuickReply,
+    primaryControl,
+    pendingClarification: simulation.pendingClarification,
+    canAnswerClarification: simulation.canAnswerClarification,
+    clarificationBusy,
+    onSubmitClarification: handleSubmitClarification,
+    pendingPreflightQuestion,
+    preflightRound,
+    preflightMaxRounds,
+    preflightBusy,
+    onSubmitPreflight: handleSubmitPreflight,
+    pendingIdeaConfirmation,
+    onConfirmIdeaForStart: handleConfirmPreflightIdea,
+    pendingResearchReview: isResearchReviewPause ? simulation.pendingResearchReview : null,
+    researchReviewBusy,
+    onSubmitResearchReviewAction: handleSubmitResearchAction,
+    postActionsEnabled: simulation.status === 'completed' && Boolean(simulation.simulationId),
+    recommendedPostAction,
+    finalAcceptancePct,
+    postActionBusy,
+    postActionResult,
+    onRunPostAction: (action: 'make_acceptable' | 'bring_to_world') => { void handleRunPostAction(action); },
+    onStartFollowupFromPostAction: () => { void handleStartFollowupFromAction(); },
+    onRequestReasoningView: () => {
+      setDebateInviteVisible(false);
+      handleManualPanelSwitch('reasoning');
+    },
+    settings,
+  };
+
   const sidePanel = (
-    <div className="panel-mobile-shell h-full min-h-0 rounded-[28px] border border-border/50 bg-card/20 overflow-hidden flex flex-col">
-      <div className="sticky top-0 z-10 border-b border-border/40 bg-background/80 px-3 py-3 backdrop-blur-xl">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[34px] border border-border/60 bg-card/35 shadow-[0_18px_60px_-42px_rgba(0,0,0,0.72)] backdrop-blur-xl">
+      <div className="border-b border-border/40 px-5 py-4">
         <div className="grid grid-cols-3 gap-2">
           <button
             type="button"
             onClick={() => handleManualPanelSwitch('chat')}
-            className={cn(
-              'h-10 rounded-full px-2 text-xs font-semibold transition',
-              activePanel === 'chat'
-                ? 'bg-primary text-primary-foreground'
-                : 'bg-secondary/60 text-muted-foreground hover:text-foreground',
-            )}
+            className={cn('h-11 rounded-full text-sm font-semibold transition', activePanel === 'chat' ? 'bg-primary text-primary-foreground' : 'bg-background/60 text-muted-foreground hover:text-foreground')}
           >
-            {settings.language === 'ar' ? 'الدليل' : 'Guide'}
+            {settings.language === 'ar' ? 'الدردشة' : 'Chat'}
           </button>
           <button
             type="button"
             onClick={() => handleManualPanelSwitch('reasoning')}
-            className={cn(
-              'h-10 rounded-full px-2 text-xs font-semibold transition',
-              activePanel === 'reasoning'
-                ? 'bg-primary text-primary-foreground'
-                : 'bg-secondary/60 text-muted-foreground hover:text-foreground',
-            )}
+            className={cn('h-11 rounded-full text-sm font-semibold transition', activePanel === 'reasoning' ? 'bg-primary text-primary-foreground' : 'bg-background/60 text-muted-foreground hover:text-foreground')}
           >
-            {settings.language === 'ar' ? 'تفكير الوكلاء' : 'Reasoning'}
+            {settings.language === 'ar' ? 'النقاش' : 'Reasoning'}
           </button>
           <button
             type="button"
             onClick={() => handleManualPanelSwitch('config')}
             disabled={isConfigLocked}
             title={isConfigLocked ? configLockReason : undefined}
-            className={cn(
-              'h-10 rounded-full px-2 text-xs font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed',
-              activePanel === 'config'
-                ? 'bg-primary text-primary-foreground'
-                : 'bg-secondary/60 text-muted-foreground hover:text-foreground',
-            )}
+            className={cn('h-11 rounded-full text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50', activePanel === 'config' ? 'bg-primary text-primary-foreground' : 'bg-background/60 text-muted-foreground hover:text-foreground')}
           >
             {settings.language === 'ar' ? 'الإعدادات' : 'Config'}
           </button>
         </div>
       </div>
-      <div className="relative min-h-0 flex-1 overflow-hidden" dir={settings.language === 'ar' ? 'rtl' : 'ltr'}>
-        <div key={activePanel} className="panel-mobile-screen h-full min-h-0 overflow-hidden">
+      <div className="min-h-0 flex-1 overflow-hidden px-2 pb-2 pt-1">
         {activePanel === 'config' ? (
           <ConfigPanel
             value={userInput}
@@ -4545,106 +4738,31 @@ If rejection is about competition or location, suggest searching for a better lo
             onAskSocietyAssistant={handleAskSocietyAssistant}
           />
         ) : activePanel === 'reasoning' ? (
-          <ChatPanel
-            viewMode="reasoning"
-            messages={chatMessages}
-            reasoningFeed={simulation.reasoningFeed}
-            highlightReasoningMessageIds={highlightedReasoningMessageIds}
-            reasoningDebug={simulation.reasoningDebug}
-            onSendMessage={handleSendMessage}
-            onSelectOption={handleOptionSelect}
-            isWaitingForCity={isWaitingForCity}
-            isWaitingForCountry={isWaitingForCountry}
-            isWaitingForLocationChoice={isWaitingForLocationChoice}
-            searchState={searchState}
-            uiProgress={uiProgress}
-            isThinking={isChatThinking}
-            showRetry={llmBusy}
-            onRetryLlm={handleRetryLlm}
-            simulationStatus={simulation.status}
-            simulationError={simulation.error}
-            reasoningActive={reasoningActive}
-            isSummarizing={isSummarizing}
-            phaseState={{
-              currentPhaseKey: simulation.currentPhaseKey,
-              progressPct: simulation.phaseProgressPct,
-            }}
-            researchSourcesLive={simulation.researchSources}
-            quickReplies={quickReplies || undefined}
-            onQuickReply={handleQuickReply}
-            primaryControl={primaryControl}
-            pendingClarification={simulation.pendingClarification}
-            canAnswerClarification={simulation.canAnswerClarification}
-            clarificationBusy={clarificationBusy}
-            onSubmitClarification={handleSubmitClarification}
-            pendingPreflightQuestion={pendingPreflightQuestion}
-            preflightRound={preflightRound}
-            preflightMaxRounds={preflightMaxRounds}
-            preflightBusy={preflightBusy}
-            onSubmitPreflight={handleSubmitPreflight}
-            pendingIdeaConfirmation={pendingIdeaConfirmation}
-            onConfirmIdeaForStart={handleConfirmPreflightIdea}
-            pendingResearchReview={isResearchReviewPause ? simulation.pendingResearchReview : null}
-            researchReviewBusy={researchReviewBusy}
-            onSubmitResearchReviewAction={handleSubmitResearchAction}
-            postActionsEnabled={simulation.status === 'completed' && Boolean(simulation.simulationId)}
-            recommendedPostAction={recommendedPostAction}
-            finalAcceptancePct={finalAcceptancePct}
-            postActionBusy={postActionBusy}
-            postActionResult={postActionResult}
-            onRunPostAction={(action) => { void handleRunPostAction(action); }}
-            onStartFollowupFromPostAction={() => { void handleStartFollowupFromAction(); }}
-            settings={settings}
-          />
+          <ChatPanel {...sharedChatPanelProps} viewMode="reasoning" />
         ) : (
-          <GuidedSimulationPanel
-            workflow={guidedWorkflowState}
-            loading={guidedWorkflowLoading}
-            simulationStatus={simulation.status}
-            debateReady={debateInviteVisible}
-            reasoningCount={simulation.reasoningFeed.length}
-            language={settings.language}
-            coachIntervention={simulation.coachIntervention}
-            coachBusy={coachBusy}
-            draftInput={guidedDraftInput}
-            onDraftChange={handleGuidedDraftChange}
-            onChooseScope={handleGuidedChooseScope}
-            onSubmitSchema={handleGuidedSubmitSchema}
-            onSubmitClarifications={handleGuidedSubmitClarifications}
-            onApproveReview={handleGuidedApproveReview}
-            onPauseWorkflow={handleGuidedPauseWorkflow}
-            onResumeWorkflow={handleGuidedResumeWorkflow}
-            onSubmitCorrection={handleGuidedCorrection}
-            onOpenCoachEvidence={handleOpenCoachEvidence}
-            onCoachApplySuggestion={handleCoachApplySuggestion}
-            onCoachRequestMoreIdeas={() => { void handleCoachRequestMoreIdeas(); }}
-            onCoachContinueWithoutChange={() => { void handleCoachContinueWithoutChange(); }}
-            onCoachCustomFix={(text) => { void handleCoachCustomFix(text); }}
-            onCoachConfirmRerun={() => { void handleCoachConfirmRerun(); }}
-            onStartSimulation={() => { void handleGuidedStartSimulation(); }}
-            onOpenReasoning={() => {
-              setDebateInviteVisible(false);
-              handleManualPanelSwitch('reasoning');
-            }}
-            onOpenConfig={() => { handleManualPanelSwitch('config'); }}
-            onApplyCorrectionToSimulation={() => { void handleApplyGuidedCorrectionToSimulation(); }}
-          />
+          <ChatPanel {...sharedChatPanelProps} viewMode="chat" />
         )}
-        </div>
       </div>
     </div>
   );
 
   const arenaPanel = (
-    <div className="min-h-0 grid grid-rows-[minmax(380px,1fr)_minmax(0,220px)] xl:grid-rows-[minmax(460px,1fr)_minmax(0,240px)] gap-4">
-      <div className="min-h-[380px] xl:min-h-[460px] rounded-2xl border border-border/50 overflow-hidden">
+    <div className="grid min-h-0 gap-4 xl:grid-rows-[minmax(460px,1fr)_minmax(0,240px)]">
+      <div className="min-h-[380px] overflow-hidden rounded-[32px]">
         <SimulationArena
           agents={Array.from(simulation.agents.values())}
           activePulses={simulation.activePulses}
           language={settings.language}
+          reasoningActive={reasoningActive}
+          debateReady={debateInviteVisible}
+          reasoningFeed={simulation.reasoningFeed}
+          onOpenReasoning={() => {
+            setDebateInviteVisible(false);
+            handleManualPanelSwitch('reasoning');
+          }}
         />
       </div>
-      <div className="min-h-0 overflow-y-auto scrollbar-thin">
+      <div className="min-h-0 overflow-y-auto rounded-[32px] border border-border/60 bg-card/35 p-3 scrollbar-thin">
         <IterationTimeline
           currentIteration={simulation.metrics.currentIteration}
           totalIterations={simulation.metrics.totalIterations}
@@ -4657,7 +4775,7 @@ If rejection is about competition or location, suggest searching for a better lo
   );
 
   const metricsPane = (
-    <div className="min-h-0 h-full">
+    <div className="h-full min-h-0 overflow-hidden rounded-[32px] border border-border/60 bg-card/35 p-3 backdrop-blur-xl">
       <MetricsPanel
         metrics={simulation.metrics}
         language={settings.language}
@@ -4670,8 +4788,7 @@ If rejection is about competition or location, suggest searching for a better lo
   );
 
   return (
-    <div className="h-[100dvh] min-h-[100dvh] w-full bg-background flex flex-col overflow-hidden">
-      {/* Header */}
+    <div className="flex h-[100dvh] min-h-[100dvh] w-full flex-col overflow-hidden bg-background" dir="rtl">
       <Header
         simulationStatus={simulation.status}
         connectionState={connectionState}
@@ -4693,6 +4810,20 @@ If rejection is about competition or location, suggest searching for a better lo
         }}
         onExitDashboard={() => navigate('/dashboard')}
         onLogout={handleLogout}
+      />
+      <TopBar
+        language={settings.language}
+        theme={settings.theme}
+        selectedCategory={userInput.category}
+        selectedAudiences={userInput.targetAudience}
+        selectedGoals={userInput.goals}
+        riskLevel={userInput.riskAppetite}
+        maturity={userInput.ideaMaturity}
+        activePanel={activePanel}
+        reasoningCount={simulation.reasoningFeed.length}
+        currentPhaseLabel={topBarPhaseLabel}
+        searchLabel={topBarSearchLabel}
+        onPanelChange={handleManualPanelSwitch}
       />
       {creditNotice && (
         <div className="mx-4 mt-3 rounded-2xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-100 flex flex-wrap items-center justify-between gap-3">
@@ -4792,25 +4923,27 @@ If rejection is about competition or location, suggest searching for a better lo
           </div>
         </div>
       )}
-      <div className="flex-1 min-h-0 overflow-y-auto xl:overflow-hidden p-3 md:p-4">
-          <div
-            className="min-h-full xl:h-full grid grid-cols-1 xl:grid-cols-[minmax(var(--chat-panel-min-width),22%)_minmax(0,1fr)_minmax(var(--metrics-panel-min-width),28%)] gap-4 min-h-0"
-            style={{
-              '--chat-panel-min-width': `${CHAT_PANEL_DESKTOP_MIN_WIDTH_PX}px`,
-              '--metrics-panel-min-width': `${METRICS_PANEL_DESKTOP_MIN_WIDTH_PX}px`,
-            } as CSSProperties}
-          >
-          <div className={cn('min-h-0 h-[84dvh] xl:h-full', isArabic ? 'xl:order-3' : 'xl:order-1')}>
-            {metricsPane}
-          </div>
+      <div className="min-h-0 flex-1 overflow-y-auto p-3 md:p-4 xl:overflow-hidden">
+        <div className="flex min-h-full flex-col gap-4 xl:hidden">
+          <div className="h-[74dvh] min-h-[420px]">{arenaPanel}</div>
+          <div className="h-[68dvh] min-h-[420px]">{sidePanel}</div>
+          <div className="h-[62dvh] min-h-[360px]">{metricsPane}</div>
+        </div>
 
-          <div className="min-h-0 h-[88dvh] xl:h-full xl:order-2">
-            {arenaPanel}
-          </div>
-
-          <div className={cn('min-h-0 h-[84dvh] xl:h-full', isArabic ? 'xl:order-1' : 'xl:order-3')}>
-            {sidePanel}
-          </div>
+        <div className="hidden h-full min-h-0 xl:block">
+          <ResizablePanelGroup direction="horizontal" className="gap-0 rounded-[36px] border border-border/60 bg-card/20 p-3">
+            <ResizablePanel defaultSize={32} minSize={24}>
+              <div className="h-full min-h-0 pe-3">{sidePanel}</div>
+            </ResizablePanel>
+            <ResizableHandle withHandle className="mx-1.5 rounded-full bg-border/70" />
+            <ResizablePanel defaultSize={43} minSize={30}>
+              <div className="h-full min-h-0 px-3">{arenaPanel}</div>
+            </ResizablePanel>
+            <ResizableHandle withHandle className="mx-1.5 rounded-full bg-border/70" />
+            <ResizablePanel defaultSize={25} minSize={18}>
+              <div className="h-full min-h-0 ps-3">{metricsPane}</div>
+            </ResizablePanel>
+          </ResizablePanelGroup>
         </div>
       </div>
     </div>

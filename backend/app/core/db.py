@@ -62,6 +62,14 @@ _POOL_LOCK = threading.Lock()
 _POOLS: Dict[str, pooling.MySQLConnectionPool] = {}
 
 
+def _should_disable_db(exc: Exception) -> bool:
+    err_no = getattr(exc, "errno", None)
+    if err_no in {2003, 2006, 2013, 2055, 1040}:
+        return True
+    lowered = str(exc).lower()
+    return "can't connect to mysql server" in lowered or "10061" in lowered
+
+
 def _resolve_db_name() -> str:
     return os.getenv("DB_NAME") or os.getenv("MYSQL_DATABASE", DEFAULT_DB_NAME)
 
@@ -423,10 +431,17 @@ async def init_db() -> None:
     skipped. This prevents errors in environments without a database and
     allows the application to start up cleanly.
     """
+    global _STUB_DB
     if _STUB_DB:
         # No‑op in stub mode
         return
-    await asyncio.to_thread(_init_db_sync)
+    try:
+        await asyncio.to_thread(_init_db_sync)
+    except Exception as exc:
+        if _should_disable_db(exc):
+            _STUB_DB = True
+            return
+        raise
 
 
 def _run_query(
@@ -491,12 +506,19 @@ async def execute(
     fetch: bool = False,
     many: bool = False,
 ) -> Optional[List[Dict[str, Any]]]:
+    global _STUB_DB
     # Skip execution entirely when running without a real database.  This
     # prevents attempts to connect to a missing MySQL server and simply
     # returns ``None`` to the caller.
     if _STUB_DB:
         return None
-    return await asyncio.to_thread(_run_query, query, params, fetch, many)
+    try:
+        return await asyncio.to_thread(_run_query, query, params, fetch, many)
+    except Exception as exc:
+        if _should_disable_db(exc):
+            _STUB_DB = True
+            return [] if fetch else None
+        raise
 
 
 async def insert_simulation(
@@ -944,6 +966,45 @@ async def insert_agents(simulation_id: str, agents: List[Dict[str, Any]]) -> Non
     )
 
 
+async def update_agent_state(
+    *,
+    simulation_id: str,
+    agent_id: str,
+    opinion: str,
+    confidence: float,
+    phase: str,
+    influence_weight: Optional[float] = None,
+) -> None:
+    await execute(
+        "UPDATE agents SET current_opinion=%s, confidence=%s, last_phase=%s, influence_weight=COALESCE(%s, influence_weight) "
+        "WHERE simulation_id=%s AND agent_id=%s",
+        (opinion, confidence, phase, influence_weight, simulation_id, agent_id),
+    )
+
+
+async def bulk_update_agent_states(*, simulation_id: str, items: List[Dict[str, Any]]) -> None:
+    rows = [
+        (
+            str(item.get("opinion") or "neutral"),
+            float(item.get("confidence") or 0.5),
+            str(item.get("phase") or ""),
+            float(item.get("influence_weight") or 1.0),
+            simulation_id,
+            str(item.get("agent_id") or ""),
+        )
+        for item in items
+        if str(item.get("agent_id") or "").strip()
+    ]
+    if not rows:
+        return
+    await execute(
+        "UPDATE agents SET current_opinion=%s, confidence=%s, last_phase=%s, influence_weight=%s "
+        "WHERE simulation_id=%s AND agent_id=%s",
+        rows,
+        many=True,
+    )
+
+
 async def insert_reasoning_step(simulation_id: str, data: Dict[str, Any]) -> None:
     step_uid = data.get("step_uid")
     if step_uid:
@@ -958,8 +1019,8 @@ async def insert_reasoning_step(simulation_id: str, data: Dict[str, Any]) -> Non
         await execute(
             "INSERT INTO reasoning_steps (simulation_id, agent_id, agent_short_id, agent_label, archetype_name, iteration, phase, "
             "reply_to_agent_id, reply_to_short_id, opinion, opinion_source, stance_confidence, reasoning_length, fallback_reason, relevance_score, "
-            "policy_guard, policy_reason, stance_locked, reason_tag, clarification_triggered, step_uid, event_seq, stance_before, stance_after, message) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "policy_guard, policy_reason, stance_locked, reason_tag, clarification_triggered, step_uid, event_seq, stance_before, stance_after, evidence_keys, message) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON DUPLICATE KEY UPDATE "
             "message=VALUES(message), "
             "opinion=VALUES(opinion), "
@@ -975,13 +1036,14 @@ async def insert_reasoning_step(simulation_id: str, data: Dict[str, Any]) -> Non
             "clarification_triggered=VALUES(clarification_triggered), "
             "event_seq=VALUES(event_seq), "
             "stance_before=VALUES(stance_before), "
-            "stance_after=VALUES(stance_after)",
+            "stance_after=VALUES(stance_after), "
+            "evidence_keys=VALUES(evidence_keys)",
             (
                 simulation_id,
                 data.get("agent_id"),
                 data.get("agent_short_id"),
                 data.get("agent_label"),
-                data.get("archetype"),
+                data.get("archetype_name") or data.get("archetype"),
                 data.get("iteration"),
                 data.get("phase"),
                 data.get("reply_to_agent_id"),
@@ -1001,6 +1063,7 @@ async def insert_reasoning_step(simulation_id: str, data: Dict[str, Any]) -> Non
                 data.get("event_seq"),
                 data.get("stance_before"),
                 data.get("stance_after"),
+                json.dumps(data.get("evidence_keys") or [], ensure_ascii=False),
                 data.get("message"),
             ),
         )

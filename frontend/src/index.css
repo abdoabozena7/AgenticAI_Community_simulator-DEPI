@@ -123,14 +123,19 @@
 
   body {
     @apply bg-background text-foreground font-sans antialiased;
-    font-family: 'Outfit', 'Cairo', sans-serif;
-    font-size: 16px;
+    font-family: 'Cairo', 'Outfit', sans-serif;
+    font-size: 17px;
+    line-height: 1.7;
+  }
+
+  html {
+    direction: rtl;
   }
 
   html[dir="rtl"] body,
   .rtl,
   [lang="ar"] {
-    font-family: 'Readex Pro', 'Outfit', sans-serif;
+    font-family: 'Cairo', 'Outfit', sans-serif;
   }
 
   html, body, #root {
@@ -144,6 +149,13 @@
 
   .rtl {
     direction: rtl;
+  }
+
+  input,
+  textarea,
+  button,
+  select {
+    font-family: inherit;
   }
 
   .rtl .chat-message-user {

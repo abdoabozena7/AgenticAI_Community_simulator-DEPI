@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..core.ollama_client import generate_ollama
@@ -827,4 +828,151 @@ def preflight_finalize(
         "missing_axes": missing_axes,
         "history": history_rows,
         "normalized_context": context,
+    }
+
+
+async def analyze_understanding(
+    *,
+    idea: str,
+    context: Optional[Dict[str, Any]],
+    threshold: float = 0.78,
+    attempt_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    draft_context = dict(context or {})
+    draft_context["idea"] = str(idea or draft_context.get("idea") or "").strip()
+    language = "ar" if str(draft_context.get("language") or "en").lower().startswith("ar") else "en"
+    threshold = max(0.50, min(0.95, float(threshold)))
+
+    normalized_context = _normalize_context(draft_context)
+    axis_answers = dict(normalized_context.get("preflight_axis_answers") or {})
+    missing_axes = _find_missing_axes(normalized_context, axis_answers)
+    score = _clarity_score(axis_answers, missing_axes)
+    clear_enough = bool(score >= threshold or not missing_axes)
+    preferred_description = _preferred_idea_description_clean(language, normalized_context, axis_answers)
+    summary = _summary_clean(language, axis_answers, missing_axes)
+
+    if clear_enough:
+        return {
+            "clear_enough": True,
+            "clarity_score": score,
+            "missing_axes": missing_axes,
+            "questions": [],
+            "generation_mode": "fallback",
+            "generated_at": datetime.utcnow().isoformat(),
+            "questions_meta": [],
+            "attempt_id": attempt_id,
+            "batch_required": True,
+            "preferred_idea_description": preferred_description,
+            "summary": summary,
+        }
+
+    questions: List[Dict[str, Any]] = []
+    questions_meta: List[Dict[str, Any]] = []
+    generation_modes: List[str] = []
+    for axis in missing_axes:
+        generated = await generate_axis_question(
+            axis=axis,
+            language=language,
+            context=normalized_context,
+            axis_answers=axis_answers,
+        )
+        options = []
+        for idx, option in enumerate(generated.get("options") or []):
+            if not isinstance(option, dict):
+                continue
+            label = str(option.get("label") or "").strip()
+            if not label:
+                continue
+            # The frontend submit flow only sends selected option ids back, so keep ids self-descriptive.
+            options.append({"id": label, "label": label})
+            if len(options) >= 3:
+                break
+        question_id = f"understanding_{axis}"
+        generation_mode = str(generated.get("generation_mode") or "fallback")
+        questions.append(
+            {
+                "id": question_id,
+                "axis": axis,
+                "question": str(generated.get("question") or "").strip(),
+                "options": options,
+                "required": True,
+                "reason_summary": str(generated.get("reason_summary") or "").strip() or None,
+                "generation_mode": generation_mode,
+                "question_quality": generated.get("question_quality") if isinstance(generated.get("question_quality"), dict) else None,
+            }
+        )
+        questions_meta.append(
+            {
+                "axis": axis,
+                "generation_mode": generation_mode,
+                "quality_score": float((generated.get("question_quality") or {}).get("score") or 0.0),
+            }
+        )
+        generation_modes.append(generation_mode)
+
+    overall_mode = "llm" if questions and all(mode == "llm" for mode in generation_modes) else "fallback"
+    return {
+        "clear_enough": False,
+        "clarity_score": score,
+        "missing_axes": missing_axes,
+        "questions": questions,
+        "generation_mode": overall_mode,
+        "generated_at": datetime.utcnow().isoformat(),
+        "questions_meta": questions_meta,
+        "attempt_id": attempt_id,
+        "batch_required": True,
+        "preferred_idea_description": preferred_description,
+        "summary": summary,
+    }
+
+
+def submit_understanding(
+    *,
+    draft_context: Dict[str, Any],
+    answers: Optional[List[Dict[str, Any]]],
+    language: str,
+    threshold: float = 0.78,
+) -> Dict[str, Any]:
+    normalized_context = _normalize_context(draft_context)
+    axis_answers = dict(normalized_context.get("preflight_axis_answers") or {})
+    history_rows: List[Dict[str, Any]] = []
+
+    for item in answers or []:
+        if not isinstance(item, dict):
+            continue
+        axis = str(item.get("axis") or "").strip()
+        question_id = str(item.get("question_id") or item.get("questionId") or "").strip()
+        answer_text = str(item.get("custom_text") or "").strip()
+        if not answer_text:
+            selected_ids = item.get("selected_option_ids")
+            if isinstance(selected_ids, list) and selected_ids:
+                answer_text = str(selected_ids[0] or "").strip()
+        if not answer_text:
+            answer_text = str(item.get("selected_option_id") or item.get("selectedOptionId") or "").strip()
+        history_rows.append(
+            {
+                "question_id": question_id,
+                "axis": axis,
+                "answer": answer_text,
+            }
+        )
+        if axis in AXES and answer_text:
+            axis_answers[axis] = answer_text
+
+    normalized_context["preflight_axis_answers"] = axis_answers
+    finalized = preflight_finalize(
+        normalized_context=normalized_context,
+        history=history_rows,
+        language=language,
+        threshold=threshold,
+    )
+    return {
+        "preferred_idea_description": str(finalized.get("preferred_idea_description") or "").strip(),
+        "summary": str(finalized.get("preflight_summary") or "").strip(),
+        "confirm_required": True,
+        "preflight_ready": bool(finalized.get("preflight_ready")),
+        "preflight_answers": finalized.get("preflight_answers") if isinstance(finalized.get("preflight_answers"), dict) else {},
+        "preflight_clarity_score": float(finalized.get("preflight_clarity_score") or 0.0),
+        "assumptions": finalized.get("assumptions") if isinstance(finalized.get("assumptions"), list) else [],
+        "missing_axes": finalized.get("missing_axes") if isinstance(finalized.get("missing_axes"), list) else [],
     }

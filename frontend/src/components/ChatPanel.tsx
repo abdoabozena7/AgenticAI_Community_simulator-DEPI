@@ -1,22 +1,12 @@
-import { useState, useRef, useEffect, useMemo, useCallback, useId, type CSSProperties } from 'react';
-import {
-  Send,
-  Bot,
-  Sparkles,
-  ChevronDown,
-  Check,
-  X,
-  Play,
-  Pause,
-  RefreshCcw,
-  Loader2,
-  Globe,
-} from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Bot, Check, ChevronDown, Loader2, Play, RefreshCcw, Search, Send, Sparkles, TriangleAlert, Wand2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { ChatTopProgress, type ChatProgressStep } from '@/components/simulation/ChatPrimitives';
+import { ReasoningBoard } from '@/components/chat/ReasoningBoard';
+import { SearchLivePanel, type SearchLiveEvent } from '@/components/chat/SearchLivePanel';
 import { ChatMessage, PendingClarification, PendingIdeaConfirmation, PendingResearchReview, PreflightQuestion, ReasoningMessage, SimulationStatus } from '@/types/simulation';
 import { cn } from '@/lib/utils';
-import { ChatTopProgress, type ChatProgressStep } from '@/components/simulation/ChatPrimitives';
 
 type BusyStage =
   | 'extracting_schema'
@@ -26,90 +16,34 @@ type BusyStage =
   | 'starting_simulation'
   | 'checking_session';
 
-type ProgressStripKey = 'intake' | 'research' | 'reasoning' | 'discussion' | 'convergence' | 'summary';
-
-/* ------------------------------------------------------------------
-   PROP-TYPES
-------------------------------------------------------------------- */
 interface ChatPanelProps {
-  /** chat messages (user & bot) */
   messages: ChatMessage[];
-  /** stream of reasoning messages from the agents */
   reasoningFeed: ReasoningMessage[];
-  /** reasoning message ids to highlight */
   highlightReasoningMessageIds?: string[];
-  /** real-time debug rejections from LLM reasoning */
   reasoningDebug?: { id: string; agentShortId?: string; reason: string; stage?: string; attempt?: number; phase?: string; timestamp: number }[];
-  /** send a new chat message */
   onSendMessage: (msg: string) => void;
-  /** user selected an option in a poll / multi-select */
   onSelectOption?: (field: string, value: string) => void;
-  /** waiting for a city name */
   isWaitingForCity?: boolean;
-  /** waiting for a country name */
   isWaitingForCountry?: boolean;
-  /** waiting for location choice (yes/no) */
   isWaitingForLocationChoice?: boolean;
-  /** agents are thinking (typing indicator) */
   isThinking?: boolean;
-  /** LLM generation error - show retry button */
   showRetry?: boolean;
   onRetryLlm?: () => void;
-  /** Searching timed-out - allow "retry" */
   onSearchRetry?: () => void;
-  /** Use LLM instead of web search */
   onSearchUseLlm?: () => void;
-  /** "Start" button should appear even if no text typed */
   canConfirmStart?: boolean;
   onConfirmStart?: () => void;
-  /** Pre-defined quick-reply chips */
   quickReplies?: { label: string; value: string }[];
   onQuickReply?: (value: string) => void;
-  /** overall simulation state */
   simulationStatus?: SimulationStatus;
-  /** backend error message surfaced via polling */
   simulationError?: string | null;
-  /** agents are currently reasoning */
   reasoningActive?: boolean;
-  /** summarisation phase */
   isSummarizing?: boolean;
-  /** external view mode controlled by page layout */
   viewMode?: 'chat' | 'reasoning';
-  /** current status of the web-search routine */
-  searchState?: {
-    status: 'idle' | 'searching' | 'timeout' | 'error' | 'complete';
-    stage?: BusyStage;
-    timeoutMs?: number;
-    elapsedMs?: number;
-  };
-  uiProgress?: {
-    active: boolean;
-    stage: BusyStage;
-    elapsedMs?: number;
-    timeoutMs?: number;
-  };
-  phaseState?: {
-    currentPhaseKey?: string | null;
-    progressPct?: number;
-  };
-  researchSourcesLive?: {
-    eventSeq?: number;
-    cycleId?: string | null;
-    action?: string | null;
-    status?: string | null;
-    url?: string | null;
-    domain?: string | null;
-    faviconUrl?: string | null;
-    title?: string | null;
-    httpStatus?: number | null;
-    contentChars?: number | null;
-    relevanceScore?: number | null;
-    progressPct?: number | null;
-    snippet?: string | null;
-    error?: string | null;
-    metaJson?: Record<string, unknown> | null;
-    timestamp?: number | null;
-  }[];
+  searchState?: { status: 'idle' | 'searching' | 'timeout' | 'error' | 'complete'; stage?: BusyStage; timeoutMs?: number; elapsedMs?: number };
+  uiProgress?: { active: boolean; stage: BusyStage; elapsedMs?: number; timeoutMs?: number };
+  phaseState?: { currentPhaseKey?: string | null; progressPct?: number };
+  researchSourcesLive?: SearchLiveEvent[];
   primaryControl?: {
     key: string;
     label: string;
@@ -119,29 +53,17 @@ interface ChatPanelProps {
     tone?: 'primary' | 'secondary' | 'warning' | 'success';
     icon?: 'play' | 'pause' | 'retry' | 'sparkles' | 'reasoning';
     onClick?: () => void;
-    secondary?: {
-      label: string;
-      disabled?: boolean;
-      onClick?: () => void;
-    };
+    secondary?: { label: string; disabled?: boolean; onClick?: () => void };
   } | null;
   pendingClarification?: PendingClarification | null;
   canAnswerClarification?: boolean;
   clarificationBusy?: boolean;
-  onSubmitClarification?: (payload: {
-    questionId: string;
-    selectedOptionId?: string;
-    customText?: string;
-  }) => void;
+  onSubmitClarification?: (payload: { questionId: string; selectedOptionId?: string; customText?: string }) => void;
   pendingPreflightQuestion?: PreflightQuestion | null;
   preflightRound?: number;
   preflightMaxRounds?: number;
   preflightBusy?: boolean;
-  onSubmitPreflight?: (payload: {
-    questionId: string;
-    selectedOptionId?: string;
-    customText?: string;
-  }) => void;
+  onSubmitPreflight?: (payload: { questionId: string; selectedOptionId?: string; customText?: string }) => void;
   pendingIdeaConfirmation?: PendingIdeaConfirmation | null;
   onConfirmIdeaForStart?: () => void;
   pendingResearchReview?: PendingResearchReview | null;
@@ -157,2306 +79,423 @@ interface ChatPanelProps {
   recommendedPostAction?: 'make_acceptable' | 'bring_to_world';
   finalAcceptancePct?: number;
   postActionBusy?: 'make_acceptable' | 'bring_to_world' | null;
-  postActionResult?: {
-    action: 'make_acceptable' | 'bring_to_world';
-    title: string;
-    summary: string;
-    steps: string[];
-    risks: string[];
-    kpis: string[];
-    revised_idea?: string;
-  } | null;
+  postActionResult?: { action: 'make_acceptable' | 'bring_to_world'; title: string; summary: string; steps: string[]; risks: string[]; kpis: string[]; revised_idea?: string } | null;
   onRunPostAction?: (action: 'make_acceptable' | 'bring_to_world') => void;
   onStartFollowupFromPostAction?: () => void;
-  /** user settings (language, auto-focus, ...) */
-  settings: {
-    language: 'ar' | 'en';
-    autoFocusInput?: boolean;
-  };
+  onRequestReasoningView?: () => void;
+  settings: { language: 'ar' | 'en'; autoFocusInput?: boolean };
 }
 
-/* ------------------------------------------------------------------
-   READ-MORE COMPONENT (unchanged)
-------------------------------------------------------------------- */
-function ReadMoreText({
-  text,
-  collapsedLines = 6,
-  language,
-  className,
-  expanded,
-  onToggleExpanded,
-}: {
-  text: string;
-  collapsedLines?: number;
-  language: 'ar' | 'en';
-  className?: string;
-  expanded?: boolean;
-  onToggleExpanded?: () => void;
-}) {
-  const [internalExpanded, setInternalExpanded] = useState(false);
-  const [isMobile, setIsMobile] = useState(false);
-  const contentId = useId();
-  useEffect(() => {
-    const apply = () => setIsMobile(window.innerWidth < 768);
-    apply();
-    window.addEventListener('resize', apply);
-    return () => window.removeEventListener('resize', apply);
-  }, []);
-  const isExpanded = typeof expanded === 'boolean' ? expanded : internalExpanded;
-  const words = useMemo(() => text.trim().split(/\s+/).filter(Boolean).length, [text]);
-  const toggleExpanded = useCallback(() => {
-    if (onToggleExpanded) {
-      onToggleExpanded();
-      return;
-    }
-    setInternalExpanded((prev) => !prev);
-  }, [onToggleExpanded]);
-  const handleReadMoreKeyDown = useCallback((event: React.KeyboardEvent<HTMLButtonElement>) => {
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    event.preventDefault();
-    toggleExpanded();
-  }, [toggleExpanded]);
-  const shouldClamp = words > (isMobile ? 55 : 85);
-  const clampStyle = shouldClamp && !isExpanded
-    ? ({
-        display: '-webkit-box',
-        WebkitLineClamp: collapsedLines,
-        WebkitBoxOrient: 'vertical',
-        overflow: 'hidden',
-      } as const)
-    : undefined;
-
-  return (
-    <div className={cn('min-w-0', className)}>
-      <div id={contentId} className="whitespace-pre-wrap break-words overflow-visible" style={clampStyle}>
-        {text}
-      </div>
-
-      {shouldClamp && (
-        <button
-          type="button"
-          className="readmore"
-          onClick={toggleExpanded}
-          onKeyDown={handleReadMoreKeyDown}
-          aria-expanded={isExpanded}
-          aria-controls={contentId}
-        >
-          <ChevronDown
-            className={cn('w-4 h-4 transition-transform', isExpanded && 'rotate-180')}
-          />
-          {isExpanded
-            ? (language === 'ar' ? 'عرض أقل' : 'Read less')
-            : (language === 'ar' ? 'اقرأ المزيد' : 'Read more')}
-        </button>
-      )}
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------
-   INLINE DISCLOSURE (unchanged)
-------------------------------------------------------------------- */
-function InlineDisclosure({
-  label,
-  steps,
-  open,
-  onToggle,
-  onClickLabel,
-  language,
-}: {
+type ComposerAction = {
+  key: string;
   label: string;
-  steps: string[];
-  open: boolean;
-  onToggle: () => void;
-  onClickLabel?: () => void;
-  language: 'ar' | 'en';
+  description?: string;
+  busy?: boolean;
+  disabled?: boolean;
+  tone?: 'primary' | 'secondary' | 'warning';
+  icon: ReactNode;
+  onClick: () => void;
+};
+
+const phaseLabels = [
+  { key: 'intake', aliases: ['intake', 'idea'], ar: 'استقبال الفكرة', en: 'Idea intake' },
+  { key: 'research', aliases: ['search', 'research', 'evidence'], ar: 'بحث الإنترنت', en: 'Internet research' },
+  { key: 'simulation', aliases: ['agent', 'debate', 'deliberation'], ar: 'المناقشة', en: 'Debate' },
+  { key: 'convergence', aliases: ['convergence', 'resolution'], ar: 'التقارب', en: 'Convergence' },
+  { key: 'summary', aliases: ['summary', 'completed'], ar: 'الخلاصة', en: 'Summary' },
+];
+
+const stageLabels: Record<BusyStage, { ar: string; en: string }> = {
+  extracting_schema: { ar: 'استخراج البيانات', en: 'Extracting schema' },
+  detecting_mode: { ar: 'تحديد المسار', en: 'Detecting flow' },
+  assistant_reply: { ar: 'تحضير الرد', en: 'Preparing reply' },
+  prestart_research: { ar: 'بحث الإنترنت', en: 'Internet research' },
+  starting_simulation: { ar: 'بدء المحاكاة', en: 'Starting simulation' },
+  checking_session: { ar: 'التحقق من الجلسة', en: 'Checking session' },
+};
+
+const yesNoChoice = (items: ChatMessage['options']['items']) => items.length === 2 && items.some((item) => item.value.toLowerCase() === 'yes') && items.some((item) => item.value.toLowerCase() === 'no');
+const phaseIndex = (key?: string | null) => phaseLabels.findIndex((phase) => phase.aliases.some((alias) => String(key || '').toLowerCase().includes(alias)));
+const elapsedLabel = (elapsedMs: number | undefined, language: 'ar' | 'en') => !elapsedMs ? '' : language === 'ar' ? `${Math.round(elapsedMs / 1000)} ثانية` : `${Math.round(elapsedMs / 1000)}s`;
+
+function PromptCard({
+  title,
+  description,
+  options,
+  selected,
+  onSelect,
+  text,
+  onText,
+  busy,
+  submitLabel,
+  onSubmit,
+  tone = 'info',
+}: {
+  title: string;
+  description: string;
+  options: { id: string; label: string }[];
+  selected: string | null;
+  onSelect: (value: string) => void;
+  text: string;
+  onText: (value: string) => void;
+  busy?: boolean;
+  submitLabel: string;
+  onSubmit: () => void;
+  tone?: 'info' | 'warning';
 }) {
-  const disclosureId = useId();
-  const handleToggle = onClickLabel ?? onToggle;
-
   return (
-    <div className={cn('mt-2', open && 'inline-disclosure-open')}>
-      <button
-        type="button"
-        className="inline-disclosure"
-        onClick={handleToggle}
-        aria-expanded={open}
-        aria-controls={disclosureId}
-      >
-        <span className="thinking-icon" />
-        <span>{label}</span>
-        <ChevronDown
-          className={cn('w-4 h-4 transition-transform', open && 'rotate-180')}
-        />
-      </button>
-
-      {/* No borders-/boxes - expandable area */}
-      <div id={disclosureId} className="inline-disclosure-content" aria-hidden={!open}>
-        <div className="inline-steps">
-          {steps.map((s, i) => (
-            <div
-              key={`${i}-${s}`}
-              className="inline-step"
-              style={{ animationDelay: `${i * 60}ms` }}
-            >
-              &rarr; {s}
-            </div>
-          ))}
-        </div>
+    <section className={cn('rounded-[30px] border p-5', tone === 'warning' ? 'border-amber-400/30 bg-amber-500/10' : 'border-cyan-400/30 bg-cyan-500/10')}>
+      <h3 className="text-base font-semibold text-foreground">{title}</h3>
+      <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-foreground/90">{description}</p>
+      <div className="mt-4 space-y-2">
+        {options.map((option) => (
+          <button
+            key={option.id}
+            type="button"
+            onClick={() => onSelect(option.id)}
+            className={cn('w-full rounded-2xl border px-4 py-3 text-start transition', selected === option.id ? 'border-primary/40 bg-primary/10' : 'border-border/60 bg-background/55 hover:border-primary/20')}
+          >
+            {option.label}
+          </button>
+        ))}
       </div>
-    </div>
+      <Input value={text} onChange={(event) => onText(event.target.value)} className="mt-3 h-12 rounded-2xl border-border/60 bg-background/65 text-base" placeholder="..." dir="rtl" />
+      <Button type="button" onClick={onSubmit} disabled={busy || (!selected && !text.trim())} className="mt-3 rounded-2xl">
+        {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+        <span>{submitLabel}</span>
+      </Button>
+    </section>
   );
 }
 
-/* ------------------------------------------------------------------
-   MAIN CHAT PANEL
-------------------------------------------------------------------- */
-export function ChatPanel({
-  messages,
-  reasoningFeed,
-  highlightReasoningMessageIds = [],
-  reasoningDebug = [],
-  onSendMessage,
-  onSelectOption,
-  isWaitingForCity = false,
-  isWaitingForCountry = false,
-  isWaitingForLocationChoice = false,
-  isThinking = false,
-  showRetry = false,
-  onRetryLlm,
-  quickReplies,
-  onQuickReply,
-  simulationStatus = 'idle',
-  simulationError = null,
-  reasoningActive = false,
-  isSummarizing = false,
-  viewMode = 'chat',
-  searchState,
-  uiProgress,
-  phaseState,
-  researchSourcesLive = [],
-  primaryControl = null,
-  pendingClarification = null,
-  canAnswerClarification = false,
-  clarificationBusy = false,
-  onSubmitClarification,
-  pendingPreflightQuestion = null,
-  preflightRound = 0,
-  preflightMaxRounds = 3,
-  preflightBusy = false,
-  onSubmitPreflight,
-  pendingIdeaConfirmation = null,
-  onConfirmIdeaForStart,
-  pendingResearchReview = null,
-  researchReviewBusy = false,
-  onSubmitResearchReviewAction,
-  postActionsEnabled = false,
-  recommendedPostAction,
-  finalAcceptancePct,
-  postActionBusy = null,
-  postActionResult = null,
-  onRunPostAction,
-  onStartFollowupFromPostAction,
-  settings,
-}: ChatPanelProps) {
-  const [inputValue, setInputValue] = useState('');
-  const inputWrapperRef = useRef<HTMLFormElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const highlightedReasoningRef = useRef<string | null>(null);
+export function ChatPanel(props: ChatPanelProps) {
+  const {
+    messages,
+    reasoningFeed,
+    highlightReasoningMessageIds = [],
+    onSendMessage,
+    onSelectOption,
+    isWaitingForCity = false,
+    isWaitingForCountry = false,
+    isWaitingForLocationChoice = false,
+    isThinking = false,
+    showRetry = false,
+    onRetryLlm,
+    onSearchRetry,
+    onSearchUseLlm,
+    canConfirmStart = false,
+    onConfirmStart,
+    quickReplies = [],
+    onQuickReply,
+    simulationStatus = 'idle',
+    simulationError = null,
+    reasoningActive = false,
+    isSummarizing = false,
+    viewMode = 'chat',
+    searchState,
+    uiProgress,
+    phaseState,
+    researchSourcesLive = [],
+    primaryControl = null,
+    pendingClarification = null,
+    canAnswerClarification = false,
+    clarificationBusy = false,
+    onSubmitClarification,
+    pendingPreflightQuestion = null,
+    preflightRound = 0,
+    preflightMaxRounds = 0,
+    preflightBusy = false,
+    onSubmitPreflight,
+    pendingIdeaConfirmation = null,
+    onConfirmIdeaForStart,
+    pendingResearchReview = null,
+    researchReviewBusy = false,
+    onSubmitResearchReviewAction,
+    postActionsEnabled = false,
+    recommendedPostAction,
+    finalAcceptancePct,
+    postActionBusy = null,
+    postActionResult = null,
+    onRunPostAction,
+    onStartFollowupFromPostAction,
+    onRequestReasoningView,
+    settings,
+  } = props;
 
-  const [thinkingOpen, setThinkingOpen] = useState(false);
-  const [isNearBottom, setIsNearBottom] = useState(true);
-  const [thinkingStepIndex, setThinkingStepIndex] = useState(0);
-  const [showDebug, setShowDebug] = useState(false);
-  const [selectedClarificationOption, setSelectedClarificationOption] = useState<string | null>(null);
-  const [clarificationInput, setClarificationInput] = useState('');
-  const [selectedPreflightOption, setSelectedPreflightOption] = useState<string | null>(null);
-  const [preflightInput, setPreflightInput] = useState('');
-  const [selectedResearchUrlIds, setSelectedResearchUrlIds] = useState<string[]>([]);
-  const [addedResearchUrlsInput, setAddedResearchUrlsInput] = useState('');
-  const [researchRefinementInput, setResearchRefinementInput] = useState('');
-  const [researchActionMode, setResearchActionMode] = useState<'scrape_selected' | 'continue_search' | 'cancel_review'>('scrape_selected');
-  const [showAdvancedResearchActions, setShowAdvancedResearchActions] = useState(false);
-  const [researchActionStatusLine, setResearchActionStatusLine] = useState('');
-  const [previewUrl, setPreviewUrl] = useState<string>('');
-  const [expandedTextMap, setExpandedTextMap] = useState<Record<string, boolean>>({});
-  const [brokenFaviconMap, setBrokenFaviconMap] = useState<Record<string, boolean>>({});
-  const [actionTriggerState, setActionTriggerState] = useState<'idle_closed' | 'hover_expanded' | 'collapsing_for_open' | 'menu_open' | 'menu_closing'>('idle_closed');
-  const [actionMenuRendered, setActionMenuRendered] = useState(false);
-  const [actionPending, setActionPending] = useState<'primary' | 'secondary' | null>(null);
-  const [actionExpandedWidthPx, setActionExpandedWidthPx] = useState(44);
-  const actionOpenTimerRef = useRef<number | null>(null);
-  const actionCloseTimerRef = useRef<number | null>(null);
-  const actionPendingResetTimerRef = useRef<number | null>(null);
-
-  const isSimulationDone =
-    simulationStatus === 'completed' ||
-    simulationStatus === 'error';
-  const hasReasoningContent = reasoningFeed.length > 0;
-  const reasoningUnavailable = !hasReasoningContent && !reasoningActive && isSimulationDone;
+  const language = settings.language;
   const isReasoningView = viewMode === 'reasoning';
-  const highlightedReasoningIds = useMemo(() => new Set(highlightReasoningMessageIds), [highlightReasoningMessageIds]);
-  const actionChoiceCount = primaryControl ? (1 + (primaryControl.secondary ? 1 : 0)) : 0;
-  const showBinaryDecisionBar = Boolean(
-    primaryControl
-    && primaryControl.secondary
-    && actionChoiceCount === 2
-    && !inputValue.trim()
-    && !showRetry
-  );
-  const canUseActionTrigger = false;
-  const showSingleActionControl = Boolean(
-    primaryControl
-    && actionChoiceCount === 1
-    && !inputValue.trim()
-    && !showRetry
-  );
-  const lockComposerByProgress = Boolean(
-    uiProgress?.active
-    && uiProgress.stage !== 'assistant_reply'
-  );
-  const isActionMenuOpen = actionTriggerState === 'menu_open';
-  const shouldExpandTrigger = canUseActionTrigger && actionTriggerState === 'hover_expanded';
-  const showClosedHint = canUseActionTrigger && actionTriggerState === 'idle_closed';
-  const keepTriggerWide = shouldExpandTrigger
-    || actionTriggerState === 'collapsing_for_open';
-  const hasPendingPreflight = Boolean(
-    pendingPreflightQuestion
-    && pendingPreflightQuestion.questionId
-    && pendingPreflightQuestion.required
-  );
-  const hasPendingIdeaConfirmation = Boolean(
-    pendingIdeaConfirmation
-    && String(pendingIdeaConfirmation.description || '').trim()
-  );
-  const hasPendingClarification = Boolean(
-    canAnswerClarification
-    && pendingClarification
-    && pendingClarification.questionId
-  );
-  const hasPendingResearchReview = Boolean(
-    pendingResearchReview
-    && pendingResearchReview.cycleId
-    && pendingResearchReview.required
-  );
-  const recentResearchSources = useMemo(
-    () => [...researchSourcesLive]
-      .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
-      .slice(-6)
-      .reverse(),
-    [researchSourcesLive]
-  );
-  const RESEARCH_AUTO_TIMEOUT_MS = 60000;
-  const [researchClockMs, setResearchClockMs] = useState(() => Date.now());
-  const activeResearchStartedAt = useMemo(() => {
-    const ordered = [...researchSourcesLive].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-    let startedAt: number | null = null;
-    for (const item of ordered) {
-      const action = String(item.action || '').trim();
-      if (action === 'research_started') {
-        startedAt = typeof item.timestamp === 'number' ? item.timestamp : Date.now();
-      } else if (action === 'research_done' || action === 'research_failed') {
-        startedAt = null;
-      }
-    }
-    return startedAt;
-  }, [researchSourcesLive]);
-  const researchTimeoutRemainingMs = useMemo(() => {
-    if (!activeResearchStartedAt) return null;
-    return Math.max(0, RESEARCH_AUTO_TIMEOUT_MS - (researchClockMs - activeResearchStartedAt));
-  }, [activeResearchStartedAt, researchClockMs]);
-  const researchTimeoutProgressPct = useMemo(() => {
-    if (!activeResearchStartedAt) return 0;
-    const elapsed = Math.max(0, researchClockMs - activeResearchStartedAt);
-    return Math.max(0, Math.min(100, (elapsed / RESEARCH_AUTO_TIMEOUT_MS) * 100));
-  }, [activeResearchStartedAt, researchClockMs]);
-  const researchTimeoutLabel = useMemo(() => {
-    if (researchTimeoutRemainingMs === null) return '';
-    const totalSec = Math.max(0, Math.ceil(researchTimeoutRemainingMs / 1000));
-    const minutes = Math.floor(totalSec / 60);
-    const seconds = totalSec % 60;
-    const mmss = `${minutes}:${String(seconds).padStart(2, '0')}`;
-    if (researchTimeoutRemainingMs <= 0) {
-      return settings.language === 'ar'
-        ? 'تم تجاوز مهلة البحث. سيتم بدء المحاكاة تلقائيًا الآن...'
-        : 'Research timeout reached. Starting simulation automatically now...';
-    }
-    return settings.language === 'ar'
-      ? `جاري البحث... بدء المحاكاة تلقائيًا بعد ${mmss} إذا استمر التأخير.`
-      : `Research in progress... auto-starting simulation in ${mmss} if delays continue.`;
-  }, [researchTimeoutRemainingMs, settings.language]);
-  useEffect(() => {
-    if (!isReasoningView) return;
-    if (!highlightReasoningMessageIds.length) return;
-    const firstId = highlightReasoningMessageIds[0];
-    if (!firstId || highlightedReasoningRef.current === firstId) return;
-    const safeSelector = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
-      ? CSS.escape(firstId)
-      : firstId.replace(/"/g, '\\"');
-    const element = document.querySelector<HTMLElement>(`[data-reasoning-id="${safeSelector}"]`);
-    if (!element) return;
-    highlightedReasoningRef.current = firstId;
-    element.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  }, [highlightReasoningMessageIds, isReasoningView, reasoningFeed.length]);
-  const showLiveResearchCard = searchState?.status === 'searching';
-  const phaseLabel = useMemo(() => {
-    const key = phaseState?.currentPhaseKey?.trim();
-    if (!key) return null;
-    const labelsAr: Record<string, string> = {
-      intake: 'الآراء الفردية',
-      search_bootstrap: 'الآراء الفردية',
-      evidence_map: 'الآراء الفردية',
-      research_digest: 'الآراء الفردية',
-      agent_init: 'الآراء الفردية',
-      debate: 'النقاش',
-      deliberation: 'النقاش',
-      convergence: 'تقليل الحياد',
-      resolution: 'التقارب النهائي',
-      verdict: 'التقارب النهائي',
-      summary: 'التقارب النهائي',
-      completed: 'التقارب النهائي',
-    };
-    const labelsEn: Record<string, string> = {
-      intake: 'Individual Opinions',
-      search_bootstrap: 'Individual Opinions',
-      evidence_map: 'Individual Opinions',
-      research_digest: 'Individual Opinions',
-      agent_init: 'Individual Opinions',
-      debate: 'Discussion',
-      deliberation: 'Discussion',
-      convergence: 'Neutrality Reduction',
-      resolution: 'Final Convergence',
-      verdict: 'Final Convergence',
-      summary: 'Final Convergence',
-      completed: 'Final Convergence',
-    };
-    return settings.language === 'ar'
-      ? (labelsAr[key] || 'مرحلة جارية')
-      : (labelsEn[key] || 'In-progress phase');
-  }, [phaseState?.currentPhaseKey, settings.language]);
-  const effectivePostAction: 'make_acceptable' | 'bring_to_world' =
-    recommendedPostAction
-    || ((finalAcceptancePct ?? 0) >= 60 ? 'bring_to_world' : 'make_acceptable');
-  const acceptancePctValue = Number.isFinite(finalAcceptancePct)
-    ? Math.max(0, Math.min(100, finalAcceptancePct as number))
-    : null;
-  const toggleExpandedText = useCallback((key: string) => {
-    setExpandedTextMap((prev) => ({ ...prev, [key]: !prev[key] }));
-  }, []);
-  const controlTriggerStackStyle = useMemo<CSSProperties | undefined>(() => {
-    if (!canUseActionTrigger) return undefined;
-    if (!keepTriggerWide) return undefined;
-    return { width: `${actionExpandedWidthPx}px` };
-  }, [actionExpandedWidthPx, canUseActionTrigger, keepTriggerWide]);
-  const controlMenuReservedStyle = useMemo<CSSProperties | undefined>(() => {
-    if (!actionMenuRendered) return undefined;
-    return { width: `${Math.max(220, actionExpandedWidthPx)}px` };
-  }, [actionExpandedWidthPx, actionMenuRendered]);
-  const singleActionWidthPx = useMemo(
-    () => Math.max(150, Math.min(260, Math.round(actionExpandedWidthPx * 0.45))),
-    [actionExpandedWidthPx]
-  );
-  const controlTriggerButtonStyle = useMemo<CSSProperties | undefined>(() => {
-    if (shouldExpandTrigger) return { width: `${actionExpandedWidthPx}px` };
-    if (showSingleActionControl) return { width: `${singleActionWidthPx}px` };
-    return undefined;
-  }, [actionExpandedWidthPx, shouldExpandTrigger, showSingleActionControl, singleActionWidthPx]);
+  const listRef = useRef<HTMLDivElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const allowAutoFocusRef = useRef(true);
+  const lastMessageIdRef = useRef<string | null>(null);
+
+  const [inputValue, setInputValue] = useState('');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [clarificationChoice, setClarificationChoice] = useState<string | null>(null);
+  const [clarificationText, setClarificationText] = useState('');
+  const [preflightChoice, setPreflightChoice] = useState<string | null>(null);
+  const [preflightText, setPreflightText] = useState('');
+  const [reviewSelectedIds, setReviewSelectedIds] = useState<string[]>([]);
+  const [reviewExtraUrls, setReviewExtraUrls] = useState('');
+  const [reviewQueryRefinement, setReviewQueryRefinement] = useState('');
 
   useEffect(() => {
-    const node = inputWrapperRef.current;
-    if (!node) return;
-
-    const update = () => {
-      const width = node.getBoundingClientRect().width;
-      setActionExpandedWidthPx(Math.max(44, Math.round(width * 0.75)));
-    };
-
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
-
-
-  const formatResearchError = useCallback((errorText?: string | null) => {
-    const raw = String(errorText || '').trim();
-    if (!raw) return '';
-    if (!/search quality below threshold/i.test(raw)) return raw;
-
-    const readPair = (key: string) => {
-      const match = raw.match(new RegExp(`${key}=([0-9.]+)/([0-9.]+)`, 'i'));
-      if (!match) return null;
-      return { current: Number(match[1]), required: Number(match[2]) };
-    };
-
-    const usable = readPair('usable_sources');
-    const domains = readPair('domains');
-    const chars = readPair('max_content_chars');
-    const extractionMatch = raw.match(/extraction_success_rate=([0-9.]+)/i);
-    const extractionRate = extractionMatch ? Number(extractionMatch[1]) : 0;
-
-    const usableCurrent = usable?.current ?? 0;
-    const usableRequired = usable?.required ?? 2;
-    const domainsCurrent = domains?.current ?? 0;
-    const domainsRequired = domains?.required ?? 2;
-    const charsCurrent = chars?.current ?? 0;
-    const charsRequired = chars?.required ?? 80;
-
-    if (settings.language === 'ar') {
-      return `جودة البحث أقل من الحد المطلوب. المصادر الصالحة: ${usableCurrent}/${usableRequired}، النطاقات المختلفة: ${domainsCurrent}/${domainsRequired}، أكبر محتوى مستخرج: ${charsCurrent}/${charsRequired} حرف، ونسبة نجاح الاستخراج: ${(extractionRate * 100).toFixed(0)}%.`;
-    }
-
-    return `Search quality is below the required threshold. Usable sources: ${usableCurrent}/${usableRequired}, domains: ${domainsCurrent}/${domainsRequired}, max extracted content: ${charsCurrent}/${charsRequired} chars, extraction success: ${(extractionRate * 100).toFixed(0)}%.`;
-  }, [settings.language]);
-
-  const decodeResearchSnippet = useCallback((value?: string | null): string => {
-    const raw = String(value || '').trim();
-    if (!raw) return '';
-    if (!/%[0-9A-Fa-f]{2}/.test(raw)) return raw;
-    try {
-      return decodeURIComponent(raw);
-    } catch {
-      return raw;
-    }
-  }, []);
-
-  const toSafeHttpUrl = useCallback((value?: string | null): string | null => {
-    const raw = String(value || '').trim();
-    if (!raw) return null;
-    try {
-      const parsed = new URL(raw);
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
-      return parsed.toString();
-    } catch {
-      return null;
-    }
-  }, []);
-
-  const extractSafeHost = useCallback((value?: string | null): string | null => {
-    const raw = String(value || '').trim();
-    if (!raw) return null;
-    try {
-      const parsed = raw.includes('://') ? new URL(raw) : new URL(`https://${raw}`);
-      return parsed.hostname || null;
-    } catch {
-      return null;
-    }
-  }, []);
-
-  const getFavicon = useCallback((item: NonNullable<ChatPanelProps['researchSourcesLive']>[number]) => {
-    const providedFavicon = toSafeHttpUrl(item.faviconUrl);
-    if (providedFavicon) return providedFavicon;
-    const host = extractSafeHost(item.domain) || extractSafeHost(item.url);
-    if (!host) return null;
-    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64`;
-  }, [extractSafeHost, toSafeHttpUrl]);
-
-  const [hiddenOptionIds, setHiddenOptionIds] = useState<Set<string>>(new Set());
-  const hideTimersRef = useRef<Record<string, number>>({});
-
-  useEffect(() => {
-    setSelectedClarificationOption(null);
-    setClarificationInput('');
+    if (!pendingClarification?.questionId) return;
+    setClarificationChoice(null);
+    setClarificationText('');
   }, [pendingClarification?.questionId]);
 
   useEffect(() => {
-    setSelectedPreflightOption(null);
-    setPreflightInput('');
+    if (!pendingPreflightQuestion?.questionId) return;
+    setPreflightChoice(null);
+    setPreflightText('');
   }, [pendingPreflightQuestion?.questionId]);
 
   useEffect(() => {
-    if (!primaryControl) {
-      setActionMenuRendered(false);
-      setActionTriggerState('idle_closed');
-    }
-  }, [primaryControl?.key, primaryControl]);
+    if (!pendingResearchReview?.cycleId) return;
+    setReviewSelectedIds(pendingResearchReview.candidateUrls.slice(0, 3).map((item) => item.id));
+    setReviewExtraUrls('');
+    setReviewQueryRefinement('');
+  }, [pendingResearchReview?.candidateUrls, pendingResearchReview?.cycleId]);
 
   useEffect(() => {
-    if (inputValue.trim().length > 0) {
-      setActionMenuRendered(false);
-      setActionTriggerState('idle_closed');
-    }
-  }, [inputValue]);
+    const container = listRef.current;
+    if (container) container.scrollTop = container.scrollHeight;
+  }, [messages, reasoningFeed, isThinking, pendingClarification, pendingPreflightQuestion, pendingResearchReview, pendingIdeaConfirmation]);
 
   useEffect(() => {
-    if (!canUseActionTrigger) {
-      setActionMenuRendered(false);
-      setActionTriggerState('idle_closed');
-    }
-  }, [canUseActionTrigger]);
-
-  useEffect(() => {
-    if (!activeResearchStartedAt) return;
-    setResearchClockMs(Date.now());
-    const timerId = window.setInterval(() => {
-      setResearchClockMs(Date.now());
-    }, 1000);
-    return () => window.clearInterval(timerId);
-  }, [activeResearchStartedAt]);
-
-  // Keep scroll locked to bottom when we are near the bottom
-  useEffect(() => {
-    if (scrollRef.current && isNearBottom) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [isReasoningView, isNearBottom, messages, reasoningFeed]);
-
-  // Autofocus the input when a new chat message arrives
-  const lastMessageCount = useRef(0);
-  useEffect(() => {
-    if (!settings.autoFocusInput) return;
-    if (isReasoningView) return;
-    if (messages.length !== lastMessageCount.current) {
-      lastMessageCount.current = messages.length;
-      inputRef.current?.focus();
-    }
-  }, [isReasoningView, messages.length, settings.autoFocusInput]);
-
-  useEffect(() => () => {
-    Object.values(hideTimersRef.current).forEach((timerId) => {
-      window.clearTimeout(timerId);
-    });
-    hideTimersRef.current = {};
-    if (actionOpenTimerRef.current) {
-      window.clearTimeout(actionOpenTimerRef.current);
-      actionOpenTimerRef.current = null;
-    }
-    if (actionCloseTimerRef.current) {
-      window.clearTimeout(actionCloseTimerRef.current);
-      actionCloseTimerRef.current = null;
-    }
-    if (actionPendingResetTimerRef.current) {
-      window.clearTimeout(actionPendingResetTimerRef.current);
-      actionPendingResetTimerRef.current = null;
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!actionPending) return;
-    if (actionPending === 'primary' && primaryControl?.busy) return;
-    if (actionPendingResetTimerRef.current) {
-      window.clearTimeout(actionPendingResetTimerRef.current);
-    }
-    actionPendingResetTimerRef.current = window.setTimeout(() => {
-      setActionPending(null);
-      actionPendingResetTimerRef.current = null;
-    }, 700);
-  }, [actionPending, primaryControl?.busy]);
-
-  const scheduleHideOptions = (messageId: string) => {
-    if (hideTimersRef.current[messageId]) return;
-    hideTimersRef.current[messageId] = window.setTimeout(() => {
-      setHiddenOptionIds((prev) => {
-        const next = new Set(prev);
-        next.add(messageId);
-        return next;
-      });
-      delete hideTimersRef.current[messageId];
-    }, 3000);
-  };
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (lockComposerByProgress && !showRetry) return;
-    if (!inputValue.trim()) return;
-
-    onSendMessage(inputValue);
-    setInputValue('');
-    if (settings.autoFocusInput)
-      requestAnimationFrame(() => inputRef.current?.focus());
-  };
-
-  const renderPrimaryControlIcon = useCallback((control?: NonNullable<ChatPanelProps['primaryControl']>) => {
-    if (!control) return <Play className="w-4 h-4" />;
-    if (control.busy) return <Loader2 className="w-4 h-4 animate-spin" />;
-    if (control.icon === 'pause') return <Pause className="w-4 h-4" />;
-    if (control.icon === 'retry') return <RefreshCcw className="w-4 h-4" />;
-    if (control.icon === 'sparkles') return <Sparkles className="w-4 h-4" />;
-    if (control.icon === 'reasoning') return <Bot className="w-4 h-4" />;
-    return <Play className="w-4 h-4" />;
-  }, []);
-
-  const compactControlLabel = useCallback((label: string, fallback: string) => {
-    const clean = String(label || '').trim();
-    if (!clean) return fallback;
-    return clean;
-  }, []);
-
-  const beginCloseActionMenu = useCallback(() => {
-    if (actionOpenTimerRef.current) {
-      window.clearTimeout(actionOpenTimerRef.current);
-      actionOpenTimerRef.current = null;
-    }
-    if (!actionMenuRendered) {
-      setActionTriggerState('idle_closed');
-      return;
-    }
-    setActionTriggerState('menu_closing');
-    if (actionCloseTimerRef.current) {
-      window.clearTimeout(actionCloseTimerRef.current);
-    }
-    actionCloseTimerRef.current = window.setTimeout(() => {
-      setActionMenuRendered(false);
-      setActionTriggerState('idle_closed');
-      actionCloseTimerRef.current = null;
-    }, 170);
-  }, [actionMenuRendered]);
-
-  const beginOpenActionMenu = useCallback(() => {
-    if (!canUseActionTrigger) return;
-    if (actionCloseTimerRef.current) {
-      window.clearTimeout(actionCloseTimerRef.current);
-      actionCloseTimerRef.current = null;
-    }
-    setActionTriggerState('collapsing_for_open');
-    if (actionOpenTimerRef.current) {
-      window.clearTimeout(actionOpenTimerRef.current);
-    }
-    actionOpenTimerRef.current = window.setTimeout(() => {
-      setActionMenuRendered(true);
-      setActionTriggerState('menu_open');
-      actionOpenTimerRef.current = null;
-    }, 95);
-  }, [canUseActionTrigger]);
-
-  const handleTriggerMouseEnter = useCallback(() => {
-    if (!canUseActionTrigger) return;
-    if (actionTriggerState === 'menu_open' || actionTriggerState === 'menu_closing' || actionTriggerState === 'collapsing_for_open') return;
-    setActionTriggerState('hover_expanded');
-  }, [actionTriggerState, canUseActionTrigger]);
-
-  const handleTriggerMouseLeave = useCallback(() => {
-    if (!canUseActionTrigger) return;
-    if (actionTriggerState === 'hover_expanded') {
-      setActionTriggerState('idle_closed');
-    }
-  }, [actionTriggerState, canUseActionTrigger]);
-
-  const executePrimaryControl = useCallback(() => {
-    if (lockComposerByProgress && !showRetry) return;
-    if (!primaryControl || primaryControl.disabled) return;
-    setActionPending('primary');
-    primaryControl.onClick?.();
-    beginCloseActionMenu();
-  }, [beginCloseActionMenu, lockComposerByProgress, primaryControl, showRetry]);
-
-  const executeSecondaryControl = useCallback(() => {
-    if (lockComposerByProgress && !showRetry) return;
-    if (primaryControl?.secondary?.onClick && !primaryControl.secondary.disabled) {
-      setActionPending('secondary');
-      primaryControl.secondary.onClick();
-    }
-    beginCloseActionMenu();
-  }, [beginCloseActionMenu, lockComposerByProgress, primaryControl, showRetry]);
-
-  const handleSendButtonClick = useCallback(() => {
-    if (showRetry) {
-      setActionPending(null);
-      onRetryLlm?.();
-      return;
-    }
-    if (lockComposerByProgress) return;
-    if (inputValue.trim()) {
-      setActionPending(null);
-      onSendMessage(inputValue);
-      setInputValue('');
-      if (settings.autoFocusInput) {
-        requestAnimationFrame(() => inputRef.current?.focus());
-      }
-      return;
-    }
-    if (primaryControl) {
-      if (showBinaryDecisionBar) {
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (formRef.current?.contains(target)) {
+        allowAutoFocusRef.current = true;
         return;
       }
-      if (!canUseActionTrigger) {
-        executePrimaryControl();
-        return;
-      }
-      if (isActionMenuOpen || actionTriggerState === 'menu_closing') {
-        beginCloseActionMenu();
-      } else {
-        beginOpenActionMenu();
-      }
-    }
-  }, [
-    actionTriggerState,
-    beginCloseActionMenu,
-    beginOpenActionMenu,
-    inputValue,
-    isActionMenuOpen,
-    canUseActionTrigger,
-    showBinaryDecisionBar,
-    onRetryLlm,
-    onSendMessage,
-    primaryControl,
-    executePrimaryControl,
-    lockComposerByProgress,
-    settings.autoFocusInput,
-    showRetry,
-  ]);
-
-  const statusLabel = reasoningActive
-    ? settings.language === 'ar'
-      ? 'الوكلاء يفكرون الآن...'
-      : 'Agents are reasoning...'
-    : isSummarizing
-    ? settings.language === 'ar'
-      ? 'انتهى التفكير، جارٍ التلخيص...'
-      : 'Agents finished; summarizing now...'
-    : '';
-
-  const thinkingLabel = searchState?.status === 'searching'
-    ? (settings.language === 'ar' ? 'جاري البحث' : 'Searching')
-    : (settings.language === 'ar' ? 'جاري التفكير' : 'Reasoning');
-
-  const uiProgressActive = Boolean(uiProgress?.active);
-  const activeBusyStage: BusyStage | null = uiProgressActive ? uiProgress?.stage ?? null : null;
-  const activeBusyElapsedMs = uiProgressActive ? uiProgress?.elapsedMs : undefined;
-  const activeBusyTimeoutMs = uiProgressActive && activeBusyStage === 'prestart_research'
-    ? uiProgress?.timeoutMs
-    : undefined;
-  const busyStageLabel = useMemo(() => {
-    if (!activeBusyStage) return '';
-    const labelsAr: Record<BusyStage, string> = {
-      extracting_schema: 'تحليل الفكرة',
-      detecting_mode: 'فهم نوع الرسالة',
-      assistant_reply: 'تجهيز الرد',
-      prestart_research: 'تحليل المصادر قبل البدء',
-      starting_simulation: 'بدء المحاكاة',
-      checking_session: 'فحص الجلسة',
+      allowAutoFocusRef.current = false;
+      setMenuOpen(false);
+      if (document.activeElement === inputRef.current) inputRef.current?.blur();
     };
-    const labelsEn: Record<BusyStage, string> = {
-      extracting_schema: 'Analyzing idea',
-      detecting_mode: 'Detecting message mode',
-      assistant_reply: 'Preparing reply',
-      prestart_research: 'Pre-start research',
-      starting_simulation: 'Starting simulation',
-      checking_session: 'Checking session',
-    };
-    return settings.language === 'ar'
-      ? (labelsAr[activeBusyStage] || 'جارٍ المعالجة')
-      : (labelsEn[activeBusyStage] || 'Processing');
-  }, [activeBusyStage, settings.language]);
-  const busyElapsedLabel = useMemo(() => {
-    if (typeof activeBusyElapsedMs !== 'number') return '';
-    const totalSec = Math.max(0, Math.floor(activeBusyElapsedMs / 1000));
-    const minutes = Math.floor(totalSec / 60);
-    const seconds = totalSec % 60;
-    return `${minutes}:${String(seconds).padStart(2, '0')}`;
-  }, [activeBusyElapsedMs]);
-  const busyProgressPct = useMemo(() => {
-    if (activeBusyStage !== 'prestart_research') return null;
-    if (typeof activeBusyElapsedMs !== 'number' || typeof activeBusyTimeoutMs !== 'number' || activeBusyTimeoutMs <= 0) {
-      return null;
-    }
-    return Math.max(0, Math.min(100, (activeBusyElapsedMs / activeBusyTimeoutMs) * 100));
-  }, [activeBusyElapsedMs, activeBusyStage, activeBusyTimeoutMs]);
-  const busyTimeoutContextLabel = useMemo(() => {
-    if (activeBusyStage !== 'prestart_research') return '';
-    if (typeof activeBusyElapsedMs !== 'number' || typeof activeBusyTimeoutMs !== 'number' || activeBusyTimeoutMs <= 0) {
-      return '';
-    }
-    const remainingMs = Math.max(0, activeBusyTimeoutMs - activeBusyElapsedMs);
-    if (remainingMs <= 0) {
-      return settings.language === 'ar' ? 'سيتم المتابعة تلقائيًا الآن' : 'Auto-continue now';
-    }
-    const totalSec = Math.ceil(remainingMs / 1000);
-    const minutes = Math.floor(totalSec / 60);
-    const seconds = totalSec % 60;
-    const mmss = `${minutes}:${String(seconds).padStart(2, '0')}`;
-    return settings.language === 'ar'
-      ? `متابعة تلقائية بعد ${mmss}`
-      : `Auto-continue in ${mmss}`;
-  }, [activeBusyElapsedMs, activeBusyStage, activeBusyTimeoutMs, settings.language]);
-  const showBusyStageBar = Boolean(uiProgressActive && activeBusyStage && busyStageLabel);
-  const progressLiveAnnouncement = useMemo(() => {
-    if (!showBusyStageBar) return '';
-    const parts = [busyStageLabel];
-    if (busyElapsedLabel) parts.push(busyElapsedLabel);
-    if (busyTimeoutContextLabel) parts.push(busyTimeoutContextLabel);
-    return parts.join(' | ');
-  }, [busyElapsedLabel, busyStageLabel, busyTimeoutContextLabel, showBusyStageBar]);
-
-  const thinkingSteps = useMemo(() => {
-    if (searchState?.status === 'searching') {
-      return [
-        settings.language === 'ar' ? 'جمع مصادر سريعة' : 'Collecting quick sources',
-        settings.language === 'ar' ? 'تلخيص إشارات السوق' : 'Summarizing market signals',
-        settings.language === 'ar' ? 'تحضير سياق الوكلاء' : 'Preparing agent context',
-      ];
-    }
-    return [
-      settings.language === 'ar' ? 'قراءة آراء الوكلاء' : 'Reading agent views',
-      settings.language === 'ar' ? 'مقارنة الحجج' : 'Comparing arguments',
-      settings.language === 'ar' ? 'صياغة رد واضح' : 'Drafting a clear reply',
-    ];
-  }, [searchState?.status, settings.language]);
-
-  const thinkingActive = Boolean(isThinking || searchState?.status === 'searching' || reasoningActive);
-  const showInlineDisclosure = !uiProgressActive && thinkingActive;
-  const stepsKey = useMemo(() => thinkingSteps.join('|'), [thinkingSteps]);
+    document.addEventListener('pointerdown', handlePointerDown, true);
+    return () => document.removeEventListener('pointerdown', handlePointerDown, true);
+  }, []);
 
   useEffect(() => {
-    setThinkingStepIndex(0);
-  }, [stepsKey]);
+    if (!settings.autoFocusInput || isReasoningView) return;
+    const raf = window.requestAnimationFrame(() => inputRef.current?.focus());
+    return () => window.cancelAnimationFrame(raf);
+  }, [isReasoningView, settings.autoFocusInput]);
 
   useEffect(() => {
-    if (!thinkingActive || thinkingSteps.length <= 1) return;
-    const intervalId = window.setInterval(() => {
-      setThinkingStepIndex((prev) => (prev + 1) % thinkingSteps.length);
-    }, 1200);
-    return () => window.clearInterval(intervalId);
-  }, [thinkingActive, thinkingSteps]);
-
-  const visibleThinkingStep = thinkingSteps.length
-    ? [thinkingSteps[thinkingStepIndex] || thinkingSteps[0]]
-    : [];
-
-  const progressStepLabels = useMemo<Record<ProgressStripKey, string>>(() => ({
-    intake: settings.language === 'ar' ? 'التهيئة' : 'Intake',
-    research: settings.language === 'ar' ? 'البحث' : 'Research',
-    reasoning: settings.language === 'ar' ? 'التفكير' : 'Reasoning',
-    discussion: settings.language === 'ar' ? 'النقاش' : 'Discussion',
-    convergence: settings.language === 'ar' ? 'التقارب' : 'Convergence',
-    summary: settings.language === 'ar' ? 'الخلاصة' : 'Summary',
-  }), [settings.language]);
-
-  const phaseFallbackLabel = settings.language === 'ar' ? 'مرحلة جارية' : 'In-progress phase';
-  const phaseLabelMap = useMemo(() => ({
-    'Information Shock': settings.language === 'ar' ? 'الآراء الفردية' : 'Individual Opinions',
-    'Polarization Phase': settings.language === 'ar' ? 'النقاش' : 'Discussion',
-    'Clash of Values': settings.language === 'ar' ? 'تقليل الحياد' : 'Neutrality Reduction',
-    'Resolution Pressure': settings.language === 'ar' ? 'التقارب النهائي' : 'Final Convergence',
-    'Individual Opinions': settings.language === 'ar' ? 'الآراء الفردية' : 'Individual Opinions',
-    Discussion: settings.language === 'ar' ? 'النقاش' : 'Discussion',
-    'Neutrality Reduction': settings.language === 'ar' ? 'تقليل الحياد' : 'Neutrality Reduction',
-    'Final Convergence': settings.language === 'ar' ? 'التقارب النهائي' : 'Final Convergence',
-    Convergence: settings.language === 'ar' ? 'التقارب النهائي' : 'Final Convergence',
-  }), [settings.language]);
-
-  const phaseGroups = useMemo(() => {
-    const groups: { phase: string; items: ReasoningMessage[] }[] = [];
-    reasoningFeed.forEach((msg) => {
-      const phase = msg.phase || 'Phase';
-      const last = groups[groups.length - 1];
-      if (!last || last.phase !== phase) {
-        groups.push({ phase, items: [msg] });
-      } else {
-        last.items.push(msg);
-      }
-    });
-    return groups;
-  }, [reasoningFeed]);
-
-  const reasoningIndex = useMemo(() => {
-    return new Map(reasoningFeed.map((msg, index) => [msg.id, index]));
-  }, [reasoningFeed]);
-
-  const progressCurrentKey = useMemo<ProgressStripKey>(() => {
-    const normalizedPhase = String(phaseState?.currentPhaseKey || '').trim().toLowerCase();
-    if (simulationStatus === 'completed' || simulationStatus === 'error' || isSummarizing || ['summary', 'resolution', 'verdict', 'completed'].includes(normalizedPhase)) {
-      return 'summary';
-    }
-    if (normalizedPhase === 'convergence') return 'convergence';
-    if (normalizedPhase === 'debate' || normalizedPhase === 'deliberation') return 'discussion';
-    if (reasoningActive || reasoningFeed.length > 0 || normalizedPhase === 'agent_init') return 'reasoning';
-    if (showLiveResearchCard || activeBusyStage === 'prestart_research' || searchState?.status === 'complete') return 'research';
-    return 'intake';
-  }, [
-    activeBusyStage,
-    isSummarizing,
-    phaseState?.currentPhaseKey,
-    reasoningActive,
-    reasoningFeed.length,
-    searchState?.status,
-    showLiveResearchCard,
-    simulationStatus,
-  ]);
+    if (!settings.autoFocusInput || isReasoningView || !allowAutoFocusRef.current) return;
+    const latest = messages.at(-1)?.id || null;
+    if (!latest || latest === lastMessageIdRef.current) return;
+    lastMessageIdRef.current = latest;
+    const raf = window.requestAnimationFrame(() => inputRef.current?.focus());
+    return () => window.cancelAnimationFrame(raf);
+  }, [isReasoningView, messages, settings.autoFocusInput]);
 
   const progressSteps = useMemo<ChatProgressStep[]>(() => {
-    const order: ProgressStripKey[] = ['intake', 'research', 'reasoning', 'discussion', 'convergence', 'summary'];
-    const currentIndex = order.indexOf(progressCurrentKey);
-    return order.map((key, index) => ({
-      key,
-      label: progressStepLabels[key],
-      state: index < currentIndex ? 'completed' : index === currentIndex ? 'current' : 'upcoming',
+    const current = Math.max(0, phaseIndex(phaseState?.currentPhaseKey));
+    return phaseLabels.map((phase, index) => ({
+      key: phase.key,
+      label: language === 'ar' ? phase.ar : phase.en,
+      state: index < current ? 'completed' : index === current ? 'current' : 'upcoming',
     }));
-  }, [progressCurrentKey, progressStepLabels]);
+  }, [language, phaseState?.currentPhaseKey]);
 
-  const progressHeadline = useMemo(() => {
-    if (showBusyStageBar) return busyStageLabel;
-    if (statusLabel) return statusLabel;
-    if (phaseLabel) return phaseLabel;
-    if (showLiveResearchCard) {
-      return settings.language === 'ar' ? 'يجمع النظام إشارات بحث مباشرة' : 'Live research is gathering signals';
+  const topHeadline = useMemo(() => {
+    if (searchState?.status === 'timeout') return language === 'ar' ? 'انتهت مهلة البحث' : 'Search timed out';
+    if (searchState?.status === 'error') return language === 'ar' ? 'تعذر البحث' : 'Search failed';
+    if (searchState?.status === 'searching') return language === 'ar' ? stageLabels[searchState.stage || 'prestart_research'].ar : stageLabels[searchState.stage || 'prestart_research'].en;
+    if (uiProgress?.active) return language === 'ar' ? stageLabels[uiProgress.stage].ar : stageLabels[uiProgress.stage].en;
+    return language === 'ar' ? 'جاهز' : 'Ready';
+  }, [language, searchState, uiProgress]);
+
+  const topDetail = useMemo(() => {
+    if (searchState?.status === 'searching') return language === 'ar' ? `منذ ${elapsedLabel(searchState.elapsedMs, language)}` : `For ${elapsedLabel(searchState.elapsedMs, language)}`;
+    if (uiProgress?.active) return language === 'ar' ? `منذ ${elapsedLabel(uiProgress.elapsedMs, language)}` : `For ${elapsedLabel(uiProgress.elapsedMs, language)}`;
+    if (typeof phaseState?.progressPct === 'number') return language === 'ar' ? `التقدم ${Math.round(phaseState.progressPct)}%` : `Progress ${Math.round(phaseState.progressPct)}%`;
+    return undefined;
+  }, [language, phaseState?.progressPct, searchState, uiProgress]);
+
+  const primaryAction = useMemo<ComposerAction | null>(() => {
+    if (inputValue.trim()) {
+      return {
+        key: 'send',
+        label: language === 'ar' ? 'إرسال الرسالة' : 'Send message',
+        icon: <Send className="h-4 w-4" />,
+        onClick: () => {
+          const next = inputValue.trim();
+          if (!next) return;
+          onSendMessage(next);
+          setInputValue('');
+          allowAutoFocusRef.current = true;
+          window.requestAnimationFrame(() => inputRef.current?.focus());
+        },
+      };
     }
-    return progressStepLabels[progressCurrentKey];
-  }, [busyStageLabel, phaseLabel, progressCurrentKey, progressStepLabels, settings.language, showBusyStageBar, showLiveResearchCard, statusLabel]);
-
-  const progressDetail = useMemo(() => {
-    if (showBusyStageBar) {
-      return [busyElapsedLabel, busyTimeoutContextLabel].filter(Boolean).join(' • ');
+    if (searchState?.status === 'timeout' && onSearchRetry) {
+      return {
+        key: 'retry-search',
+        label: language === 'ar' ? 'إعادة البحث' : 'Retry search',
+        description: language === 'ar' ? 'يمكنك إعادة المحاولة أو استخدام fallback محلي.' : 'Retry search or use local fallback.',
+        tone: 'warning',
+        icon: <Search className="h-4 w-4" />,
+        onClick: () => onSearchUseLlm ? setMenuOpen((open) => !open) : onSearchRetry(),
+      };
     }
-    if (showLiveResearchCard) return researchTimeoutLabel;
-    if (typeof phaseState?.progressPct === 'number' && phaseLabel) {
-      return `${phaseLabel} • ${Math.round(phaseState.progressPct)}%`;
+    if (showRetry && onRetryLlm) return { key: 'fallback', label: language === 'ar' ? 'استخدام LLM fallback' : 'Use LLM fallback', tone: 'warning', icon: <Wand2 className="h-4 w-4" />, onClick: onRetryLlm };
+    if (canConfirmStart && onConfirmStart) return { key: 'start', label: language === 'ar' ? 'ابدأ المحاكاة' : 'Start simulation', icon: <Play className="h-4 w-4" />, onClick: onConfirmStart };
+    if (primaryControl?.onClick) return { key: primaryControl.key, label: primaryControl.label, description: primaryControl.description, disabled: primaryControl.disabled, busy: primaryControl.busy, tone: primaryControl.tone === 'warning' ? 'warning' : primaryControl.tone === 'secondary' ? 'secondary' : 'primary', icon: primaryControl.busy ? <Loader2 className="h-4 w-4 animate-spin" /> : primaryControl.icon === 'retry' ? <RefreshCcw className="h-4 w-4" /> : primaryControl.icon === 'sparkles' ? <Sparkles className="h-4 w-4" /> : <Play className="h-4 w-4" />, onClick: primaryControl.onClick };
+    return null;
+  }, [canConfirmStart, inputValue, language, onConfirmStart, onRetryLlm, onSearchRetry, onSearchUseLlm, onSendMessage, primaryControl, searchState?.status, showRetry]);
+
+  const secondaryActions = useMemo<ComposerAction[]>(() => {
+    if (searchState?.status === 'timeout' && onSearchRetry) {
+      const actions: ComposerAction[] = [{ key: 'retry-direct', label: language === 'ar' ? 'إعادة البحث' : 'Retry search', icon: <RefreshCcw className="h-4 w-4" />, onClick: () => { onSearchRetry(); setMenuOpen(false); } }];
+      if (onSearchUseLlm) actions.push({ key: 'fallback-llm', label: language === 'ar' ? 'استخدام النموذج البديل' : 'Use LLM fallback', tone: 'warning', icon: <Wand2 className="h-4 w-4" />, onClick: () => { onSearchUseLlm(); setMenuOpen(false); } });
+      return actions;
     }
-    if (simulationError) return simulationError;
-    return settings.language === 'ar' ? 'كل التحديثات المؤقتة تظهر داخل المحادثة' : 'Transient updates appear inside the thread';
-  }, [
-    busyElapsedLabel,
-    busyTimeoutContextLabel,
-    phaseLabel,
-    phaseState?.progressPct,
-    researchTimeoutLabel,
-    settings.language,
-    showBusyStageBar,
-    showLiveResearchCard,
-    simulationError,
-  ]);
+    if (primaryControl?.secondary?.onClick) return [{ key: `${primaryControl.key}-secondary`, label: primaryControl.secondary.label, disabled: primaryControl.secondary.disabled, icon: <RefreshCcw className="h-4 w-4" />, onClick: () => { primaryControl.secondary?.onClick?.(); setMenuOpen(false); } }];
+    return [];
+  }, [language, onSearchRetry, onSearchUseLlm, primaryControl, searchState?.status]);
 
-  const handleThinkingClick = () => {
-    setThinkingOpen((p) => !p);
-  };
+  const submitClarification = useCallback(() => {
+    if (!pendingClarification || !onSubmitClarification) return;
+    const text = clarificationText.trim();
+    if (!clarificationChoice && !text) return;
+    onSubmitClarification({ questionId: pendingClarification.questionId, selectedOptionId: clarificationChoice || undefined, customText: text || undefined });
+  }, [clarificationChoice, clarificationText, onSubmitClarification, pendingClarification]);
 
-  const canSubmitClarification = useMemo(() => {
-    if (!hasPendingClarification || !pendingClarification) return false;
-    const hasCustomText = clarificationInput.trim().length > 0;
-    return hasCustomText || Boolean(selectedClarificationOption);
-  }, [clarificationInput, hasPendingClarification, pendingClarification, selectedClarificationOption]);
-
-  const canSubmitPreflight = useMemo(() => {
-    if (!hasPendingPreflight || !pendingPreflightQuestion) return false;
-    const hasCustomText = preflightInput.trim().length > 0;
-    return hasCustomText || Boolean(selectedPreflightOption);
-  }, [hasPendingPreflight, pendingPreflightQuestion, preflightInput, selectedPreflightOption]);
-
-  const handleSubmitPreflight = useCallback(() => {
-    if (!hasPendingPreflight || !pendingPreflightQuestion || !onSubmitPreflight) return;
-    const customText = preflightInput.trim();
-    onSubmitPreflight({
-      questionId: pendingPreflightQuestion.questionId,
-      selectedOptionId: customText ? undefined : (selectedPreflightOption || undefined),
-      customText: customText || undefined,
-    });
-  }, [
-    hasPendingPreflight,
-    onSubmitPreflight,
-    pendingPreflightQuestion,
-    preflightInput,
-    selectedPreflightOption,
-  ]);
-
-  const handleSubmitClarification = useCallback(() => {
-    if (!hasPendingClarification || !pendingClarification || !onSubmitClarification) return;
-    const customText = clarificationInput.trim();
-    onSubmitClarification({
-      questionId: pendingClarification.questionId,
-      selectedOptionId: customText ? undefined : (selectedClarificationOption || undefined),
-      customText: customText || undefined,
-    });
-  }, [
-    clarificationInput,
-    hasPendingClarification,
-    onSubmitClarification,
-    pendingClarification,
-    selectedClarificationOption,
-  ]);
-
-  useEffect(() => {
-    if (!hasPendingResearchReview || !pendingResearchReview) {
-      setSelectedResearchUrlIds([]);
-      setAddedResearchUrlsInput('');
-      setResearchRefinementInput('');
-      setResearchActionMode('scrape_selected');
-      setShowAdvancedResearchActions(false);
-      setResearchActionStatusLine('');
-      setBrokenFaviconMap({});
-      return;
-    }
-    const defaults = pendingResearchReview.candidateUrls.slice(0, 2).map((item) => item.id);
-    const initialPreview =
-      pendingResearchReview.candidateUrls
-        .map((item) => toSafeHttpUrl(item.url))
-        .find((item): item is string => Boolean(item))
-      || '';
-    setSelectedResearchUrlIds(defaults);
-    setPreviewUrl(initialPreview);
-    setResearchActionMode('scrape_selected');
-    setShowAdvancedResearchActions(false);
-    setResearchActionStatusLine('');
-    setBrokenFaviconMap({});
-  }, [hasPendingResearchReview, pendingResearchReview, toSafeHttpUrl]);
-
-  const parsedAddedUrls = useMemo(
-    () => addedResearchUrlsInput
-      .split(/\n|,/g)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .slice(0, 8),
-    [addedResearchUrlsInput]
-  );
-
-  const toggleResearchUrlSelection = useCallback((id: string) => {
-    setSelectedResearchUrlIds((prev) => {
-      if (prev.includes(id)) return prev.filter((item) => item !== id);
-      return [...prev, id];
-    });
-  }, []);
-
-  const handleScrapeSelected = useCallback(() => {
-    if (!hasPendingResearchReview || !pendingResearchReview || !onSubmitResearchReviewAction) return;
-    setResearchActionStatusLine(
-      settings.language === 'ar'
-        ? 'جاري تنفيذ: استخراج الروابط المحددة...'
-        : 'Applying: scrape selected links...'
-    );
-    onSubmitResearchReviewAction({
-      cycleId: pendingResearchReview.cycleId,
-      action: 'scrape_selected',
-      selectedUrlIds: selectedResearchUrlIds,
-      addedUrls: parsedAddedUrls,
-      queryRefinement: researchRefinementInput.trim() || undefined,
-    });
-  }, [
-    hasPendingResearchReview,
-    onSubmitResearchReviewAction,
-    parsedAddedUrls,
-    pendingResearchReview,
-    researchRefinementInput,
-    selectedResearchUrlIds,
-    settings.language,
-  ]);
-
-  const handleContinueSearch = useCallback(() => {
-    if (!hasPendingResearchReview || !pendingResearchReview || !onSubmitResearchReviewAction) return;
-    setResearchActionStatusLine(
-      settings.language === 'ar'
-        ? 'جاري تنفيذ: متابعة البحث...'
-        : 'Applying: continue search...'
-    );
-    onSubmitResearchReviewAction({
-      cycleId: pendingResearchReview.cycleId,
-      action: 'continue_search',
-      queryRefinement: researchRefinementInput.trim() || undefined,
-    });
-  }, [
-    hasPendingResearchReview,
-    onSubmitResearchReviewAction,
-    pendingResearchReview,
-    researchRefinementInput,
-    settings.language,
-  ]);
-
-  const handleCancelReview = useCallback(() => {
-    if (!hasPendingResearchReview || !pendingResearchReview || !onSubmitResearchReviewAction) return;
-    setResearchActionStatusLine(
-      settings.language === 'ar'
-        ? 'جاري تنفيذ: إبقاء الإيقاف...'
-        : 'Applying: keep paused...'
-    );
-    onSubmitResearchReviewAction({
-      cycleId: pendingResearchReview.cycleId,
-      action: 'cancel_review',
-    });
-  }, [hasPendingResearchReview, onSubmitResearchReviewAction, pendingResearchReview, settings.language]);
-
-  const handleApplyResearchAction = useCallback(() => {
-    if (researchActionMode === 'continue_search') {
-      handleContinueSearch();
-      return;
-    }
-    if (researchActionMode === 'cancel_review') {
-      handleCancelReview();
-      return;
-    }
-    handleScrapeSelected();
-  }, [handleCancelReview, handleContinueSearch, handleScrapeSelected, researchActionMode]);
-
-  const previewFallbackText = useMemo(() => {
-    if (!previewUrl) return '';
-    const fromPending = pendingResearchReview?.candidateUrls.find((item) => item.url === previewUrl);
-    if (fromPending?.snippet) return decodeResearchSnippet(fromPending.snippet);
-    const fromTimeline = researchSourcesLive.find((item) => item.url === previewUrl);
-    return decodeResearchSnippet(fromTimeline?.snippet);
-  }, [decodeResearchSnippet, pendingResearchReview?.candidateUrls, previewUrl, researchSourcesLive]);
-  const safePreviewUrl = useMemo(() => toSafeHttpUrl(previewUrl), [previewUrl, toSafeHttpUrl]);
+  const submitPreflight = useCallback(() => {
+    if (!pendingPreflightQuestion || !onSubmitPreflight) return;
+    const text = preflightText.trim();
+    if (!preflightChoice && !text) return;
+    onSubmitPreflight({ questionId: pendingPreflightQuestion.questionId, selectedOptionId: preflightChoice || undefined, customText: text || undefined });
+  }, [onSubmitPreflight, pendingPreflightQuestion, preflightChoice, preflightText]);
 
   return (
-    <div className="glass-panel chat-shell flex h-full min-h-0 flex-col overflow-hidden">
-      <ChatTopProgress
-        steps={progressSteps}
-        headline={progressHeadline}
-        detail={progressDetail}
-      />
-      {/* -------------------- MESSAGE LIST -------------------- */}
-      <div
-        className="messages-container scrollbar-thin overflow-x-hidden chat-thread"
-        ref={scrollRef}
-        data-testid={isReasoningView ? 'reasoning-messages' : 'chat-messages'}
-        onScroll={() => {
-          const el = scrollRef.current;
-          if (!el) return;
-          const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-          setIsNearBottom(distance < 120);
-        }}
-      >
-        {!isReasoningView ? (
-          <div className="space-y-3">
-            {/* Empty state */}
-            {messages.length === 0 ? (
-              <div className="text-center py-8">
-                <Sparkles className="w-10 h-10 mx-auto text-primary/40 mb-3" />
-                <h3 className="text-base font-semibold text-foreground mb-2">
-                  {settings.language === 'ar' ? 'ابدأ المحاكاة' : 'Start Your Simulation'}
-                </h3>
-                <p className="text-sm text-muted-foreground max-w-[260px] mx-auto">
-                  {settings.language === 'ar'
-                    ? 'اكتب فكرتك وسيقودك النظام لإكمال الإعدادات'
-                    : 'Describe your idea and the system will guide you through the configuration'}
-                </p>
-              </div>
-            ) : (
-              /* ------------ LIST OF CHAT MESSAGES ------------ */
-              messages.map((msg, idx) => (
-                <div
-                  key={msg.id || `msg-${idx}`}
-                  className={cn(
-                    'message message-compact',
-                    msg.type === 'user' ? 'user' : 'bot'
-                  )}
-                >
-                  {/* Simple text bubbles */}
-                  {!msg.options && (
-                    <div className="bubble bubble-compact">
-                      <ReadMoreText
-                        text={msg.content}
-                        collapsedLines={6}
-                        language={settings.language}
-                        expanded={Boolean(expandedTextMap[`chat-${msg.id}`])}
-                        onToggleExpanded={() => toggleExpandedText(`chat-${msg.id}`)}
-                      />
-                    </div>
-                  )}
+    <div className="flex h-full min-h-0 flex-col" dir="rtl">
+      <div className="border-b border-border/45 px-5 pb-4 pt-5">
+        <ChatTopProgress steps={progressSteps} headline={topHeadline} detail={topDetail} />
+      </div>
 
-                  {/* Poll / multi-select messages */}
-                  {msg.options && msg.options.items.length > 0 && !hiddenOptionIds.has(msg.id) && (
-                    <div
-                      className={
-                        msg.options.kind === 'single' ? 'poll-card' : 'multi-select-card'
-                      }
-                    >
-                      <p className="text-sm text-muted-foreground">{msg.content}</p>
-                      <div
-                        className={
-                          msg.options.kind === 'single' ? 'poll-options' : 'multi-options'
-                        }
-                      >
-                        {msg.options.items.map((opt, idx) => (
-                          <button
-                            key={`${msg.options?.field}-${opt.value}`}
-                            type="button"
-                            className={msg.options.kind === 'single' ? 'poll-option' : 'multi-option'}
-                            style={{ animationDelay: `${80 + idx * 45}ms` }}
-                            onClick={() =>
-                              (onSelectOption?.(msg.options!.field, opt.value), scheduleHideOptions(msg.id))
-                            }
-                          >
-                            <span className="option-label">{opt.label}</span>
-                            {opt.description && (
-                              <span className="option-desc">{opt.description}</span>
-                            )}
+      <div ref={listRef} className="flex-1 space-y-5 overflow-y-auto px-5 py-5 scrollbar-thin">
+        {(researchSourcesLive.length || searchState?.status !== 'idle') ? (
+          <SearchLivePanel language={language} searchState={searchState} events={researchSourcesLive} />
+        ) : null}
+
+        {!isReasoningView && (reasoningActive || reasoningFeed.length > 1) ? (
+          <section className="rounded-[30px] border border-primary/25 bg-primary/10 p-5">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-base font-semibold text-foreground">الوكلاء بدأوا يتناقشون الآن</h3>
+                <p className="mt-1 text-sm text-muted-foreground">{language === 'ar' ? 'افتح شاشة النقاش لرؤية الحوار الجماعي.' : 'Open the reasoning view to watch the group discussion.'}</p>
+              </div>
+              {onRequestReasoningView ? <Button type="button" onClick={onRequestReasoningView} className="rounded-2xl">مشاهدة النقاش</Button> : null}
+            </div>
+          </section>
+        ) : null}
+
+        {isReasoningView ? (
+          <ReasoningBoard language={language} messages={reasoningFeed} highlightIds={highlightReasoningMessageIds} />
+        ) : (
+          <>
+            {messages.map((message) => {
+              const isUser = message.type === 'user';
+              return (
+                <div key={message.id} className={cn('flex w-full', isUser ? 'justify-start md:justify-end' : 'justify-start')}>
+                  <div className={cn('w-full max-w-[98%] rounded-[28px] border px-5 py-4 md:max-w-[92%]', isUser ? 'border-primary/25 bg-primary/12' : message.type === 'agent' ? 'border-emerald-400/25 bg-emerald-500/10' : 'border-border/60 bg-background/65')}>
+                    <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
+                      <div className={cn('flex h-8 w-8 items-center justify-center rounded-2xl border', isUser ? 'border-primary/30 bg-primary/10 text-primary' : 'border-border/55 bg-card/80 text-foreground')}>
+                        {isUser ? <span className="text-sm font-semibold">أنت</span> : <Bot className="h-4 w-4" />}
+                      </div>
+                      <span className="font-medium text-foreground/90">{isUser ? (language === 'ar' ? 'أنت' : 'You') : message.type === 'agent' ? (message.agentId || 'Agent') : (language === 'ar' ? 'المساعد' : 'Assistant')}</span>
+                    </div>
+                    <p className="whitespace-pre-wrap text-[15px] leading-8 text-foreground">{message.content}</p>
+                    {message.options?.items?.length ? (
+                      <div className={cn('mt-4 gap-3', yesNoChoice(message.options.items) ? 'grid grid-cols-2' : 'grid grid-cols-1')}>
+                        {message.options.items.map((item) => (
+                          <button key={`${message.id}-${item.value}`} type="button" onClick={() => onSelectOption?.(message.options!.field, item.value)} className="rounded-[22px] border border-border/60 bg-card/75 px-4 py-3.5 text-start transition hover:border-primary/35 hover:bg-primary/8">
+                            <div className="text-sm font-semibold leading-7 text-foreground">{yesNoChoice(message.options.items) ? (item.value.toLowerCase() === 'yes' ? (language === 'ar' ? 'نعم' : 'Yes') : (language === 'ar' ? 'لا' : 'No')) : item.label}</div>
+                            {item.description ? <div className="mt-1 text-xs leading-6 text-muted-foreground">{item.description}</div> : null}
                           </button>
                         ))}
                       </div>
-                    </div>
-                  )}
+                    ) : null}
+                  </div>
                 </div>
-              ))
-            )}
+              );
+            })}
 
-            {/* Inline thinking / searching row */}
-            {showInlineDisclosure && (
-              <InlineDisclosure
-                label={thinkingLabel}
-                steps={visibleThinkingStep}
-                open={thinkingOpen}
-                onToggle={() => setThinkingOpen((p) => !p)}
-                onClickLabel={handleThinkingClick}
-                language={settings.language}
-              />
-            )}
+            {isThinking ? <div className="inline-flex items-center gap-2 rounded-full border border-border/55 bg-card/80 px-4 py-2.5 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /><span>{language === 'ar' ? 'المساعد يكتب الآن...' : 'Assistant is responding...'}</span></div> : null}
+            {simulationError ? <div className="rounded-[26px] border border-destructive/30 bg-destructive/10 px-5 py-4 text-sm text-foreground"><div className="mb-1 flex items-center gap-2 font-semibold text-destructive"><TriangleAlert className="h-4 w-4" /><span>{language === 'ar' ? 'حدث خطأ أثناء التنفيذ' : 'Execution error'}</span></div>{simulationError}</div> : null}
 
-            {(phaseState?.currentPhaseKey || showLiveResearchCard) && (
-              <div className="chat-ephemeral-card chat-research-activity rounded-lg border border-border/50 bg-card/70 p-3 space-y-2">
-                {phaseState?.currentPhaseKey && (
-                  <div className="text-xs text-muted-foreground">
-                    {settings.language === 'ar' ? 'المرحلة الحالية:' : 'Current phase:'}{' '}
-                    <span className="text-foreground font-medium">{phaseLabel || phaseFallbackLabel}</span>
-                    {typeof phaseState.progressPct === 'number' && (
-                      <span className="ml-2 text-primary">{Math.round(phaseState.progressPct)}%</span>
-                    )}
-                  </div>
-                )}
-                {showLiveResearchCard && (
-                  <div className="space-y-1.5">
-                    <div className="text-xs text-muted-foreground">
-                      {settings.language === 'ar' ? 'مصادر البحث المباشرة' : 'Live research sources'}
-                    </div>
-                    {activeResearchStartedAt && (
-                      <div className="rounded-md border border-primary/30 bg-primary/10 px-2 py-2 space-y-1">
-                        <div className="text-[11px] text-primary inline-flex items-center gap-1.5">
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                          {researchTimeoutLabel}
-                        </div>
-                        <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
-                          <div
-                            className="h-full bg-primary transition-all duration-700"
-                            style={{ width: `${researchTimeoutProgressPct}%` }}
-                          />
-                        </div>
-                      </div>
-                    )}
-                    {recentResearchSources.length === 0 && activeResearchStartedAt && (
-                      <div className="text-[11px] text-muted-foreground">
-                        {settings.language === 'ar' ? 'جاري جمع أولى المصادر...' : 'Collecting first sources...'}
-                      </div>
-                    )}
-                    {(() => {
-                      const actionAr: Record<string, string> = {
-                        research_started: 'بدء البحث',
-                        query_planned: 'تخطيط الاستعلام',
-                        search_results_ready: 'نتائج البحث جاهزة',
-                        review_required: 'مطلوب مراجعة',
-                        fetch_started: 'بدء الاستخراج',
-                        fetch_done: 'اكتمل جلب الصفحة',
-                        summary_ready: 'ملخص الصفحة',
-                        evidence_cards_ready: 'بطاقات الأدلة',
-                        gaps_ready: 'تحليل الفجوات',
-                        research_done: 'اكتمل البحث',
-                        research_failed: 'فشل البحث',
-                        query_started: 'بدء الاستعلام',
-                        query_result: 'نتيجة الاستعلام',
-                        url_opened: 'فتح الرابط',
-                        url_extracted: 'استخراج المحتوى',
-                        url_failed: 'فشل الاستخراج',
-                        search_completed: 'اكتمل البحث',
-                        search_failed: 'فشل البحث',
-                      };
-                      const actionEn: Record<string, string> = {
-                        research_started: 'Research started',
-                        query_planned: 'Query planned',
-                        search_results_ready: 'Search results ready',
-                        review_required: 'Review required',
-                        fetch_started: 'Fetch started',
-                        fetch_done: 'Fetch completed',
-                        summary_ready: 'Page summary ready',
-                        evidence_cards_ready: 'Evidence cards ready',
-                        gaps_ready: 'Gap analysis ready',
-                        research_done: 'Research done',
-                        research_failed: 'Research failed',
-                        query_started: 'Query started',
-                        query_result: 'Query result',
-                        url_opened: 'URL opened',
-                        url_extracted: 'Content extracted',
-                        url_failed: 'Extraction failed',
-                        search_completed: 'Search completed',
-                        search_failed: 'Search failed',
-                      };
-                      const statusAr: Record<string, string> = {
-                        running: 'جاري',
-                        completed: 'ظ…ظƒطھظ…ظ„',
-                        failed: 'فشل',
-                      };
-                      const statusEn: Record<string, string> = {
-                        running: 'Running',
-                        completed: 'Completed',
-                        failed: 'Failed',
-                      };
-                      return recentResearchSources.map((item, idx) => (
-                        (() => {
-                          const nowTs = researchClockMs || Date.now();
-                          const rawStatus = String(item.status || '').trim().toLowerCase();
-                          const isStaleRunning = (
-                            rawStatus === 'running'
-                            && simulationStatus !== 'running'
-                            && typeof item.timestamp === 'number'
-                            && (nowTs - item.timestamp) > 12000
-                          );
-                          const displayStatus = isStaleRunning ? 'failed' : rawStatus;
-                          const displayError = isStaleRunning
-                            ? (settings.language === 'ar'
-                              ? 'انتهت مهلة الخطوة أو انقطعت الجلسة. تم تحديث الحالة تلقائيًا.'
-                              : 'Step timed out or session changed. State was refreshed automatically.')
-                            : item.error;
-                          return (
-                        <div
-                          key={`${item.eventSeq ?? 'x'}-${item.timestamp ?? 0}-${item.url ?? ''}-${item.action ?? ''}`}
-                          className={cn(
-                            'search-trace-card rounded-lg border border-border/40 px-2.5 py-2 text-xs space-y-1.5 transition-all',
-                            displayStatus === 'running' && 'bg-primary/5 border-primary/30 animate-pulse'
-                          )}
-                          style={{ animationDelay: `${Math.min(idx * 70, 350)}ms` }}
-                        >
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0 flex items-start gap-2">
-                              {(() => {
-                                const iconKey = `${item.eventSeq ?? 'x'}-${item.domain ?? item.url ?? ''}`;
-                                const faviconSrc = getFavicon(item);
-                                if (!faviconSrc || brokenFaviconMap[iconKey]) {
-                                  return (
-                                    <span className="w-5 h-5 rounded-sm border border-border/40 bg-card flex items-center justify-center mt-0.5">
-                                      <Globe className="w-3 h-3 text-muted-foreground" />
-                                    </span>
-                                  );
-                                }
-                                return (
-                                  <img
-                                    src={faviconSrc}
-                                    alt=""
-                                    className="w-5 h-5 rounded-sm mt-0.5 border border-border/40 bg-card"
-                                    loading="lazy"
-                                    onError={() => {
-                                      setBrokenFaviconMap((prev) => ({ ...prev, [iconKey]: true }));
-                                    }}
-                                  />
-                                );
-                              })()}
-                              <div className="min-w-0">
-                                <div className="text-foreground truncate font-medium inline-flex items-center gap-1.5">
-                                  {displayStatus === 'running' && (
-                                    <Loader2 className="w-3 h-3 animate-spin text-primary shrink-0" />
-                                  )}
-                                  {settings.language === 'ar'
-                                    ? (actionAr[item.action || ''] || item.action || 'حدث بحث')
-                                    : (actionEn[item.action || ''] || item.action || 'Research event')}
-                                </div>
-                                {(item.domain || item.url) && (
-                                  <div className="text-muted-foreground truncate">
-                                    {item.domain || item.url}
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                            <span className="text-[10px] px-2 py-0.5 rounded-full border border-border/50 text-muted-foreground whitespace-nowrap inline-flex items-center gap-1">
-                              {displayStatus === 'running' && <Loader2 className="w-2.5 h-2.5 animate-spin" />}
-                              {settings.language === 'ar'
-                                ? (statusAr[displayStatus] || displayStatus || '')
-                                : (statusEn[displayStatus] || displayStatus || '')}
-                            </span>
-                          </div>
-                          {item.title && (
-                            <div className="text-foreground/90 line-clamp-1">{item.title}</div>
-                          )}
-                          {(item.snippet || displayError) && (
-                            <div className="text-muted-foreground line-clamp-2">
-                              {displayError ? formatResearchError(displayError) : decodeResearchSnippet(item.snippet)}
-                            </div>
-                          )}
-                          <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-                            {typeof item.httpStatus === 'number' && <span>HTTP {item.httpStatus}</span>}
-                            {typeof item.contentChars === 'number' && <span>{item.contentChars} ch</span>}
-                            {typeof item.relevanceScore === 'number' && <span>rel {item.relevanceScore.toFixed(2)}</span>}
-                          </div>
-                          {displayStatus === 'running' && typeof item.progressPct === 'number' && (
-                            <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
-                              <div
-                                className="h-full bg-primary transition-all duration-500"
-                                style={{ width: `${Math.max(0, Math.min(100, item.progressPct))}%` }}
-                              />
-                            </div>
-                          )}
-                        </div>
-                          );
-                        })()
-                      ));
-                    })()}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {hasPendingResearchReview && pendingResearchReview && (
-              <div className="chat-ephemeral-card rounded-xl border border-cyan-400/30 bg-cyan-500/10 p-3 space-y-3">
-                <div className="text-sm font-semibold text-cyan-100">
-                  {settings.language === 'ar'
-                    ? 'مراجعة نتائج البحث قبل المتابعة'
-                    : 'Review search results before continuing'}
+            {pendingIdeaConfirmation ? (
+              <section className="rounded-[30px] border border-emerald-400/30 bg-emerald-500/10 p-5">
+                <h3 className="text-base font-semibold text-foreground">{language === 'ar' ? 'هل هذا هو الوصف النهائي للفكرة؟' : 'Is this the final idea framing?'}</h3>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-foreground/90">{pendingIdeaConfirmation.description}</p>
+                <div className="mt-4 grid grid-cols-2 gap-2">
+                  <Button type="button" onClick={onConfirmIdeaForStart} className="rounded-2xl"><Check className="h-4 w-4" /><span>{language === 'ar' ? 'نعم، ابدأ' : 'Yes, start'}</span></Button>
+                  <Button type="button" variant="outline" onClick={() => inputRef.current?.focus()} className="rounded-2xl"><X className="h-4 w-4" /><span>{language === 'ar' ? 'لا، سأعدل' : 'No, I will edit'}</span></Button>
                 </div>
-                {pendingResearchReview.gapSummary && (
-                  <div className="text-xs text-cyan-100/80">{pendingResearchReview.gapSummary}</div>
-                )}
-                {pendingResearchReview.queryPlan?.length > 0 && (
-                  <div className="text-xs text-cyan-100/80">
-                    {settings.language === 'ar' ? 'خطة الاستعلام:' : 'Query plan:'}{' '}
-                    {pendingResearchReview.queryPlan.slice(0, 3).join(' | ')}
-                  </div>
-                )}
+              </section>
+            ) : null}
 
-                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+            {canAnswerClarification && pendingClarification ? <PromptCard title={language === 'ar' ? 'الوكلاء يحتاجون توضيحًا' : 'Agents need clarification'} description={pendingClarification.question} options={pendingClarification.options} selected={clarificationChoice} onSelect={setClarificationChoice} text={clarificationText} onText={setClarificationText} busy={clarificationBusy} submitLabel={language === 'ar' ? 'إرسال التوضيح' : 'Send clarification'} onSubmit={submitClarification} /> : null}
+            {pendingPreflightQuestion ? <PromptCard title={language === 'ar' ? `سؤال تمهيدي ${preflightRound}/${preflightMaxRounds}` : `Preflight question ${preflightRound}/${preflightMaxRounds}`} description={pendingPreflightQuestion.question} options={pendingPreflightQuestion.options} selected={preflightChoice} onSelect={setPreflightChoice} text={preflightText} onText={setPreflightText} busy={preflightBusy} submitLabel={language === 'ar' ? 'تأكيد الإجابة' : 'Confirm answer'} onSubmit={submitPreflight} tone="warning" /> : null}
+
+            {pendingResearchReview ? (
+              <section className="rounded-[30px] border border-primary/30 bg-primary/8 p-5">
+                <h3 className="text-base font-semibold text-foreground">{language === 'ar' ? 'مراجعة نتائج البحث قبل المتابعة' : 'Review research before continuing'}</h3>
+                {pendingResearchReview.gapSummary ? <p className="mt-2 text-sm leading-7 text-muted-foreground">{pendingResearchReview.gapSummary}</p> : null}
+                <div className="mt-4 space-y-2">
                   {pendingResearchReview.candidateUrls.map((item) => {
-                    const checked = selectedResearchUrlIds.includes(item.id);
+                    const selected = reviewSelectedIds.includes(item.id);
                     return (
-                      <label
-                        key={item.id}
-                        className={cn(
-                          'flex items-start gap-2 rounded-lg border px-2 py-2 cursor-pointer transition',
-                          checked ? 'border-primary/40 bg-primary/10' : 'border-border/50 bg-card/60 hover:border-primary/30'
-                        )}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => toggleResearchUrlSelection(item.id)}
-                          disabled={researchReviewBusy}
-                          className="mt-0.5"
-                        />
-                        <button
-                          type="button"
-                          className="min-w-0 flex-1 text-start"
-                          onClick={() => setPreviewUrl(toSafeHttpUrl(item.url) || '')}
-                        >
-                          <div className="text-xs text-foreground truncate">{item.title || item.url}</div>
-                          <div className="text-[11px] text-muted-foreground truncate">{item.domain || item.url}</div>
-                        </button>
-                      </label>
+                      <button key={item.id} type="button" onClick={() => setReviewSelectedIds((prev) => prev.includes(item.id) ? prev.filter((entry) => entry !== item.id) : [...prev, item.id])} className={cn('w-full rounded-2xl border px-4 py-3 text-start transition', selected ? 'border-primary/40 bg-primary/10' : 'border-border/60 bg-background/55')}>
+                        <div className="text-sm font-semibold text-foreground">{item.title || item.domain || item.url}</div>
+                        <div className="mt-1 text-xs text-muted-foreground" dir="ltr">{item.url}</div>
+                      </button>
                     );
                   })}
                 </div>
-
-                <Input
-                  value={addedResearchUrlsInput}
-                  onChange={(event) => setAddedResearchUrlsInput(event.target.value)}
-                  dir="ltr"
-                  placeholder={settings.language === 'ar' ? 'أضف روابط إضافية (كل رابط في سطر)' : 'Add custom URLs (one per line)'}
-                  disabled={researchReviewBusy}
-                />
-                <Input
-                  value={researchRefinementInput}
-                  onChange={(event) => setResearchRefinementInput(event.target.value)}
-                  dir={settings.language === 'ar' ? 'rtl' : 'ltr'}
-                  placeholder={settings.language === 'ar' ? 'تحسين الاستعلام (اختياري)' : 'Query refinement (optional)'}
-                  disabled={researchReviewBusy}
-                />
-
-                <div className="space-y-2">
-                  <Button
-                    type="button"
-                    onClick={handleApplyResearchAction}
-                    disabled={
-                      researchReviewBusy
-                      || (
-                        researchActionMode === 'scrape_selected'
-                        && (!selectedResearchUrlIds.length && !parsedAddedUrls.length)
-                      )
-                    }
-                    className="w-full"
-                  >
-                    {researchReviewBusy
-                      ? (settings.language === 'ar' ? 'جاري التنفيذ...' : 'Applying...')
-                      : researchActionMode === 'continue_search'
-                      ? (settings.language === 'ar' ? 'متابعة البحث' : 'Continue search')
-                      : researchActionMode === 'cancel_review'
-                      ? (settings.language === 'ar' ? 'إبقاء الإيقاف' : 'Keep paused')
-                      : (settings.language === 'ar' ? 'استخراج المحدد' : 'Scrape selected')}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => setShowAdvancedResearchActions((prev) => !prev)}
-                    disabled={researchReviewBusy}
-                    className="w-full"
-                  >
-                    {showAdvancedResearchActions
-                      ? (settings.language === 'ar' ? 'إخفاء الخيارات المتقدمة' : 'Hide advanced actions')
-                      : (settings.language === 'ar' ? 'خيارات متقدمة' : 'Advanced actions')}
-                  </Button>
-                  {showAdvancedResearchActions && (
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                      <Button
-                        type="button"
-                        variant={researchActionMode === 'scrape_selected' ? 'default' : 'secondary'}
-                        onClick={() => setResearchActionMode('scrape_selected')}
-                        disabled={researchReviewBusy}
-                        className="w-full"
-                      >
-                        {settings.language === 'ar' ? 'استخراج المحدد' : 'Scrape selected'}
-                      </Button>
-                      <Button
-                        type="button"
-                        variant={researchActionMode === 'continue_search' ? 'default' : 'secondary'}
-                        onClick={() => setResearchActionMode('continue_search')}
-                        disabled={researchReviewBusy}
-                        className="w-full"
-                      >
-                        {settings.language === 'ar' ? 'متابعة البحث' : 'Continue search'}
-                      </Button>
-                      <Button
-                        type="button"
-                        variant={researchActionMode === 'cancel_review' ? 'default' : 'outline'}
-                        onClick={() => setResearchActionMode('cancel_review')}
-                        disabled={researchReviewBusy}
-                        className="w-full"
-                      >
-                        {settings.language === 'ar' ? 'إبقاء الإيقاف' : 'Keep paused'}
-                      </Button>
-                    </div>
-                  )}
-                  {researchActionStatusLine && (
-                    <div className="text-[11px] text-cyan-100/80">{researchActionStatusLine}</div>
-                  )}
+                <Input value={reviewQueryRefinement} onChange={(event) => setReviewQueryRefinement(event.target.value)} className="mt-3 h-12 rounded-2xl border-border/60 bg-background/65 text-base" placeholder={language === 'ar' ? 'تحسين إضافي للاستعلام' : 'Optional query refinement'} dir="rtl" />
+                <Input value={reviewExtraUrls} onChange={(event) => setReviewExtraUrls(event.target.value)} className="mt-3 h-12 rounded-2xl border-border/60 bg-background/65 text-base" placeholder={language === 'ar' ? 'ألصق روابط إضافية مفصولة بفاصلة' : 'Extra URLs separated by comma'} dir="ltr" />
+                <div className="mt-4 grid gap-2 sm:grid-cols-3">
+                  <Button type="button" disabled={researchReviewBusy || !reviewSelectedIds.length} onClick={() => onSubmitResearchReviewAction?.({ cycleId: pendingResearchReview.cycleId, action: 'scrape_selected', selectedUrlIds: reviewSelectedIds, addedUrls: reviewExtraUrls.split(',').map((item) => item.trim()).filter(Boolean), queryRefinement: reviewQueryRefinement.trim() || undefined })} className="rounded-2xl">{researchReviewBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}<span>{language === 'ar' ? 'استخراج المحدد' : 'Scrape selected'}</span></Button>
+                  <Button type="button" variant="outline" disabled={researchReviewBusy} onClick={() => onSubmitResearchReviewAction?.({ cycleId: pendingResearchReview.cycleId, action: 'continue_search', addedUrls: reviewExtraUrls.split(',').map((item) => item.trim()).filter(Boolean), queryRefinement: reviewQueryRefinement.trim() || undefined })} className="rounded-2xl"><RefreshCcw className="h-4 w-4" /><span>{language === 'ar' ? 'وسّع البحث' : 'Continue search'}</span></Button>
+                  <Button type="button" variant="ghost" disabled={researchReviewBusy} onClick={() => onSubmitResearchReviewAction?.({ cycleId: pendingResearchReview.cycleId, action: 'cancel_review' })} className="rounded-2xl"><X className="h-4 w-4" /><span>{language === 'ar' ? 'إلغاء' : 'Cancel'}</span></Button>
                 </div>
+              </section>
+            ) : null}
 
-                {previewUrl && (
-                  <div className="rounded-lg border border-border/50 bg-card/70 p-2 space-y-2">
-                    <div className="text-xs text-muted-foreground truncate">{previewUrl}</div>
-                    {safePreviewUrl ? (
-                      <div className="h-48 rounded-md overflow-hidden border border-border/40 bg-background/60">
-                        <iframe
-                          src={safePreviewUrl}
-                          title="page-preview"
-                          className="w-full h-full"
-                          loading="lazy"
-                          sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
-                          referrerPolicy="no-referrer"
-                        />
-                      </div>
-                    ) : (
-                      <div className="text-xs text-amber-300/90">
-                        {settings.language === 'ar'
-                          ? 'تعذر معاينة الرابط مباشرة. افتحه في تبويب جديد أو استخدم النص المستخرج.'
-                          : 'Unable to preview this URL directly. Open it in a new tab or use extracted text.'}
-                      </div>
-                    )}
-                    {previewFallbackText && (
-                      <div className="text-xs text-muted-foreground line-clamp-4">{previewFallbackText}</div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {statusLabel && !uiProgressActive && <div className="status-chip">{statusLabel}</div>}
-
-            {hasPendingPreflight && pendingPreflightQuestion && (
-              <div className="chat-ephemeral-card rounded-xl border border-cyan-400/30 bg-cyan-500/10 p-3 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-sm font-semibold text-cyan-100">
-                    {settings.language === 'ar'
-                      ? 'توضيح قبل بدء التنفيذ'
-                      : 'Clarification required before execution'}
-                  </div>
-                  <div className="text-[11px] rounded-full border border-cyan-300/35 bg-cyan-400/10 px-2 py-1 text-cyan-100/90">
-                    {settings.language === 'ar'
-                      ? `الجولة ${Math.max(1, preflightRound)}/${Math.max(1, preflightMaxRounds)}`
-                      : `Round ${Math.max(1, preflightRound)}/${Math.max(1, preflightMaxRounds)}`}
-                  </div>
-                </div>
-                <div className="text-sm text-foreground whitespace-pre-wrap">
-                  {pendingPreflightQuestion.question}
-                </div>
-                {pendingPreflightQuestion.reasonSummary && (
-                  <div className="text-xs text-cyan-100/80">
-                    {pendingPreflightQuestion.reasonSummary}
-                  </div>
-                )}
-                <div className="inline-flex items-center rounded-full border border-cyan-300/35 bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-100/90">
-                  {settings.language === 'ar' ? 'المحور:' : 'Axis:'}
-                  <span className="ms-1 font-semibold">{pendingPreflightQuestion.axis}</span>
-                </div>
-                {pendingPreflightQuestion.questionQuality?.score !== undefined && (
-                  <div className="text-[11px] text-cyan-100/70">
-                    {settings.language === 'ar'
-                      ? `جودة السؤال: ${Math.round(Number(pendingPreflightQuestion.questionQuality.score) || 0)}%`
-                      : `Question quality: ${Math.round(Number(pendingPreflightQuestion.questionQuality.score) || 0)}%`}
-                  </div>
-                )}
-
-                <div className="grid grid-cols-1 gap-2">
-                  {pendingPreflightQuestion.options.slice(0, 3).map((option) => (
-                    <button
-                      key={option.id}
-                      type="button"
-                      className={cn(
-                        'rounded-lg border px-3 py-2 text-sm text-start transition-all',
-                        selectedPreflightOption === option.id
-                          ? 'border-primary bg-primary/10 text-primary'
-                          : 'border-border/60 bg-card/70 text-foreground hover:border-primary/40'
-                      )}
-                      onClick={() => setSelectedPreflightOption(option.id)}
-                      disabled={preflightBusy}
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
-
-                <Input
-                  value={preflightInput}
-                  onChange={(event) => setPreflightInput(event.target.value)}
-                  dir={settings.language === 'ar' ? 'rtl' : 'ltr'}
-                  placeholder={
-                    settings.language === 'ar'
-                      ? 'أو اكتب توضيحك الخاص (له أولوية على الاختيارات)'
-                      : 'Or type your own clarification (overrides selected option)'
-                  }
-                  disabled={preflightBusy}
-                />
-
-                <Button
-                  type="button"
-                  className="w-full"
-                  onClick={handleSubmitPreflight}
-                  disabled={!canSubmitPreflight || preflightBusy}
-                >
-                  {preflightBusy
-                    ? (settings.language === 'ar' ? 'جاري إرسال التوضيح...' : 'Submitting clarification...')
-                    : (settings.language === 'ar' ? 'إرسال التوضيح للمتابعة' : 'Submit clarification to continue')}
-                </Button>
-              </div>
-            )}
-
-            {!hasPendingPreflight && hasPendingIdeaConfirmation && pendingIdeaConfirmation && (
-              <div className="chat-ephemeral-card rounded-xl border border-emerald-400/30 bg-emerald-500/10 p-3 space-y-3">
-                <div className="text-sm font-semibold text-emerald-100">
-                  {settings.language === 'ar'
-                    ? 'الوصف المقترح لفكرتك قبل البدء'
-                    : 'Proposed idea description before execution'}
-                </div>
-                <ReadMoreText
-                  text={pendingIdeaConfirmation.description}
-                  collapsedLines={5}
-                  language={settings.language}
-                  expanded={Boolean(expandedTextMap['preflight-idea-confirm'])}
-                  onToggleExpanded={() => toggleExpandedText('preflight-idea-confirm')}
-                  className="text-sm text-foreground"
-                />
-                {pendingIdeaConfirmation.summary && (
-                  <details className="rounded-lg border border-emerald-300/25 bg-emerald-500/5 p-2">
-                    <summary className="cursor-pointer text-xs text-emerald-100/85">
-                      {settings.language === 'ar' ? 'تفاصيل التوضيح' : 'Clarification details'}
-                    </summary>
-                    <div className="mt-2 text-xs text-emerald-100/75 whitespace-pre-wrap">
-                      {pendingIdeaConfirmation.summary}
-                    </div>
-                  </details>
-                )}
-                {typeof pendingIdeaConfirmation.clarityScore === 'number' && (
-                  <div className="text-[11px] text-emerald-100/75">
-                    {settings.language === 'ar'
-                      ? `مؤشر الوضوح: ${Math.round(pendingIdeaConfirmation.clarityScore * 100)}%`
-                      : `Clarity score: ${Math.round(pendingIdeaConfirmation.clarityScore * 100)}%`}
-                  </div>
-                )}
-                <Button
-                  type="button"
-                  className="w-full bg-emerald-500/80 hover:bg-emerald-500 text-white"
-                  onClick={onConfirmIdeaForStart}
-                  disabled={preflightBusy || !onConfirmIdeaForStart}
-                >
-                  <Check className="w-4 h-4 mr-1" />
-                  {settings.language === 'ar'
-                    ? 'تأكيد الوصف وبدء التنفيذ'
-                    : 'Confirm description and start execution'}
-                </Button>
-              </div>
-            )}
-
-            {hasPendingClarification && pendingClarification && (
-              <div className="chat-ephemeral-card rounded-xl border border-cyan-400/30 bg-cyan-500/10 p-3 space-y-3">
-                <div className="text-sm font-semibold text-cyan-100">
-                  {settings.language === 'ar'
-                    ? 'الوكلاء محتاجين توضيح قبل استكمال التفكير'
-                    : 'Agents need clarification before reasoning can continue'}
-                </div>
-                <div className="text-sm text-foreground whitespace-pre-wrap">
-                  {pendingClarification.question}
-                </div>
-                {pendingClarification.reasonSummary && (
-                  <div className="text-xs text-cyan-100/80">
-                    {pendingClarification.reasonSummary}
-                  </div>
-                )}
-                {pendingClarification.decisionAxis && (
-                  <div className="inline-flex items-center rounded-full border border-cyan-300/35 bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-100/90">
-                    {settings.language === 'ar' ? 'محور القرار:' : 'Decision axis:'}
-                    <span className="ms-1 font-semibold">{pendingClarification.decisionAxis}</span>
-                  </div>
-                )}
-                {pendingClarification.affectedAgents && pendingClarification.affectedAgents.totalWindow > 0 && (
-                  <div className="text-xs text-cyan-100/75">
-                    {settings.language === 'ar'
-                      ? `متأثرون في نافذة القرار: رفض ${pendingClarification.affectedAgents.reject}، حياد ${pendingClarification.affectedAgents.neutral} من ${pendingClarification.affectedAgents.totalWindow}`
-                      : `Affected in decision window: reject ${pendingClarification.affectedAgents.reject}, neutral ${pendingClarification.affectedAgents.neutral} of ${pendingClarification.affectedAgents.totalWindow}`}
-                  </div>
-                )}
-                {pendingClarification.supportingSnippets && pendingClarification.supportingSnippets.length > 0 && (
-                  <details className="rounded-lg border border-cyan-300/25 bg-cyan-500/5 p-2">
-                    <summary className="cursor-pointer text-xs text-cyan-100/85">
-                      {settings.language === 'ar' ? 'مقتطفات داعمة' : 'Supporting snippets'}
-                    </summary>
-                    <div className="mt-2 space-y-2 text-xs text-cyan-100/80">
-                      {pendingClarification.supportingSnippets.slice(0, 3).map((snippet, idx) => (
-                        <div key={`${pendingClarification.questionId}-snippet-${idx}`} className="leading-relaxed">
-                          â€¢ {snippet}
-                        </div>
-                      ))}
-                    </div>
-                  </details>
-                )}
-                {pendingClarification.questionQuality && (
-                  <div className="text-[11px] text-cyan-100/70">
-                    {settings.language === 'ar'
-                      ? `جودة السؤال: ${Math.round(pendingClarification.questionQuality.score)}%`
-                      : `Question quality: ${Math.round(pendingClarification.questionQuality.score)}%`}
-                  </div>
-                )}
-
-                <div className="grid grid-cols-1 gap-2">
-                  {pendingClarification.options.slice(0, 3).map((option) => (
-                    <button
-                      key={option.id}
-                      type="button"
-                      className={cn(
-                        'rounded-lg border px-3 py-2 text-sm text-start transition-all',
-                        selectedClarificationOption === option.id
-                          ? 'border-primary bg-primary/10 text-primary'
-                          : 'border-border/60 bg-card/70 text-foreground hover:border-primary/40'
-                      )}
-                      onClick={() => setSelectedClarificationOption(option.id)}
-                      disabled={clarificationBusy}
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
-
-                <Input
-                  value={clarificationInput}
-                  onChange={(event) => setClarificationInput(event.target.value)}
-                  dir={settings.language === 'ar' ? 'rtl' : 'ltr'}
-                  placeholder={
-                    settings.language === 'ar'
-                      ? 'أو اكتب توضيحك الخاص (له أولوية على الاختيارات)'
-                      : 'Or type your own clarification (overrides selected option)'
-                  }
-                  disabled={clarificationBusy}
-                />
-
-                <Button
-                  type="button"
-                  className="w-full"
-                  onClick={handleSubmitClarification}
-                  disabled={!canSubmitClarification || clarificationBusy}
-                >
-                  {clarificationBusy
-                    ? (settings.language === 'ar' ? 'جاري الإرسال والاستكمال...' : 'Submitting and resuming...')
-                    : (settings.language === 'ar' ? 'إرسال التوضيح واستكمال المحاكاة' : 'Submit clarification & resume')}
-                </Button>
-              </div>
-            )}
-
-            {postActionsEnabled && (
-              <div className="chat-ephemeral-card rounded-xl border border-border/50 bg-card/70 p-3 space-y-3">
-                <div className="text-sm font-semibold text-foreground">
-                  {settings.language === 'ar'
-                    ? 'الخطوات التالية بعد انتهاء المحاكاة'
-                    : 'Next actions after simulation completion'}
-                </div>
-                {acceptancePctValue !== null && (
-                  <div className="text-xs text-muted-foreground">
-                    {settings.language === 'ar'
-                      ? `نسبة القبول النهائية: ${acceptancePctValue.toFixed(0)}%`
-                      : `Final acceptance rate: ${acceptancePctValue.toFixed(0)}%`}
-                  </div>
-                )}
-                <Button
-                  type="button"
-                  variant="secondary"
-                  className="w-full justify-center"
-                  disabled={Boolean(postActionBusy)}
-                  onClick={() => onRunPostAction?.(effectivePostAction)}
-                >
-                  {postActionBusy
-                    ? (settings.language === 'ar' ? 'جاري التحضير...' : 'Preparing...')
-                    : effectivePostAction === 'make_acceptable'
-                    ? (settings.language === 'ar' ? 'اجعل فكرتك مقبولة' : 'Make your idea acceptable')
-                    : (settings.language === 'ar' ? 'انطلق بالفكرة للسوق' : 'Bring your idea to world')}
-                </Button>
-
-                {postActionResult && (
-                  <div className="chat-ephemeral-card rounded-lg border border-border/50 bg-background/40 p-3 space-y-2">
-                    <div className="text-sm font-semibold text-foreground">{postActionResult.title}</div>
-                    <ReadMoreText
-                      text={postActionResult.summary}
-                      collapsedLines={4}
-                      language={settings.language}
-                      expanded={Boolean(expandedTextMap['post-action-summary'])}
-                      onToggleExpanded={() => toggleExpandedText('post-action-summary')}
-                    />
-                    {postActionResult.steps?.length > 0 && (
-                      <div className="space-y-1">
-                        {postActionResult.steps.slice(0, 4).map((step) => (
-                          <div key={step} className="text-xs text-muted-foreground">
-                            â€¢ {step}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    <Button
-                      type="button"
-                      className="w-full"
-                      onClick={onStartFollowupFromPostAction}
-                    >
-                      {settings.language === 'ar' ? 'جرّب هذا الآن' : 'Try this now'}
-                    </Button>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Typing indicator */}
-            {isThinking && (
-              <div className="typing-indicator">
-                <span className="typing-dot" />
-                <span className="typing-dot" />
-                <span className="typing-dot" />
-              </div>
-            )}
-          </div>
-        ) : (
-          /* -------------------- REASONING TAB -------------------- */
-          <div className="space-y-3">
-            {reasoningDebug.length > 0 && (
-              <div className="rounded-lg border border-amber-400/20 bg-amber-400/5 px-3 py-2">
-                <div className="flex items-center justify-between text-xs text-amber-200">
-                  <span>
-                    {settings.language === 'ar' ? 'سجل الرفض (Debug)' : 'Rejection Debug Log'}
-                  </span>
-                  <button
-                    type="button"
-                    className="text-amber-200/80 hover:text-amber-100"
-                    onClick={() => setShowDebug((p) => !p)}
-                  >
-                    {showDebug
-                      ? settings.language === 'ar'
-                        ? 'إخفاء'
-                        : 'Hide'
-                      : settings.language === 'ar'
-                      ? 'عرض'
-                      : 'Show'}
-                  </button>
-                </div>
-                {showDebug && (
-                  <div className="mt-2 max-h-40 overflow-y-auto text-xs text-amber-100/90 space-y-1">
-                    {reasoningDebug.slice(-50).map((item) => (
-                      <div key={item.id} className="flex flex-wrap gap-2">
-                        <span className="font-mono text-amber-200/80">{item.agentShortId}</span>
-                        {item.phase && <span className="text-amber-200/60">{item.phase}</span>}
-                        {typeof item.attempt === 'number' && (
-                          <span className="text-amber-200/60">#{item.attempt}</span>
-                        )}
-                        {item.stage && <span className="text-amber-200/60">{item.stage}</span>}
-                        <span className="text-amber-100">{item.reason}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {reasoningFeed.length === 0 ? (
-              reasoningUnavailable ? null : (
-                <div className="text-center py-4">
-                  <Bot className="w-8 h-8 mx-auto text-muted-foreground/25 mb-2" />
-                  <p className="text-sm text-muted-foreground">
-                    {simulationError ? (
-                      settings.language === 'ar'
-                        ? `خطأ في المحاكاة: ${simulationError}`
-                        : `Simulation error: ${simulationError}`
-                    ) : settings.language === 'ar' ? (
-                      'تفكير الوكلاء سيظهر هنا أثناء المحاكاة'
-                    ) : (
-                      'Agent reasoning will appear here during simulation'
-                    )}
-                  </p>
-                </div>
-              )
-            ) : (
-              phaseGroups.map((group) => (
-                <div key={group.phase} className="space-y-3">
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <div className="text-xs uppercase tracking-wide text-muted-foreground/80">
-                      {phaseLabelMap[group.phase] ?? phaseFallbackLabel}
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      {Array.from(new Set(group.items.map((entry) => entry.iteration)))
-                        .sort((a, b) => a - b)
-                        .map((iter) => (
-                          <span
-                            key={`${group.phase}-${iter}`}
-                            className="text-[10px] px-2 py-0.5 rounded-full border border-primary/30 bg-primary/10 text-primary"
-                          >
-                            Iter {iter}
-                          </span>
-                        ))}
-                    </div>
-                  </div>
-                  {group.items.map((msg) => {
-                    const idx = reasoningIndex.get(msg.id) ?? 0;
-                    const side = idx % 2 === 0 ? 'user' : 'bot';
-                    const isHighlighted = highlightedReasoningIds.has(msg.id);
-                    const opinion = msg.opinion ?? 'neutral';
-                    const statusLabel =
-                      opinion === 'accept'
-                        ? settings.language === 'ar'
-                          ? 'موافق'
-                          : 'Agreed'
-                        : opinion === 'reject'
-                        ? settings.language === 'ar'
-                          ? 'مرفوض'
-                          : 'Rejected'
-                        : settings.language === 'ar'
-                        ? 'محايد'
-                        : 'Neutral';
-                    const statusBadge =
-                      opinion === 'accept'
-                        ? 'reasoning-badge-accept'
-                        : opinion === 'reject'
-                        ? 'reasoning-badge-reject'
-                        : 'reasoning-badge-neutral';
-                    const bubbleBg = side === 'user' ? 'bg-secondary' : 'bg-card';
-                    const reasoningBubbleToneClass =
-                      opinion === 'accept'
-                        ? 'reasoning-bubble-accept'
-                        : opinion === 'reject'
-                        ? 'reasoning-bubble-reject'
-                        : 'reasoning-bubble-neutral';
-                    const messageToneClass =
-                      opinion === 'accept'
-                        ? 'reasoning-text-accept'
-                        : opinion === 'reject'
-                        ? 'reasoning-text-reject'
-                        : 'reasoning-text-neutral';
-                    const shortId = msg.agentShortId ?? msg.agentId.slice(0, 4);
-                    const agentLabel = msg.agentLabel
-                      || (settings.language === 'ar' ? `الوكيل ${shortId}` : `Agent ${shortId}`);
-                    const replyShort =
-                      msg.replyToShortId ?? (msg.replyToAgentId ? msg.replyToAgentId.slice(0, 4) : undefined);
-                    const opinionSource = msg.opinionSource ?? 'llm';
-                    const sourceLabel =
-                      opinionSource === 'llm'
-                        ? 'LLM'
-                        : opinionSource === 'llm_classified'
-                        ? 'LLM+Classifier'
-                        : 'Fallback';
-
-                    return (
-                      <div
-                        key={msg.id}
-                        data-reasoning-id={msg.id}
-                        className={cn('message message-compact reasoning', side)}
-                      >
-                        <div
-                        className={cn(
-                          'bubble bubble-compact',
-                          bubbleBg,
-                          reasoningBubbleToneClass,
-                          isHighlighted && 'ring-2 ring-cyan-400/70 shadow-[0_0_0_1px_rgba(34,211,238,0.35)]'
-                        )}
-                        >
-                          <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
-                            <div className="flex items-center gap-2 min-w-0">
-                              <div className="w-6 h-6 rounded-full bg-primary/15 flex items-center justify-center">
-                                <Bot className="w-3 h-3 text-primary" />
-                              </div>
-                              <span className="text-xs font-semibold text-foreground truncate">
-                                {agentLabel}
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className={cn('text-[11px] px-2 py-0.5 rounded-full border', statusBadge)}>
-                                {statusLabel}
-                              </span>
-                              <span className="text-[11px] px-2 py-0.5 rounded-full border border-border/60 text-muted-foreground">
-                                {sourceLabel}
-                              </span>
-                              <span className="text-[11px] text-muted-foreground">
-                                Iter {msg.iteration}
-                              </span>
-                              {replyShort && (
-                                <span className="text-[11px] px-2 py-0.5 rounded-full border border-border/60 text-muted-foreground">
-                                  {settings.language === 'ar' ? `رد على ${replyShort}` : `Reply to ${replyShort}`}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-
-                          <div className={cn('text-sm', messageToneClass)}>
-                            <ReadMoreText
-                              text={msg.message}
-                              collapsedLines={7}
-                              language={settings.language}
-                              expanded={Boolean(expandedTextMap[`reasoning-${msg.id}`])}
-                              onToggleExpanded={() => toggleExpandedText(`reasoning-${msg.id}`)}
-                              className={messageToneClass}
-                            />
-                          </div>
-                          {msg.archetype && (
-                            <div className="text-[11px] text-muted-foreground mt-2">
-                              {msg.archetype}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ))
-            )}
-          </div>
+            {postActionsEnabled && onRunPostAction ? <section className="rounded-[30px] border border-border/60 bg-card/75 p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-base font-semibold text-foreground">{language === 'ar' ? 'الخطوة التالية بعد التقييم' : 'Next step after evaluation'}</h3>{typeof finalAcceptancePct === 'number' ? <p className="mt-1 text-sm text-muted-foreground">{language === 'ar' ? `نسبة القبول الحالية ${Math.round(finalAcceptancePct)}%` : `Current acceptance ${Math.round(finalAcceptancePct)}%`}</p> : null}</div>{recommendedPostAction ? <div className="rounded-full border border-primary/20 bg-primary/10 px-3 py-1 text-xs font-medium text-primary">{language === 'ar' ? `مقترح: ${recommendedPostAction === 'make_acceptable' ? 'اجعلها مقبولة' : 'أنزلها للعالم'}` : `Suggested: ${recommendedPostAction}`}</div> : null}</div><div className="mt-4 grid gap-3 sm:grid-cols-2"><Button type="button" variant={recommendedPostAction === 'make_acceptable' ? 'default' : 'outline'} disabled={postActionBusy !== null} onClick={() => onRunPostAction('make_acceptable')} className="rounded-2xl">{postActionBusy === 'make_acceptable' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}<span>{language === 'ar' ? 'اجعلها مقبولة' : 'Make acceptable'}</span></Button><Button type="button" variant={recommendedPostAction === 'bring_to_world' ? 'default' : 'outline'} disabled={postActionBusy !== null} onClick={() => onRunPostAction('bring_to_world')} className="rounded-2xl">{postActionBusy === 'bring_to_world' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}<span>{language === 'ar' ? 'أنزلها للعالم' : 'Bring to world'}</span></Button></div></section> : null}
+            {postActionResult ? <section className="rounded-[30px] border border-emerald-400/25 bg-emerald-500/8 p-5"><h3 className="text-base font-semibold text-foreground">{postActionResult.title}</h3><p className="mt-2 text-sm leading-7 text-foreground/90">{postActionResult.summary}</p>{onStartFollowupFromPostAction ? <Button type="button" onClick={onStartFollowupFromPostAction} className="mt-4 rounded-2xl"><Play className="h-4 w-4" /><span>{language === 'ar' ? 'ابدأ جولة متابعة' : 'Start follow-up run'}</span></Button> : null}</section> : null}
+            {quickReplies.length && !pendingClarification && !pendingPreflightQuestion && !pendingResearchReview ? <div className="flex flex-wrap gap-2">{quickReplies.map((reply) => <button key={reply.value} type="button" onClick={() => onQuickReply?.(reply.value)} className="rounded-full border border-border/55 bg-card/80 px-4 py-2 text-sm text-foreground transition hover:border-primary/30 hover:bg-primary/8">{reply.label}</button>)}</div> : null}
+          </>
         )}
       </div>
 
-      {/* -------------------- JUMP-TO-LATEST BUTTON -------------------- */}
-      {!isReasoningView && !isNearBottom && !showBusyStageBar && (
-        <button
-          type="button"
-          onClick={() => {
-            if (scrollRef.current)
-              scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-          }}
-          className="mx-4 mb-2 rounded-full bg-secondary/70 px-3 py-1 text-xs text-muted-foreground hover:text-foreground"
-        >
-          {settings.language === 'ar' ? 'الانتقال لآخر الرسائل' : 'Jump to latest'}
-        </button>
-      )}
-
-      {/* -------------------- INPUT AREA (CHAT TAB) -------------------- */}
       {!isReasoningView ? (
-        <div className="chat-input-container">
-          <div className="sr-only" aria-live="polite" aria-atomic="true">
-            {progressLiveAnnouncement}
-          </div>
-          {showBusyStageBar && (
-            <div className="chat-ephemeral-card mb-2 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2.5 space-y-1.5" role="status">
-              <div className="flex items-center justify-between gap-3 text-sm">
-                <span className="inline-flex items-center gap-1.5 text-primary font-medium">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  {busyStageLabel}
-                </span>
-                {busyElapsedLabel && (
-                  <span className="text-muted-foreground font-medium">{busyElapsedLabel}</span>
-                )}
+        <div className="border-t border-border/45 px-5 pb-5 pt-4">
+          <form ref={formRef} onSubmit={(event) => { event.preventDefault(); primaryAction?.onClick(); }} className="relative">
+            {primaryAction?.description ? <div className="mb-2 rounded-2xl border border-border/55 bg-card/70 px-3 py-2 text-xs leading-6 text-muted-foreground">{primaryAction.description}</div> : null}
+            {(isWaitingForCity || isWaitingForCountry || isWaitingForLocationChoice || isSummarizing) ? <div className="mb-2 rounded-2xl border border-border/55 bg-card/70 px-3 py-2 text-xs leading-6 text-muted-foreground">{isWaitingForCity ? (language === 'ar' ? 'اكتب اسم المدينة لاستكمال السياق.' : 'Enter the city name.') : isWaitingForCountry ? (language === 'ar' ? 'اكتب اسم الدولة لاستكمال السياق.' : 'Enter the country name.') : isWaitingForLocationChoice ? (language === 'ar' ? 'اختر هل تريد ربط الفكرة بمكان محدد.' : 'Choose whether to use a specific location.') : (language === 'ar' ? 'نجمع الخلاصة النهائية الآن.' : 'Preparing the final summary now.')}</div> : null}
+            <div className="flex items-end gap-3">
+              <Input ref={inputRef} value={inputValue} onChange={(event) => setInputValue(event.target.value)} placeholder={language === 'ar' ? 'اكتب رسالتك أو عدّل الفكرة...' : 'Type your message or refine the idea...'} className="h-14 flex-1 rounded-[24px] border-border/60 bg-card/80 px-5 text-base" dir="rtl" />
+              <div className="relative shrink-0">
+                <Button type="submit" disabled={!primaryAction || primaryAction.disabled || primaryAction.busy || isThinking || simulationStatus === 'configuring'} className={cn('h-14 min-w-[164px] rounded-[24px] px-5 transition-all duration-200', primaryAction?.tone === 'warning' && 'bg-amber-500 text-slate-950 hover:bg-amber-400', primaryAction?.tone === 'secondary' && 'bg-secondary text-foreground hover:bg-secondary/85', menuOpen && 'translate-y-[-1px] shadow-[0_12px_32px_-16px_rgba(0,0,0,0.45)]')}>
+                  {primaryAction?.busy ? <Loader2 className="h-4 w-4 animate-spin" /> : primaryAction?.icon}
+                  <span className="inline">{primaryAction?.label || (language === 'ar' ? 'اكتب رسالتك' : 'Write message')}</span>
+                  {secondaryActions.length ? <ChevronDown className={cn('h-4 w-4 transition-transform', menuOpen && 'rotate-180')} /> : null}
+                </Button>
+                {secondaryActions.length ? <div className={cn('absolute bottom-[calc(100%+10px)] start-0 w-72 origin-bottom rounded-[24px] border border-border/60 bg-card/95 p-2 shadow-2xl backdrop-blur-xl transition-all duration-200', menuOpen ? 'pointer-events-auto translate-y-0 scale-100 opacity-100' : 'pointer-events-none translate-y-2 scale-95 opacity-0')}>{secondaryActions.map((action) => <button key={action.key} type="button" disabled={action.disabled} onClick={action.onClick} className="flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-start text-sm text-foreground transition hover:bg-primary/8 disabled:opacity-50"><span className={cn('flex h-9 w-9 items-center justify-center rounded-2xl border', action.tone === 'warning' ? 'border-amber-400/30 bg-amber-500/15 text-amber-300' : 'border-border/60 bg-background/65 text-foreground')}>{action.icon}</span><span>{action.label}</span></button>)}</div> : null}
               </div>
-              {busyTimeoutContextLabel && (
-                <div className="text-xs text-muted-foreground">{busyTimeoutContextLabel}</div>
-              )}
-              {typeof busyProgressPct === 'number' && (
-                <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
-                  <div
-                    className="h-full bg-primary transition-all duration-500"
-                    style={{ width: `${busyProgressPct}%` }}
-                  />
-                </div>
-              )}
-            </div>
-          )}
-          {/* Quick-reply chips */}
-          {quickReplies && quickReplies.length > 0 && (
-            <div className="quick-replies">
-              {quickReplies.map((reply) => (
-                <button
-                  key={reply.value}
-                  type="button"
-                  className="quick-reply-btn"
-                  disabled={lockComposerByProgress}
-                  onClick={() => onQuickReply?.(reply.value)}
-                >
-                  {reply.label}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {showBinaryDecisionBar && primaryControl?.secondary && (
-            <div className="mb-2 grid grid-cols-2 gap-2">
-              <Button
-                type="button"
-                onClick={executePrimaryControl}
-                disabled={lockComposerByProgress || Boolean(primaryControl.disabled) || actionPending !== null}
-                className="h-10 w-full justify-center rounded-lg bg-emerald-600/85 hover:bg-emerald-600 text-white"
-              >
-                {actionPending === 'primary'
-                  ? <Loader2 className="w-4 h-4 animate-spin" />
-                  : <Check className="w-4 h-4" />}
-                <span className="text-xs ms-1">{compactControlLabel(primaryControl.label, settings.language === 'ar' ? 'قبول' : 'Accept')}</span>
-              </Button>
-              <Button
-                type="button"
-                onClick={executeSecondaryControl}
-                disabled={lockComposerByProgress || Boolean(primaryControl.secondary.disabled) || actionPending !== null}
-                className="h-10 w-full justify-center rounded-lg bg-red-600/85 hover:bg-red-600 text-white"
-              >
-                {actionPending === 'secondary'
-                  ? <Loader2 className="w-4 h-4 animate-spin" />
-                  : <X className="w-4 h-4" />}
-                <span className="text-xs ms-1">{compactControlLabel(primaryControl.secondary.label, settings.language === 'ar' ? 'رفض' : 'Reject')}</span>
-              </Button>
-            </div>
-          )}
-
-          <form ref={inputWrapperRef} onSubmit={handleSubmit} className="chat-input-wrapper relative">
-            {primaryControl && !inputValue.trim() && !showBusyStageBar && (
-              <div className="pointer-events-none absolute top-[-30px] max-w-[72%] rounded-md border border-border/50 bg-card/80 px-2 py-1 text-[11px] leading-4 text-muted-foreground truncate [inset-inline-end:0]">
-                {primaryControl.description || primaryControl.label}
-              </div>
-            )}
-            <Input
-              ref={inputRef}
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              dir={settings.language === 'ar' ? 'rtl' : 'ltr'}
-              disabled={showRetry || lockComposerByProgress}
-              placeholder={
-                isWaitingForLocationChoice
-                  ? settings.language === 'ar'
-                    ? 'اختر نعم أو لا...'
-                    : 'Choose yes or no...'
-                  : isWaitingForCountry
-                  ? settings.language === 'ar'
-                    ? 'اكتب الدولة...'
-                    : 'Enter country...'
-                  : isWaitingForCity
-                  ? settings.language === 'ar'
-                    ? 'اكتب المدينة...'
-                    : 'Enter city...'
-                  : settings.language === 'ar'
-                  ? 'اكتب رسالتك...'
-                  : 'Type a message...'
-              }
-              className={cn(
-                'chat-input',
-                (showRetry || lockComposerByProgress) && 'opacity-65 cursor-not-allowed bg-muted/45 border-border/80'
-              )}
-              data-testid="chat-input"
-            />
-            {lockComposerByProgress && (
-              <div className="pointer-events-none absolute -top-5 text-[10px] text-muted-foreground [inset-inline-start:2px]">
-                {settings.language === 'ar' ? 'الإدخال متوقف مؤقتًا حتى اكتمال العملية الجارية' : 'Input is temporarily locked while current process runs'}
-              </div>
-            )}
-
-            <div className="control-trigger-stack shrink-0" style={controlTriggerStackStyle}>
-              {showClosedHint && (
-                <div className="control-trigger-hint">
-                  {settings.language === 'ar' ? 'خيارات التحكم' : 'Control actions'}
-                </div>
-              )}
-              <div
-                className={cn(
-                  'control-menu-reserved',
-                  actionMenuRendered && 'is-mounted',
-                  actionTriggerState === 'menu_open' && 'is-open',
-                  actionTriggerState === 'menu_closing' && 'is-closing'
-                )}
-                style={controlMenuReservedStyle}
-              >
-                {primaryControl && !inputValue.trim() && actionMenuRendered && (
-                  <div className="control-menu-shell">
-                    <div className="control-menu-grid">
-                      <Button
-                        type="button"
-                        size="sm"
-                        onClick={executePrimaryControl}
-                        disabled={lockComposerByProgress || primaryControl.disabled || actionPending !== null}
-                        className={cn(
-                          'control-menu-item control-menu-item-primary',
-                          primaryControl.tone === 'success' && 'bg-success/15 border-success/30 text-success hover:bg-success/20',
-                          primaryControl.tone === 'warning' && 'bg-warning/10 border-warning/30 text-warning hover:bg-warning/15',
-                          primaryControl.tone === 'secondary' && 'bg-secondary/70 border-border text-foreground hover:bg-secondary',
-                          (!primaryControl.tone || primaryControl.tone === 'primary') && 'bg-primary text-primary-foreground hover:bg-primary/90',
-                        )}
-                        title={primaryControl.label}
-                      >
-                        {(actionPending === 'primary' || primaryControl.busy)
-                          ? <Loader2 className="w-4 h-4 animate-spin" />
-                          : renderPrimaryControlIcon(primaryControl)}
-                        <span className="control-menu-item-label">
-                          {compactControlLabel(primaryControl.label, settings.language === 'ar' ? 'تنفيذ' : 'Run')}
-                        </span>
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        onClick={executeSecondaryControl}
-                        disabled={lockComposerByProgress || Boolean(primaryControl.secondary?.disabled) || actionPending !== null}
-                        className="control-menu-item control-menu-item-secondary border border-border bg-card/90 text-foreground hover:bg-card"
-                        title={primaryControl.secondary?.label || (settings.language === 'ar' ? 'إغلاق' : 'Close')}
-                      >
-                        {actionPending === 'secondary'
-                          ? <Loader2 className="w-4 h-4 animate-spin" />
-                          : (primaryControl.secondary ? <RefreshCcw className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />)}
-                        <span className="control-menu-item-label">
-                          {compactControlLabel(
-                            primaryControl.secondary?.label || (settings.language === 'ar' ? 'إغلاق' : 'Close'),
-                            settings.language === 'ar' ? 'إغلاق' : 'Close',
-                          )}
-                        </span>
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <Button
-                type="button"
-                size="icon"
-                disabled={showRetry
-                  ? !onRetryLlm
-                  : (lockComposerByProgress || (!inputValue.trim() && (!primaryControl || showBinaryDecisionBar)))}
-                className={cn(
-                  'send-btn control-trigger-btn',
-                  canUseActionTrigger && 'is-ready',
-                  shouldExpandTrigger && 'is-expanded',
-                  showSingleActionControl && 'is-single-action',
-                  isActionMenuOpen && 'is-menu-open'
-                )}
-                style={controlTriggerButtonStyle}
-                data-testid={showRetry ? 'chat-retry-llm' : 'chat-send'}
-                onClick={handleSendButtonClick}
-                onMouseEnter={handleTriggerMouseEnter}
-                onMouseLeave={handleTriggerMouseLeave}
-              >
-                <span className="control-trigger-icon-wrap">
-                  {showRetry
-                    ? <RefreshCcw className="w-4 h-4" />
-                    : actionPending
-                    ? <Loader2 className="w-4 h-4 animate-spin" />
-                    : inputValue.trim()
-                    ? <Send className="w-4 h-4" />
-                    : renderPrimaryControlIcon(primaryControl || undefined)}
-                </span>
-                <span className="control-trigger-label">
-                  {primaryControl?.label || (settings.language === 'ar' ? 'خيارات التحكم' : 'Control actions')}
-                </span>
-              </Button>
             </div>
           </form>
         </div>
-      ) : (
-        /* -------------------- INPUT LOCKED (when not on Chat tab) -------------------- */
-        <div className="chat-input-container chat-input-locked">
-          <Button type="button" size="icon" className="send-btn" disabled>
-            {simulationStatus === 'running' ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Send className="w-4 h-4" />
-            )}
-          </Button>
-        </div>
-      )}
+      ) : null}
     </div>
   );
 }

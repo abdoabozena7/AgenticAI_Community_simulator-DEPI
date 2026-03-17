@@ -2,33 +2,27 @@ import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, PerspectiveCamera, Line, Sphere } from '@react-three/drei';
 import * as THREE from 'three';
-import { Agent, Connection } from '@/types/simulation';
-
-export const SIMULATION_ARENA_CUSTOM_X_PX = 0;
-export const SIMULATION_ARENA_CUSTOM_Y_PX = 0;
+import { MessageSquareText, Sparkles } from 'lucide-react';
+import { Agent, Connection, ReasoningMessage } from '@/types/simulation';
 
 interface AgentNodeProps {
   agent: Agent;
-  onClick?: (agent: Agent) => void;
 }
 
-const AgentNode = ({ agent, onClick }: AgentNodeProps) => {
+const AgentNode = ({ agent }: AgentNodeProps) => {
   const meshRef = useRef<THREE.Mesh>(null);
   const glowRef = useRef<THREE.Mesh>(null);
-  
   const color = useMemo(() => {
     switch (agent.status) {
       case 'accepted': return '#22c55e';
       case 'rejected': return '#ef4444';
-      case 'reasoning': return '#a855f7';
-      default: return '#6b7280';
+      case 'reasoning': return '#f59e0b';
+      default: return '#94a3b8';
     }
   }, [agent.status]);
 
   useFrame((state) => {
-    if (meshRef.current) {
-      meshRef.current.rotation.y += 0.01;
-    }
+    if (meshRef.current) meshRef.current.rotation.y += 0.01;
     if (glowRef.current && agent.status !== 'neutral') {
       const scale = 1 + Math.sin(state.clock.elapsedTime * 2) * 0.1;
       glowRef.current.scale.setScalar(scale);
@@ -37,145 +31,42 @@ const AgentNode = ({ agent, onClick }: AgentNodeProps) => {
 
   return (
     <group position={agent.position}>
-      {/* Glow effect for non-neutral agents */}
       {agent.status !== 'neutral' && (
-        <Sphere ref={glowRef} args={[0.32, 16, 16]}>
-          <meshBasicMaterial
-            color={color}
-            transparent
-            opacity={0.2}
-          />
+        <Sphere ref={glowRef} args={[0.34, 16, 16]}>
+          <meshBasicMaterial color={color} transparent opacity={0.22} />
         </Sphere>
       )}
-      
-      {/* Main node */}
-      <Sphere
-        ref={meshRef}
-        args={[0.2, 32, 32]}
-        onClick={() => onClick?.(agent)}
-      >
-        <meshStandardMaterial
-          color={color}
-          emissive={color}
-          emissiveIntensity={agent.status !== 'neutral' ? 0.5 : 0.1}
-          metalness={0.8}
-          roughness={0.2}
-        />
+      <Sphere ref={meshRef} args={[0.22, 32, 32]}>
+        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.42} metalness={0.75} roughness={0.24} />
       </Sphere>
     </group>
   );
 };
 
-interface ConnectionLineProps {
-  from: [number, number, number];
-  to: [number, number, number];
-  active: boolean;
-  pulseProgress: number;
-}
-
-const ConnectionLine = ({ from, to, active, pulseProgress }: ConnectionLineProps) => {
-  const points = useMemo(() => [
-    new THREE.Vector3(...from),
-    new THREE.Vector3(...to),
-  ], [from, to]);
-
-  const pulsePosition = useMemo(() => {
-    if (!active) return null;
-    const start = new THREE.Vector3(...from);
-    const end = new THREE.Vector3(...to);
-    return start.lerp(end, pulseProgress);
-  }, [from, to, active, pulseProgress]);
-
+const ConnectionLine = ({ from, to, active, pulseProgress }: { from: [number, number, number]; to: [number, number, number]; active: boolean; pulseProgress: number }) => {
+  const points = useMemo(() => [new THREE.Vector3(...from), new THREE.Vector3(...to)], [from, to]);
+  const pulsePosition = useMemo(() => active ? new THREE.Vector3(...from).lerp(new THREE.Vector3(...to), pulseProgress) : null, [active, from, pulseProgress, to]);
   return (
     <group>
-      <Line
-        points={points}
-        color={active ? '#ffffff' : '#9ca2ad'}
-        lineWidth={active ? 2 : 0.5}
-        transparent
-        opacity={active ? 0.9 : 0.3}
-      />
-      
-      {/* White light pulse traveling along the connection */}
-      {pulsePosition && (
-        <group position={pulsePosition}>
-          {/* Glow effect */}
-          <Sphere args={[0.15, 16, 16]}>
-            <meshBasicMaterial color="#ffffff" transparent opacity={0.3} />
-          </Sphere>
-          {/* Core pulse */}
-          <Sphere args={[0.06, 16, 16]}>
-            <meshBasicMaterial color="#ffffff" />
-          </Sphere>
-        </group>
-      )}
+      <Line points={points} color={active ? '#ffffff' : '#64748b'} lineWidth={active ? 1.8 : 0.5} transparent opacity={active ? 0.9 : 0.28} />
+      {pulsePosition ? <group position={pulsePosition}><Sphere args={[0.14, 16, 16]}><meshBasicMaterial color="#ffffff" transparent opacity={0.25} /></Sphere><Sphere args={[0.05, 16, 16]}><meshBasicMaterial color="#ffffff" /></Sphere></group> : null}
     </group>
   );
 };
 
-interface NeuralNetworkProps {
-  agents: Agent[];
-  activePulses: Connection[];
-}
-
-const NeuralNetwork = ({ agents, activePulses }: NeuralNetworkProps) => {
+const NeuralNetwork = ({ agents, activePulses }: { agents: Agent[]; activePulses: Connection[] }) => {
   const groupRef = useRef<THREE.Group>(null);
-  
-  useFrame((state) => {
-    if (groupRef.current) {
-      groupRef.current.rotation.y = state.clock.elapsedTime * 0.05;
-    }
-  });
-
-  const agentById = useMemo(() => {
-    const index = new Map<string, Agent>();
-    for (const agent of agents) {
-      index.set(agent.id, agent);
-    }
-    return index;
-  }, [agents]);
-
-  const connections = useMemo(() => {
-    const conns: { from: Agent; to: Agent; key: string }[] = [];
-    agents.forEach((agent) => {
-      agent.connections.forEach((targetId) => {
-        const target = agentById.get(targetId);
-        if (target) {
-          conns.push({ from: agent, to: target, key: `${agent.id}-${targetId}` });
-        }
-      });
-    });
-    return conns;
-  }, [agentById, agents]);
-
-  const activePulseMap = useMemo(() => {
-    const pulseMap = new Map<string, Connection>();
-    for (const pulse of activePulses) {
-      pulseMap.set(`${pulse.from}-${pulse.to}`, pulse);
-    }
-    return pulseMap;
-  }, [activePulses]);
-
+  useFrame((state) => { if (groupRef.current) groupRef.current.rotation.y = state.clock.elapsedTime * 0.05; });
+  const byId = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
+  const connections = useMemo(() => agents.flatMap((agent) => agent.connections.map((targetId) => ({ key: `${agent.id}-${targetId}`, from: agent, to: byId.get(targetId) })).filter((item): item is { key: string; from: Agent; to: Agent } => Boolean(item.to))), [agents, byId]);
+  const activeMap = useMemo(() => new Map(activePulses.map((pulse) => [`${pulse.from}-${pulse.to}`, pulse])), [activePulses]);
   return (
     <group ref={groupRef}>
-      {/* Connections */}
-      {connections.map(({ from, to, key }) => {
-        const pulse = activePulseMap.get(key);
-        return (
-          <ConnectionLine
-            key={key}
-            from={from.position}
-            to={to.position}
-            active={!!pulse?.active}
-            pulseProgress={pulse?.pulseProgress || 0}
-          />
-        );
+      {connections.map(({ key, from, to }) => {
+        const pulse = activeMap.get(key);
+        return <ConnectionLine key={key} from={from.position} to={to.position} active={Boolean(pulse?.active)} pulseProgress={pulse?.pulseProgress || 0} />;
       })}
-      
-      {/* Agent nodes */}
-      {agents.map(agent => (
-        <AgentNode key={agent.id} agent={agent} />
-      ))}
+      {agents.map((agent) => <AgentNode key={agent.id} agent={agent} />)}
     </group>
   );
 };
@@ -184,148 +75,109 @@ interface SimulationArenaProps {
   agents: Agent[];
   activePulses: Connection[];
   language?: 'ar' | 'en';
+  reasoningActive?: boolean;
+  debateReady?: boolean;
+  reasoningFeed?: ReasoningMessage[];
+  onOpenReasoning?: () => void;
 }
 
-export const SimulationArena = ({ agents, activePulses, language = 'en' }: SimulationArenaProps) => {
+export const SimulationArena = ({
+  agents,
+  activePulses,
+  language = 'en',
+  reasoningActive = false,
+  debateReady = false,
+  reasoningFeed = [],
+  onOpenReasoning,
+}: SimulationArenaProps) => {
   const [contextLost, setContextLost] = useState(false);
   const [canvasKey, setCanvasKey] = useState(0);
-  const [autoRestoreState, setAutoRestoreState] = useState<'idle' | 'retrying' | 'failed'>('idle');
   const cleanupGlListenersRef = useRef<(() => void) | null>(null);
-  const autoRestoreAttemptedRef = useRef(false);
-  const restoreTimerRef = useRef<number | null>(null);
+  const latestReasoning = reasoningFeed.slice(-4);
 
   const bindGlLifecycle = useCallback((state: { gl: THREE.WebGLRenderer }) => {
     cleanupGlListenersRef.current?.();
-    if (restoreTimerRef.current) {
-      window.clearTimeout(restoreTimerRef.current);
-      restoreTimerRef.current = null;
-    }
     setContextLost(false);
-    setAutoRestoreState('idle');
     const canvas = state.gl.domElement;
-
-    const handleContextLost = (event: Event) => {
+    const handleLost = (event: Event) => {
       event.preventDefault();
       setContextLost(true);
-      if (!autoRestoreAttemptedRef.current) {
-        autoRestoreAttemptedRef.current = true;
-        setAutoRestoreState('retrying');
-        restoreTimerRef.current = window.setTimeout(() => {
-          setCanvasKey((prev) => prev + 1);
-        }, 900);
-      } else {
-        setAutoRestoreState('failed');
-      }
     };
-    const handleContextRestored = () => {
-      setContextLost(false);
-      setAutoRestoreState('idle');
-    };
-
-    canvas.addEventListener('webglcontextlost', handleContextLost, false);
-    canvas.addEventListener('webglcontextrestored', handleContextRestored, false);
-
+    const handleRestored = () => setContextLost(false);
+    canvas.addEventListener('webglcontextlost', handleLost, false);
+    canvas.addEventListener('webglcontextrestored', handleRestored, false);
     cleanupGlListenersRef.current = () => {
-      canvas.removeEventListener('webglcontextlost', handleContextLost, false);
-      canvas.removeEventListener('webglcontextrestored', handleContextRestored, false);
+      canvas.removeEventListener('webglcontextlost', handleLost, false);
+      canvas.removeEventListener('webglcontextrestored', handleRestored, false);
     };
   }, []);
 
-  useEffect(() => () => {
-    cleanupGlListenersRef.current?.();
-    if (restoreTimerRef.current) {
-      window.clearTimeout(restoreTimerRef.current);
-      restoreTimerRef.current = null;
-    }
-  }, []);
+  useEffect(() => () => cleanupGlListenersRef.current?.(), []);
 
   return (
-    <div className="w-full h-full relative">
-      {/* Legend */}
-      <div className="absolute top-4 left-4 z-10 flex flex-col gap-2.5 p-4 rounded-xl bg-card/85 backdrop-blur-sm border border-border">
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded-full bg-[#22c55e]" />
-          <span className="text-xs text-muted-foreground">{language === 'ar' ? 'مقبول' : 'Accepted'}</span>
+    <div className="relative h-full w-full overflow-hidden rounded-[28px] border border-border/55 bg-[radial-gradient(circle_at_top,_rgba(255,255,255,0.1),_transparent_40%),linear-gradient(180deg,rgba(9,9,11,0.88),rgba(9,9,11,0.98))]">
+      <div className="absolute inset-x-4 top-4 z-10 flex flex-wrap items-start justify-between gap-3">
+        <div className="rounded-[24px] border border-border/55 bg-card/80 px-4 py-3 backdrop-blur-xl">
+          <div className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">{language === 'ar' ? 'ساحة المحاكاة' : 'Simulation arena'}</div>
+          <div className="mt-2 flex flex-wrap gap-2 text-sm text-foreground">
+            <span className="rounded-full border border-border/55 bg-background/55 px-3 py-1">{language === 'ar' ? `الوكلاء ${agents.length}` : `Agents ${agents.length}`}</span>
+            <span className="rounded-full border border-border/55 bg-background/55 px-3 py-1">{language === 'ar' ? `الروابط ${agents.reduce((sum, agent) => sum + agent.connections.length, 0)}` : `Links ${agents.reduce((sum, agent) => sum + agent.connections.length, 0)}`}</span>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded-full bg-[#ef4444]" />
-          <span className="text-xs text-muted-foreground">{language === 'ar' ? 'مرفوض' : 'Rejected'}</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded-full bg-[#6b7280]" />
-          <span className="text-xs text-muted-foreground">{language === 'ar' ? 'محايد' : 'Neutral'}</span>
-        </div>
+
+        {(reasoningActive || debateReady) && onOpenReasoning ? (
+          <div className="max-w-md rounded-[24px] border border-primary/25 bg-primary/12 px-4 py-3 backdrop-blur-xl">
+            <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/10 px-3 py-1 text-xs font-semibold text-primary">
+              <Sparkles className="h-3.5 w-3.5" />
+              <span>{language === 'ar' ? 'نقاش مباشر' : 'Live reasoning'}</span>
+            </div>
+            <div className="text-sm font-semibold text-foreground">الوكلاء بدأوا يتناقشون الآن</div>
+            <button type="button" onClick={onOpenReasoning} className="mt-3 inline-flex items-center gap-2 rounded-full bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground">
+              <MessageSquareText className="h-4 w-4" />
+              <span>مشاهدة النقاش</span>
+            </button>
+          </div>
+        ) : null}
       </div>
-      
-      {/* Stats overlay */}
-      <div
-        className="absolute top-4 right-4 z-10 flex items-center gap-2.5 p-3 rounded-xl bg-card/85 backdrop-blur-sm border border-border"
-        dir={language === 'ar' ? 'rtl' : 'ltr'}
-      >
-        <div className="px-2 py-1 rounded-md bg-secondary/60 text-xs text-muted-foreground">
-          {language === 'ar' ? 'الوكلاء' : 'Agents'}: {agents.length}
+
+      {latestReasoning.length ? (
+        <div className="absolute bottom-4 start-4 z-10 hidden w-[min(420px,calc(100%-2rem))] space-y-2 lg:block">
+          {latestReasoning.map((message, index) => (
+            <div key={message.id} className={`flex ${index % 2 === 0 ? 'justify-end' : 'justify-start'}`}>
+              <div className={`max-w-[82%] rounded-[22px] border px-3 py-2 text-sm backdrop-blur-xl ${index % 2 === 0 ? 'border-primary/25 bg-primary/12' : 'border-border/55 bg-card/80'}`}>
+                <div className="mb-1 text-xs font-semibold text-muted-foreground">{message.agentLabel || message.agentShortId || message.agentId}</div>
+                <div className="line-clamp-2 text-foreground">{message.message}</div>
+              </div>
+            </div>
+          ))}
         </div>
-        <div className="px-2 py-1 rounded-md bg-secondary/60 text-xs text-muted-foreground">
-          {language === 'ar' ? 'الاتصالات' : 'Connections'}: {agents.reduce((acc, a) => acc + a.connections.length, 0)}
-        </div>
-      </div>
-      
+      ) : null}
+
       <Canvas key={canvasKey} onCreated={bindGlLifecycle}>
         <PerspectiveCamera makeDefault position={[0, 0, 9]} fov={55} />
-        <OrbitControls 
-          enablePan={false}
-          minDistance={4}
-          maxDistance={18}
-          autoRotate={false}
-        />
-        
-        {/* Lighting */}
-        <ambientLight intensity={0.4} />
+        <OrbitControls enablePan={false} minDistance={4} maxDistance={18} autoRotate={false} />
+        <ambientLight intensity={0.42} />
         <pointLight position={[10, 10, 10]} intensity={1} color="#22c55e" />
-        <pointLight position={[-10, -10, -10]} intensity={0.5} color="#a855f7" />
-        <pointLight position={[0, 10, 0]} intensity={0.3} color="#ffffff" />
-        
-        {/* Neural Network */}
+        <pointLight position={[-10, -10, -10]} intensity={0.55} color="#f59e0b" />
+        <pointLight position={[0, 10, 0]} intensity={0.32} color="#ffffff" />
         <NeuralNetwork agents={agents} activePulses={activePulses} />
-        
-        {/* Background sphere */}
         <Sphere args={[25, 64, 64]}>
-          <meshBasicMaterial 
-            color="#111111" 
-            side={THREE.BackSide}
-          />
+          <meshBasicMaterial color="#05070c" side={THREE.BackSide} />
         </Sphere>
       </Canvas>
 
-      {contextLost && (
-        <div className="absolute inset-0 z-20 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="rounded-lg border border-border bg-card/90 p-4 text-center space-y-3 max-w-xs">
-            <div className="text-sm text-foreground">
-              {autoRestoreState === 'retrying'
-                ? (language === 'ar'
-                    ? 'فُقد اتصال WebGL. التحويل لوضع ثابت مع إعادة محاولة تهيئة العارض...'
-                    : 'WebGL context lost. Switching to static fallback and retrying renderer...')
-                : (language === 'ar'
-                    ? 'فُقد اتصال WebGL. الوضع الثابت نشط ويمكنك متابعة التحكم.'
-                    : 'WebGL context lost. Static fallback is active; controls remain available.')}
+      {contextLost ? (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
+          <div className="max-w-sm rounded-[24px] border border-border bg-card/90 p-4 text-center">
+            <div className="text-sm leading-7 text-foreground">
+              {language === 'ar' ? 'فقدنا اتصال WebGL. يمكنك إعادة تهيئة العرض دون فقدان الجلسة.' : 'WebGL context was lost. You can restart the renderer without losing the session.'}
             </div>
-            <button
-              type="button"
-              className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-sm"
-              onClick={() => {
-                autoRestoreAttemptedRef.current = false;
-                setAutoRestoreState('retrying');
-                setContextLost(false);
-                setCanvasKey((prev) => prev + 1);
-              }}
-            >
-              {autoRestoreState === 'retrying'
-                ? (language === 'ar' ? 'جارٍ إعادة المحاولة...' : 'Retrying renderer...')
-                : (language === 'ar' ? 'إعادة تشغيل العارض' : 'Retry renderer')}
+            <button type="button" className="mt-4 rounded-full bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground" onClick={() => { setContextLost(false); setCanvasKey((prev) => prev + 1); }}>
+              {language === 'ar' ? 'إعادة تشغيل العرض' : 'Restart renderer'}
             </button>
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 };

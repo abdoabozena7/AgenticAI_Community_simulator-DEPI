@@ -10,6 +10,7 @@ protected endpoints.
 
 from __future__ import annotations
 
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Header, status, Request
 import os
 from pydantic import BaseModel, Field, EmailStr
@@ -123,7 +124,7 @@ async def register(payload: RegisterRequest, request: Request) -> dict:
         if require_verify:
             token = await auth_core.create_email_verification(user_id)
             link = f"{_app_base_url()}/verify-email?token={token}" if _app_base_url() else token
-            await emailer_core.send_verification_email(payload.email or "", link)
+            await asyncio.to_thread(emailer_core.send_verification_email, payload.email or "", link)
             await auth_core.log_audit(user_id, "auth.register", {"verify": True}, _client_ip(request), request.headers.get("user-agent"))
             return {"message": "verification_sent"}
         tokens = await auth_core.create_auth_tokens(user, _client_ip(request), request.headers.get("user-agent"))
@@ -186,7 +187,7 @@ async def resend_verification(payload: ResendVerificationRequest) -> dict:
     if user and not user.get("email_verified"):
         token = await auth_core.create_email_verification(int(user["id"]))
         link = f"{_app_base_url()}/verify-email?token={token}" if _app_base_url() else token
-        await emailer_core.send_verification_email(payload.email, link)
+        await asyncio.to_thread(emailer_core.send_verification_email, payload.email, link)
     return {"message": "verification_sent"}
 
 
@@ -196,7 +197,7 @@ async def request_password_reset(payload: PasswordResetRequest) -> dict:
     if user:
         token = await auth_core.create_password_reset(int(user["id"]))
         link = f"{_app_base_url()}/reset-password?token={token}" if _app_base_url() else token
-        await emailer_core.send_password_reset_email(payload.email, link)
+        await asyncio.to_thread(emailer_core.send_password_reset_email, payload.email, link)
     return {"message": "reset_sent"}
 
 

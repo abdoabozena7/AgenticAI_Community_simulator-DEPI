@@ -5,7 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import { RippleButton } from '@/components/ui/ripple-button';
 import { RippleInput } from '@/components/ui/ripple-input';
 import { useLanguage } from '@/contexts/LanguageContext';
-import { apiService } from '@/services/api';
+import { apiService, getApiBaseUrl } from '@/services/api';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -119,6 +119,29 @@ const getDevGoogleProfile = () => {
   return profile;
 };
 
+const humanizeAuthError = (
+  rawMessage: string,
+  t: (en: string, ar: string) => string,
+) => {
+  const message = (rawMessage || '').trim();
+  if (!message) {
+    return t('Authentication failed', 'فشل تسجيل الدخول');
+  }
+  if (/invalid credentials/i.test(message)) {
+    return t('Incorrect username/email or password.', 'اسم المستخدم أو البريد أو كلمة المرور غير صحيحة.');
+  }
+  if (/email not verified/i.test(message)) {
+    return t('Email not verified. Please check your inbox.', 'البريد الإلكتروني غير مفعّل. تحقق من بريدك.');
+  }
+  if (/unable to reach the backend/i.test(message)) {
+    return t(
+      `Cannot reach the server. Make sure the backend is running at ${getApiBaseUrl()}.`,
+      `تعذر الوصول إلى الخادم. تأكد أن الباك إند يعمل على ${getApiBaseUrl()}.`,
+    );
+  }
+  return message;
+};
+
 export function AuthModal({ isOpen, onClose, initialMode = 'register' }: AuthModalProps) {
   const { language, isRTL } = useLanguage();
   const navigate = useNavigate();
@@ -227,10 +250,11 @@ export function AuthModal({ isOpen, onClose, initialMode = 'register' }: AuthMod
       }
       await handleRedirect();
     } catch (err: any) {
-      const message = err?.message || t('Authentication failed', 'فشل تسجيل الدخول');
-      if (typeof message === 'string' && message.toLowerCase().includes('email not verified')) {
+      const rawMessage = String(err?.message || '');
+      const message = humanizeAuthError(rawMessage, t);
+      if (/email not verified/i.test(rawMessage)) {
         setNeedsVerification(true);
-        setError(t('Email not verified. Please check your inbox.', 'البريد الإلكتروني غير مفعّل. تحقق من بريدك.'));
+        setError(message);
       } else {
         setError(message);
       }
@@ -253,7 +277,7 @@ export function AuthModal({ isOpen, onClose, initialMode = 'register' }: AuthMod
       await apiService.resendVerification(emailValue);
       setInfo(t('Verification email sent. Please check your inbox.', 'تم إرسال رسالة التفعيل. تحقق من بريدك.'));
     } catch (err: any) {
-      setError(err?.message || t('Failed to resend verification email.', 'تعذر إعادة إرسال رسالة التفعيل.'));
+      setError(humanizeAuthError(err?.message || '', t) || t('Failed to resend verification email.', 'تعذر إعادة إرسال رسالة التفعيل.'));
     } finally {
       setResendBusy(false);
     }
@@ -275,7 +299,7 @@ export function AuthModal({ isOpen, onClose, initialMode = 'register' }: AuthMod
       }
       await handleRedirect();
     } catch (err: any) {
-      setError(err?.message || t('Google login failed', 'فشل تسجيل الدخول عبر Google'));
+      setError(humanizeAuthError(err?.message || '', t) || t('Google login failed', 'فشل تسجيل الدخول عبر Google'));
     } finally {
       setGoogleBusy(false);
     }
@@ -465,8 +489,6 @@ export function AuthModal({ isOpen, onClose, initialMode = 'register' }: AuthMod
     </div>
   );
 }
-
-
 
 
 
