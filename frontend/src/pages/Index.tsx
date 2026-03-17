@@ -1,4 +1,5 @@
 import { startTransition, useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { Header } from '@/components/Header';
 import {
@@ -10,15 +11,16 @@ import {
 } from '@/components/TopBar';
 import { ChatPanel } from '@/components/ChatPanel';
 import { ConfigPanel, SocietyControls } from '@/components/ConfigPanel';
-import { SimulationArena } from '@/components/SimulationArena';
 import { MetricsPanel } from '@/components/MetricsPanel';
-import { IterationTimeline } from '@/components/IterationTimeline';
+import { SearchPanel } from '@/components/SearchPanel';
+import { SimulationPanel } from '@/components/SimulationPanel';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { useSimulation } from '@/hooks/useSimulation';
 import { useGuidedWorkflow } from '@/hooks/useGuidedWorkflow';
 import { ChatMessage, GuidedWorkflowDraftContext, PendingIdeaConfirmation, PreflightQuestion, UserInput } from '@/types/simulation';
 import { websocketService } from '@/services/websocket';
 import { apiService, clearAuthTokens, SearchResponse, SimulationConfig, SimulationPreflightNextResponse, SocietyCatalogResponse, UserMe } from '@/services/api';
+import { buildSearchPanelModel } from '@/lib/searchPanelModel';
 import { buildSimulationUiState } from '@/lib/simulationUi';
 import { cn } from '@/lib/utils';
 import { addIdeaLogEntry, updateIdeaLogEntry } from '@/lib/ideaLog';
@@ -3272,6 +3274,7 @@ Required sections:
     const attempt = searchAttemptRef.current;
     const trimmedQuery = query.trim();
     const startedAt = Date.now();
+    simulation.clearResearchSources();
     setResearchIdea(trimmedQuery);
     setSearchState({
       status: 'searching',
@@ -3466,6 +3469,7 @@ Required sections:
     userInput.city,
     userInput.country,
     searchAbortReasonRef,
+    simulation.clearResearchSources,
     handleSessionExpired,
     isAuthError,
   ]);
@@ -4178,6 +4182,11 @@ If rejection is about competition or location, suggest searching for a better lo
     handleSendMessage(value);
   }, [handleSendMessage]);
 
+  const reasoningPanelAvailable = reasoningActive || simulation.reasoningFeed.length > 1;
+  const reasoningPanelLockedReason = settings.language === 'ar'
+    ? 'سيتاح تبويب النقاش بعد بدء reasoning وانتهاء مرحلة البحث.'
+    : 'Reasoning opens after the search stage completes and agent debate starts.';
+
   const handleLogout = useCallback(async () => {
     await apiService.logout();
     navigate('/');
@@ -4189,6 +4198,9 @@ If rejection is about competition or location, suggest searching for a better lo
       requestConfigPanel();
       return;
     }
+    if (panel === 'reasoning' && !reasoningPanelAvailable) {
+      return;
+    }
     if (panel !== 'reasoning') {
       setHighlightedReasoningMessageIds([]);
     } else {
@@ -4197,7 +4209,7 @@ If rejection is about competition or location, suggest searching for a better lo
     startTransition(() => {
       setActivePanel(panel);
     });
-  }, [requestConfigPanel]);
+  }, [reasoningPanelAvailable, requestConfigPanel]);
 
   useEffect(() => {
     if (simulation.status === 'running') return;
@@ -4219,6 +4231,11 @@ If rejection is about competition or location, suggest searching for a better lo
     debateInviteShownForSimulationRef.current = simulationId;
     setDebateInviteVisible(true);
   }, [reasoningActive, simulation.reasoningFeed.length, simulation.simulationId, simulation.status]);
+
+  useEffect(() => {
+    if (activePanel !== 'reasoning' || reasoningPanelAvailable) return;
+    setActivePanel('chat');
+  }, [activePanel, reasoningPanelAvailable]);
 
   useEffect(() => {
     if (
@@ -4641,6 +4658,33 @@ If rejection is about competition or location, suggest searching for a better lo
     uiProgress,
   }), [settings.language, searchState, simulation.currentPhaseKey, simulation.error, simulation.status, uiProgress]);
 
+  const searchPanelModel = useMemo(() => buildSearchPanelModel({
+    language: settings.language,
+    activePanel,
+    searchState,
+    researchContext,
+    liveEvents: simulation.researchSources,
+    reviewRequired: pendingResearchReview || isResearchReviewPause,
+    pendingResearchReview: isResearchReviewPause ? simulation.pendingResearchReview : null,
+    isRunStarting,
+    isRunActive,
+    simulationActuallyStarted,
+    reasoningPanelAvailable,
+  }), [
+    activePanel,
+    isResearchReviewPause,
+    isRunActive,
+    isRunStarting,
+    pendingResearchReview,
+    reasoningPanelAvailable,
+    researchContext,
+    searchState,
+    settings.language,
+    simulation.pendingResearchReview,
+    simulation.researchSources,
+    simulationActuallyStarted,
+  ]);
+
   const sharedChatPanelProps = {
     messages: chatMessages,
     reasoningFeed: simulation.reasoningFeed,
@@ -4662,7 +4706,7 @@ If rejection is about competition or location, suggest searching for a better lo
     simulationError: simulation.error,
     reasoningActive,
     isSummarizing,
-    researchSourcesLive: simulation.researchSources,
+    searchPanelModel,
     quickReplies: quickReplies || undefined,
     onQuickReply: handleQuickReply,
     primaryControl,
@@ -4693,6 +4737,9 @@ If rejection is about competition or location, suggest searching for a better lo
     },
     settings,
   };
+
+  const showSearchSidePanel = searchPanelModel.visible;
+  const sidePanelMode = showSearchSidePanel ? 'search' : 'simulation';
 
   const sidePanel = (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[34px] border border-border/60 bg-card/35 shadow-[0_18px_60px_-42px_rgba(0,0,0,0.72)] backdrop-blur-xl">
@@ -4746,29 +4793,28 @@ If rejection is about competition or location, suggest searching for a better lo
             onAskSocietyAssistant={handleAskSocietyAssistant}
           />
         ) : activePanel === 'reasoning' ? (
-          <div className="flex h-full min-h-0 items-center justify-center rounded-[28px] border border-dashed border-border/55 bg-background/25 px-6 text-center text-sm text-muted-foreground">
-            {settings.language === 'ar'
-              ? 'النقاش مفتوح الآن في المساحة الرئيسية بالمنتصف.'
-              : 'Reasoning is now open in the main middle area.'}
-          </div>
+          <ChatPanel {...sharedChatPanelProps} viewMode="reasoning" showSearchLivePanel={false} />
         ) : (
-          <ChatPanel {...sharedChatPanelProps} viewMode="chat" />
+          <ChatPanel {...sharedChatPanelProps} viewMode="chat" showSearchLivePanel={!showSearchSidePanel} />
         )}
       </div>
     </div>
   );
 
   const arenaPanel = (
-    activePanel === 'reasoning' ? (
-      <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[32px] border border-border/60 bg-card/35 p-3">
-        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-          <ChatPanel {...sharedChatPanelProps} viewMode="reasoning" />
-        </div>
-      </div>
-    ) : (
-      <div className="grid min-h-0 gap-4 xl:grid-rows-[minmax(460px,1fr)_minmax(0,240px)]">
-        <div className="min-h-[380px] overflow-hidden rounded-[32px]">
-          <SimulationArena
+    <AnimatePresence mode="wait" initial={false}>
+      <motion.div
+        key={sidePanelMode}
+        initial={{ opacity: 0, x: 18 }}
+        animate={{ opacity: 1, x: 0 }}
+        exit={{ opacity: 0, x: -18 }}
+        transition={{ duration: 0.22, ease: 'easeOut' }}
+        className="h-full min-h-0"
+      >
+        {showSearchSidePanel ? (
+          <SearchPanel model={searchPanelModel} />
+        ) : (
+          <SimulationPanel
             agents={Array.from(simulation.agents.values())}
             activePulses={simulation.activePulses}
             language={settings.language}
@@ -4784,20 +4830,14 @@ If rejection is about competition or location, suggest searching for a better lo
               setDebateInviteVisible(false);
               handleManualPanelSwitch('reasoning');
             }}
-          />
-        </div>
-        <div className="min-h-0 overflow-y-auto rounded-[32px] border border-border/60 bg-card/35 p-3 scrollbar-thin">
-          <IterationTimeline
             currentIteration={simulation.metrics.currentIteration}
             totalIterations={simulation.metrics.totalIterations}
-            language={settings.language}
             currentPhaseKey={simulation.currentPhaseKey}
             phaseProgressPct={simulation.phaseProgressPct}
-            steps={simulationUiState.steps}
           />
-        </div>
-      </div>
-    )
+        )}
+      </motion.div>
+    </AnimatePresence>
   );
 
   const metricsPane = (
@@ -4850,8 +4890,11 @@ If rejection is about competition or location, suggest searching for a better lo
         currentStatusLabel={simulationUiState.currentStatusLabel}
         currentStatusTone={simulationUiState.currentStatusTone}
         currentStepLoading={simulationUiState.currentStepLoading}
+        steps={simulationUiState.steps}
         configDisabled={isConfigLocked}
         configDisabledReason={configLockReason}
+        reasoningDisabled={!reasoningPanelAvailable}
+        reasoningDisabledReason={reasoningPanelLockedReason}
         onPanelChange={handleManualPanelSwitch}
       />
       {creditNotice && (

@@ -3,7 +3,8 @@ import { Bot, Check, ChevronDown, Loader2, Play, RefreshCcw, Search, Send, Spark
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ReasoningBoard } from '@/components/chat/ReasoningBoard';
-import { SearchLivePanel, type SearchLiveEvent } from '@/components/chat/SearchLivePanel';
+import { SearchLivePanel } from '@/components/chat/SearchLivePanel';
+import type { SearchPanelModel } from '@/lib/searchPanelModel';
 import {
   ChatMessage,
   PendingClarification,
@@ -49,7 +50,8 @@ interface ChatPanelProps {
   viewMode?: 'chat' | 'reasoning';
   searchState?: { status: 'idle' | 'searching' | 'timeout' | 'error' | 'complete'; stage?: BusyStage; timeoutMs?: number; elapsedMs?: number };
   uiProgress?: { active: boolean; stage: BusyStage; elapsedMs?: number; timeoutMs?: number };
-  researchSourcesLive?: SearchLiveEvent[];
+  searchPanelModel?: SearchPanelModel | null;
+  showSearchLivePanel?: boolean;
   primaryControl?: {
     key: string;
     label: string;
@@ -185,7 +187,8 @@ export function ChatPanel(props: ChatPanelProps) {
     viewMode = 'chat',
     searchState,
     uiProgress,
-    researchSourcesLive = [],
+    searchPanelModel = null,
+    showSearchLivePanel = true,
     primaryControl = null,
     pendingClarification = null,
     canAnswerClarification = false,
@@ -338,7 +341,7 @@ export function ChatPanel(props: ChatPanelProps) {
     <div className="flex h-full min-h-0 flex-col" dir="rtl">
       <div ref={listRef} className="flex-1 space-y-5 overflow-y-auto px-5 py-5 scrollbar-thin">
         {inlineStatus ? <div className={cn('rounded-[24px] border px-4 py-3 text-sm', inlineStatus.tone === 'warning' && 'border-amber-400/30 bg-amber-500/10 text-amber-100', inlineStatus.tone === 'error' && 'border-rose-400/30 bg-rose-500/10 text-rose-100', inlineStatus.tone === 'info' && 'border-sky-400/25 bg-sky-500/10 text-sky-100')}>{inlineStatus.label}</div> : null}
-        {(researchSourcesLive.length || searchState?.status !== 'idle') ? <SearchLivePanel language={language} searchState={searchState} events={researchSourcesLive} /> : null}
+        {showSearchLivePanel && searchPanelModel && searchPanelModel.stage !== 'hidden' ? <SearchLivePanel model={searchPanelModel} /> : null}
         {!isReasoningView && (reasoningActive || reasoningFeed.length > 1) ? <section className="rounded-[30px] border border-primary/25 bg-primary/10 p-5"><div className="flex items-center justify-between gap-3"><div><h3 className="text-base font-semibold text-foreground">{language === 'ar' ? 'الوكلاء بدأوا يتناقشون الآن' : 'Agents have started debating now'}</h3><p className="mt-1 text-sm text-muted-foreground">{language === 'ar' ? 'افتح شاشة النقاش لرؤية الحوار الجماعي بين الوكلاء.' : 'Open the reasoning view to watch the group discussion.'}</p></div>{onRequestReasoningView ? <Button type="button" onClick={onRequestReasoningView} className="rounded-2xl">{language === 'ar' ? 'مشاهدة النقاش' : 'Open reasoning'}</Button> : null}</div></section> : null}
         {isReasoningView ? <ReasoningBoard language={language} messages={reasoningFeed} highlightIds={highlightReasoningMessageIds} /> : <>
           {messages.map((message) => {

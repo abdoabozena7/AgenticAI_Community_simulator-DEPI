@@ -2,6 +2,7 @@
 import { websocketService, WebSocketEvent, MetricsEvent, ReasoningStepEvent, ReasoningDebugEvent, AgentsEvent } from '@/services/websocket';
 import { apiService, clearAuthTokens, getRealtimeBaseUrl, SimulationConfig, SimulationStateResponse } from '@/services/api';
 import { Agent, ReasoningMessage, ReasoningDebug, SimulationMetrics, SimulationStatus, SimulationChatEvent, PendingClarification, PendingResearchReview, CoachIntervention } from '@/types/simulation';
+import type { SearchLiveEvent } from '@/lib/searchPanelModel';
 
 interface SimulationState {
   status: SimulationStatus;
@@ -22,24 +23,7 @@ interface SimulationState {
   reasoningFeed: ReasoningMessage[];
   reasoningDebug: ReasoningDebug[];
   chatEvents: SimulationChatEvent[];
-  researchSources: {
-    eventSeq?: number;
-    cycleId?: string | null;
-    action?: string | null;
-    status?: string | null;
-    url?: string | null;
-    domain?: string | null;
-    faviconUrl?: string | null;
-    title?: string | null;
-    httpStatus?: number | null;
-    contentChars?: number | null;
-    relevanceScore?: number | null;
-    progressPct?: number | null;
-    snippet?: string | null;
-    error?: string | null;
-    metaJson?: Record<string, unknown> | null;
-    timestamp: number;
-  }[];
+  researchSources: SearchLiveEvent[];
   summary: string | null;
   canResume: boolean;
   resumeReason: string | null;
@@ -76,6 +60,7 @@ type SimulationAction =
   | { type: 'ADD_REASONING_DEBUG'; payload: ReasoningDebugEvent }
   | { type: 'SET_RESEARCH_SOURCES'; payload: SimulationState['researchSources'] }
   | { type: 'ADD_RESEARCH_SOURCE'; payload: SimulationState['researchSources'][number] }
+  | { type: 'CLEAR_RESEARCH_SOURCES' }
   | { type: 'SET_SUMMARY'; payload: string | null }
   | { type: 'SET_RESUME_META'; payload: { canResume: boolean; resumeReason: string | null } }
   | { type: 'SET_CLARIFICATION'; payload: { pendingClarification: PendingClarification | null; canAnswerClarification: boolean } }
@@ -558,6 +543,12 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
       return {
         ...state,
         researchSources: action.payload,
+      };
+
+    case 'CLEAR_RESEARCH_SOURCES':
+      return {
+        ...state,
+        researchSources: [],
       };
 
     case 'ADD_RESEARCH_SOURCE': {
@@ -1752,6 +1743,10 @@ export function useSimulation(options?: UseSimulationOptions) {
     dispatch({ type: 'RESET' });
   }, [clearPolling]);
 
+  const clearResearchSources = useCallback(() => {
+    dispatch({ type: 'CLEAR_RESEARCH_SOURCES' });
+  }, []);
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
     if (state.simulationId) {
@@ -1818,6 +1813,7 @@ export function useSimulation(options?: UseSimulationOptions) {
     submitResearchAction,
     submitClarificationAnswer,
     respondToCoachIntervention,
+    clearResearchSources,
     stopSimulation,
     activePulses: state.activePulses,
   };

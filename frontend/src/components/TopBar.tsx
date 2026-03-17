@@ -1,4 +1,5 @@
 import { Brain, MessageSquareMore, MoonStar, Sparkles, SunMedium } from 'lucide-react';
+import type { TopBarStep } from '@/types/simulation';
 import { cn } from '@/lib/utils';
 
 export const CATEGORY_OPTIONS = [
@@ -33,9 +34,12 @@ interface TopBarProps {
   currentStatusLabel: string;
   currentStatusTone?: 'idle' | 'info' | 'success' | 'warning' | 'error';
   currentStepLoading?: boolean;
+  steps?: TopBarStep[];
   onPanelChange?: (panel: 'config' | 'chat' | 'reasoning') => void;
   configDisabled?: boolean;
   configDisabledReason?: string;
+  reasoningDisabled?: boolean;
+  reasoningDisabledReason?: string;
 }
 
 const toneClasses: Record<NonNullable<TopBarProps['currentStatusTone']>, string> = {
@@ -56,9 +60,12 @@ export function TopBar({
   currentStatusLabel,
   currentStatusTone = 'idle',
   currentStepLoading = false,
+  steps = [],
   onPanelChange,
   configDisabled = false,
   configDisabledReason,
+  reasoningDisabled = false,
+  reasoningDisabledReason,
 }: TopBarProps) {
   const panelItems = [
     { key: 'chat' as const, label: language === 'ar' ? 'الدردشة' : 'Chat', icon: MessageSquareMore },
@@ -100,7 +107,8 @@ export function TopBar({
           <div className="grid grid-cols-3 gap-2 xl:min-w-[360px]">
             {panelItems.map((item) => {
               const Icon = item.icon;
-              const disabled = item.key === 'config' && configDisabled;
+              const disabled = (item.key === 'config' && configDisabled) || (item.key === 'reasoning' && reasoningDisabled);
+              const disabledReason = item.key === 'config' ? configDisabledReason : item.key === 'reasoning' ? reasoningDisabledReason : undefined;
               const label = item.key === 'reasoning' && reasoningCount > 0
                 ? `${item.label} (${reasoningCount})`
                 : item.label;
@@ -110,7 +118,7 @@ export function TopBar({
                   type="button"
                   onClick={() => !disabled && onPanelChange?.(item.key)}
                   disabled={disabled}
-                  title={disabled ? configDisabledReason : undefined}
+                  title={disabled ? disabledReason : undefined}
                   className={cn(
                     'flex h-11 items-center justify-center gap-2 rounded-full border text-sm font-semibold transition-all duration-200',
                     activePanel === item.key
@@ -126,6 +134,60 @@ export function TopBar({
             })}
           </div>
         </div>
+
+        {steps.length ? (
+          <div className="overflow-x-auto scrollbar-thin">
+            <div className="flex min-w-max items-center gap-2 pb-1" dir="rtl">
+              {steps.map((step, index) => (
+                <div key={step.key} className="flex items-center gap-2">
+                  <div
+                    className={cn(
+                      'group flex min-w-[132px] items-center gap-2 rounded-full border px-3 py-2 text-sm transition-all duration-300',
+                      step.state === 'completed' && 'border-emerald-400/40 bg-emerald-500/12 text-emerald-100',
+                      step.state === 'current' && 'border-white/35 bg-white text-slate-950 shadow-[0_14px_28px_-20px_rgba(255,255,255,0.9)]',
+                      step.state === 'upcoming' && 'border-amber-400/40 bg-amber-500/12 text-amber-100',
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        'flex h-6 w-6 items-center justify-center rounded-full transition-all duration-300',
+                        step.state === 'completed' && 'bg-emerald-400 text-slate-950',
+                        step.state === 'current' && 'bg-slate-950 text-white',
+                        step.state === 'upcoming' && 'bg-amber-300 text-slate-950',
+                      )}
+                    >
+                      {step.state === 'current' ? (
+                        <span className="relative flex h-2.5 w-2.5">
+                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white/70 opacity-75" />
+                          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-white" />
+                        </span>
+                      ) : (
+                        <span className="text-[11px] font-bold">{index + 1}</span>
+                      )}
+                    </span>
+                    <div className="min-w-0">
+                      <div className="truncate font-semibold">{step.label}</div>
+                      {step.subtleStatus ? (
+                        <div className={cn('truncate text-[11px]', step.state === 'current' ? 'text-slate-700' : 'text-current/70')}>
+                          {step.subtleStatus}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                  {index < steps.length - 1 ? (
+                    <div
+                      className={cn(
+                        'h-px w-6 shrink-0 transition-colors duration-300',
+                        step.state === 'completed' ? 'bg-emerald-400/60' : 'bg-border/70',
+                      )}
+                      aria-hidden="true"
+                    />
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );

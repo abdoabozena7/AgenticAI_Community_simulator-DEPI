@@ -124,6 +124,47 @@ const findPhaseIndex = (phaseKey?: string | null) => {
 const labelForPhase = (language: SupportedLanguage, phaseKey?: string | null) =>
   PHASES[findPhaseIndex(phaseKey)].labels[language];
 
+const resolveDisplayPhaseKey = ({
+  phaseKey,
+  simulationStatus,
+  searchState,
+  uiProgress,
+}: {
+  phaseKey?: string | null;
+  simulationStatus: 'idle' | 'configuring' | 'running' | 'paused' | 'completed' | 'error';
+  searchState?: SearchState;
+  uiProgress?: UiProgress;
+}) => {
+  const normalizedPhaseKey = String(phaseKey || '').trim();
+  const phaseIndex = findPhaseIndex(phaseKey);
+
+  if (simulationStatus === 'completed') {
+    return 'summary';
+  }
+
+  if (normalizedPhaseKey && phaseIndex > 0) {
+    return phaseKey;
+  }
+
+  if (uiProgress?.active && uiProgress.stage === 'starting_simulation') {
+    return 'agent_deliberation';
+  }
+
+  if (simulationStatus === 'running' || simulationStatus === 'configuring' || simulationStatus === 'paused') {
+    return normalizedPhaseKey || 'agent_deliberation';
+  }
+
+  if (searchState?.status && searchState.status !== 'idle') {
+    return 'internet_research';
+  }
+
+  if (uiProgress?.active && uiProgress.stage === 'prestart_research') {
+    return 'internet_research';
+  }
+
+  return normalizedPhaseKey || 'idea_intake';
+};
+
 const getStatusCopy = ({
   language,
   simulationStatus,
@@ -206,12 +247,18 @@ export const buildSimulationUiState = ({
 }): SimulationUiState => {
   const copy = EMPTY_COPY[language];
   const statusCopy = getStatusCopy({ language, simulationStatus, simulationError, searchState, uiProgress });
+  const displayPhaseKey = resolveDisplayPhaseKey({
+    phaseKey,
+    simulationStatus,
+    searchState,
+    uiProgress,
+  });
   return {
     screenTitle: copy.screenTitle,
-    stageLabel: labelForPhase(language, phaseKey),
+    stageLabel: labelForPhase(language, displayPhaseKey),
     currentStatusLabel: statusCopy.label,
     currentStatusTone: statusCopy.tone,
-    steps: buildSteps(language, phaseKey),
+    steps: buildSteps(language, displayPhaseKey),
     currentStepLoading: Boolean(searchState?.status === 'searching' || uiProgress?.active),
     graphTitle: copy.graphTitle,
     graphDescription: copy.graphDescription,

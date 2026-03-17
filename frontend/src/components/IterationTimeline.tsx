@@ -1,6 +1,4 @@
 import { cn } from '@/lib/utils';
-import type { TopBarStep } from '@/types/simulation';
-
 interface IterationTimelineProps {
   currentIteration: number;
   totalIterations: number;
@@ -8,7 +6,6 @@ interface IterationTimelineProps {
   language: 'ar' | 'en';
   currentPhaseKey?: string | null;
   phaseProgressPct?: number | null;
-  steps?: TopBarStep[];
 }
 
 type CanonicalPhaseKey =
@@ -73,7 +70,6 @@ export function IterationTimeline({
   language,
   currentPhaseKey,
   phaseProgressPct,
-  steps = [],
 }: IterationTimelineProps) {
   const normalizedPhase = normalizePhase(currentPhaseKey);
   const phaseIndex = normalizedPhase ? PHASE_ORDER.indexOf(normalizedPhase) : -1;
@@ -103,60 +99,6 @@ export function IterationTimeline({
 
   return (
     <div className="glass-panel p-5 lg:p-6">
-      {steps.length ? (
-        <div className="mb-5 overflow-x-auto scrollbar-thin">
-          <div className="flex min-w-max items-center gap-2 pb-1" dir="rtl">
-            {steps.map((step, index) => (
-              <div key={step.key} className="flex items-center gap-2">
-                <div
-                  className={cn(
-                    'group flex min-w-[132px] items-center gap-2 rounded-full border px-3 py-2 text-sm transition-all duration-300',
-                    step.state === 'completed' && 'border-emerald-400/40 bg-emerald-500/12 text-emerald-100',
-                    step.state === 'current' && 'border-white/35 bg-white text-slate-950 shadow-[0_14px_28px_-20px_rgba(255,255,255,0.9)]',
-                    step.state === 'upcoming' && 'border-amber-400/40 bg-amber-500/12 text-amber-100',
-                  )}
-                >
-                  <span
-                    className={cn(
-                      'flex h-6 w-6 items-center justify-center rounded-full transition-all duration-300',
-                      step.state === 'completed' && 'bg-emerald-400 text-slate-950',
-                      step.state === 'current' && 'bg-slate-950 text-white',
-                      step.state === 'upcoming' && 'bg-amber-300 text-slate-950',
-                    )}
-                  >
-                    {step.state === 'current' ? (
-                      <span className="relative flex h-2.5 w-2.5">
-                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white/70 opacity-75" />
-                        <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-white" />
-                      </span>
-                    ) : (
-                      <span className="text-[11px] font-bold">{index + 1}</span>
-                    )}
-                  </span>
-                  <div className="min-w-0">
-                    <div className="truncate font-semibold">{step.label}</div>
-                    {step.subtleStatus ? (
-                      <div className={cn('truncate text-[11px]', step.state === 'current' ? 'text-slate-700' : 'text-current/70')}>
-                        {step.subtleStatus}
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-                {index < steps.length - 1 ? (
-                  <div
-                    className={cn(
-                      'h-px w-6 shrink-0 transition-colors duration-300',
-                      step.state === 'completed' ? 'bg-emerald-400/60' : 'bg-border/70',
-                    )}
-                    aria-hidden="true"
-                  />
-                ) : null}
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-
       <div className="mb-4 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="h-2.5 w-2.5 animate-pulse rounded-full bg-primary" />
