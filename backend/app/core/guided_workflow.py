@@ -5,13 +5,31 @@ import json
 import re
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
+from ..agents.base import AgentRuntime
+from ..agents.persona_agent import PersonaAgent
+from ..core.dataset_loader import load_dataset
+from ..models.orchestration import (
+    EvidenceItem,
+    OrchestrationState,
+    PersonaSourceMode,
+    ResearchQuery,
+    ResearchReport,
+    classify_idea_context,
+    context_location_label,
+    normalize_context,
+    resolve_persona_source_mode,
+)
+from ..services.llm_gateway import LLMGateway
+from ..services.simulation_repository import SimulationRepository
 from . import db as db_core
 from .web_search import search_web
 
 _WORKFLOWS: Dict[str, Dict[str, Any]] = {}
 _WORKFLOW_LOCK = asyncio.Lock()
+_WORKFLOW_PERSONA_AGENT: Optional[PersonaAgent] = None
 
 WORKFLOW_STAGES = [
     "context_scope",
@@ -50,6 +68,29 @@ BIAS_TRIGGER_PATTERNS = (
     "they should all like",
     "everyone will love",
 )
+
+
+class _WorkflowEventBus:
+    async def publish(self, state: OrchestrationState, event_type: str, payload: Dict[str, Any], *, persist_research: bool = False) -> Dict[str, Any]:
+        return {
+            "simulation_id": state.simulation_id,
+            "type": event_type,
+            "payload": dict(payload),
+            "persist_research": persist_research,
+        }
+
+    async def publish_turn(self, state: OrchestrationState, turn: Any) -> Dict[str, Any]:
+        return {
+            "simulation_id": state.simulation_id,
+            "type": "turn",
+            "payload": getattr(turn, "to_dict", lambda: {})(),
+        }
+
+
+class _WorkflowPersonaError(RuntimeError):
+    def __init__(self, message: str, orchestration_state: OrchestrationState) -> None:
+        super().__init__(message)
+        self.orchestration_state = orchestration_state
 
 
 def _now_ms() -> int:
@@ -321,82 +362,239 @@ async def _run_location_research(state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _persona_title(base: str, suffix: str, place_label: str) -> str:
-    if place_label:
-        return f"{place_label} {base} {suffix}".strip()
-    return f"{base} {suffix}".strip()
-
-
-def _synthesize_personas(state: Dict[str, Any], *, library_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    draft = state.get("draft_context") or {}
-    scope = _normalize_scope(draft.get("contextScope"))
-    place_label = str(draft.get("placeName") or draft.get("city") or draft.get("country") or "").strip()
-    if library_payload and isinstance(library_payload.get("personas"), list):
-        snapshot = _clone(library_payload)
-        snapshot["source"] = "library"
-        return snapshot
-
-    idea_summary = str(((state.get("idea_research") or {}).get("summary")) or draft.get("idea") or "").strip()
-    location_signals = (state.get("location_research") or {}).get("signals") or []
-    personas = [
-        {
-            "id": "pragmatic-operator",
-            "label": _persona_title("Pragmatic", "Operator", place_label),
-            "stance": "neutral",
-            "summary": f"Evaluates the idea based on operational reliability and immediate value. {idea_summary[:120]}",
-            "motivations": ["clear ROI", "simple onboarding", "credible execution"],
-            "concerns": ["complex rollout", "unclear ownership", "vendor lock-in"],
-            "source_signals": location_signals[:2],
-        },
-        {
-            "id": "skeptical-comparer",
-            "label": _persona_title("Skeptical", "Comparer", place_label),
-            "stance": "reject",
-            "summary": "Compares alternatives and challenges unsupported claims before changing opinion.",
-            "motivations": ["evidence", "price transparency", "trust"],
-            "concerns": ["weak differentiation", "marketing exaggeration", "social proof gaps"],
-            "source_signals": location_signals[1:3],
-        },
-        {
-            "id": "community-amplifier",
-            "label": _persona_title("Community", "Amplifier", place_label),
-            "stance": "accept",
-            "summary": "Can spread adoption if the product feels locally relevant and shareable.",
-            "motivations": ["word of mouth", "community relevance", "identity fit"],
-            "concerns": ["cultural mismatch", "tone deaf messaging", "poor support"],
-            "source_signals": location_signals[2:4],
-        },
-        {
-            "id": "budget-sensitive-adopter",
-            "label": _persona_title("Budget-Sensitive", "Adopter", place_label),
-            "stance": "neutral",
-            "summary": "Wants the upside but weighs cost, switching effort, and risk carefully.",
-            "motivations": ["affordability", "quick trial", "low switching cost"],
-            "concerns": ["subscription fatigue", "hidden fees", "unclear payback"],
-            "source_signals": location_signals[3:5],
-        },
-    ]
-    if scope == "specific_place":
-        personas.append(
-            {
-                "id": "local-norms-guardian",
-                "label": _persona_title("Local Norms", "Guardian", place_label),
-                "stance": "neutral",
-                "summary": "Filters the idea through local trust patterns, etiquette, and credibility markers.",
-                "motivations": ["cultural fit", "familiar channels", "trusted references"],
-                "concerns": ["outsider framing", "unsafe assumptions", "misread local habits"],
-                "source_signals": location_signals[:3],
-            }
+def _guided_persona_agent() -> PersonaAgent:
+    global _WORKFLOW_PERSONA_AGENT
+    if _WORKFLOW_PERSONA_AGENT is None:
+        data_dir = Path(__file__).resolve().parents[1] / "data"
+        runtime = AgentRuntime(
+            dataset=load_dataset(str(data_dir)),
+            llm=LLMGateway(),
+            event_bus=_WorkflowEventBus(),
+            repository=SimulationRepository(),
         )
-    return {
-        "title": place_label or ("Global personas" if scope == "global" else "General web personas"),
-        "place_key": _canonical_place_key(place_label or scope, scope),
-        "place_label": place_label or ("Global" if scope == "global" else "Internet"),
-        "scope": scope or "internet",
-        "source_policy": "open_socials",
-        "source": "generated",
-        "personas": personas,
+        _WORKFLOW_PERSONA_AGENT = PersonaAgent(runtime)
+    return _WORKFLOW_PERSONA_AGENT
+
+
+def _workflow_user_context(state: Dict[str, Any]) -> Dict[str, Any]:
+    draft = state.get("draft_context") or {}
+    payload = {
+        "idea": str(draft.get("idea") or "").strip(),
+        "category": str(draft.get("category") or "").strip(),
+        "country": str(draft.get("country") or "").strip(),
+        "city": str(draft.get("city") or "").strip(),
+        "location": str(draft.get("placeName") or "").strip(),
+        "targetAudience": list(draft.get("targetAudience") or []),
+        "goals": list(draft.get("goals") or []),
+        "agentCount": 30,
+        "personaSourceMode": draft.get("personaSourceMode"),
     }
+    return normalize_context(payload)
+
+
+def _workflow_research_report(state: Dict[str, Any]) -> ResearchReport:
+    draft = state.get("draft_context") or {}
+    idea_research = state.get("idea_research") or {}
+    location_research = state.get("location_research") or {}
+    query_plan: List[ResearchQuery] = []
+    evidence: List[EvidenceItem] = []
+    findings: List[str] = []
+
+    idea_query = str(idea_research.get("query") or "").strip()
+    if idea_query:
+        query_plan.append(ResearchQuery(query=idea_query, reason="General idea and market research"))
+    for query in location_research.get("query_plan") or []:
+        text = str(query or "").strip()
+        if text:
+            query_plan.append(ResearchQuery(query=text, reason="Local sentiment and place context research"))
+
+    for item in idea_research.get("highlights") or []:
+        text = str(item).strip()
+        if text and text not in findings:
+            findings.append(text)
+    for item in location_research.get("signals") or []:
+        text = str(item).strip()
+        if text and text not in findings:
+            findings.append(text)
+
+    for row in idea_research.get("sources") or []:
+        if not isinstance(row, dict):
+            continue
+        evidence.append(
+            EvidenceItem(
+                query=idea_query or str(draft.get("idea") or "").strip(),
+                title=str(row.get("title") or row.get("url") or "").strip(),
+                url=str(row.get("url") or "").strip(),
+                domain=str(row.get("domain") or "").strip(),
+                snippet=str(row.get("snippet") or row.get("reason") or "").strip(),
+                content="",
+                relevance_score=float(row.get("score") or 0.0),
+                http_status=None,
+            )
+        )
+
+    place_query = str((location_research.get("query_plan") or [""])[0] or "").strip()
+    for row in location_research.get("sources") or []:
+        if not isinstance(row, dict):
+            continue
+        evidence.append(
+            EvidenceItem(
+                query=place_query or str(location_research.get("place_label") or draft.get("placeName") or "").strip(),
+                title=str(row.get("title") or row.get("url") or "").strip(),
+                url=str(row.get("url") or "").strip(),
+                domain=str(row.get("domain") or "").strip(),
+                snippet=str(row.get("snippet") or row.get("reason") or "").strip(),
+                content="",
+                relevance_score=float(row.get("score") or 0.0),
+                http_status=None,
+            )
+        )
+
+    summary_parts = [
+        str(idea_research.get("summary") or "").strip(),
+        str(location_research.get("summary") or "").strip(),
+    ]
+    summary = " | ".join(part for part in summary_parts if part)
+    quality = {
+        "idea_research": dict(idea_research.get("quality") or {}),
+        "location_source_count": len(location_research.get("sources") or []),
+        "workflow_scope": _normalize_scope(draft.get("contextScope")),
+    }
+    gaps: List[str] = []
+    if _normalize_scope(draft.get("contextScope")) == "specific_place" and not (location_research.get("sources") or []):
+        gaps.append("No local sources were found for the requested place.")
+    return ResearchReport(
+        query_plan=query_plan,
+        evidence=evidence,
+        summary=summary or str(draft.get("idea") or "").strip(),
+        findings=findings[:12],
+        gaps=gaps,
+        quality=quality,
+        structured_schema={
+            "signals": findings[:12],
+            "place_context": str(location_research.get("place_label") or draft.get("placeName") or "").strip(),
+            "target_audiences": list(draft.get("targetAudience") or []),
+            "default_audience_dataset_used": not bool(draft.get("placeName") or draft.get("city") or draft.get("country")),
+        },
+    )
+
+
+def _workflow_persona_state(state: Dict[str, Any]) -> OrchestrationState:
+    user_context = _workflow_user_context(state)
+    context_type = classify_idea_context(user_context)
+    persona_source_mode, auto_selected = resolve_persona_source_mode(user_context, context_type=context_type)
+    orchestration_state = OrchestrationState(
+        simulation_id=str(uuid.uuid4()),
+        user_id=state.get("user_id"),
+        user_context=user_context,
+    )
+    orchestration_state.idea_context_type = context_type.value
+    orchestration_state.persona_source_mode = persona_source_mode
+    orchestration_state.persona_source_auto_selected = auto_selected
+    if auto_selected and persona_source_mode == PersonaSourceMode.DEFAULT_AUDIENCE_ONLY.value:
+        orchestration_state.persona_source_notice = (
+            "This idea looks general, so the system will use default audience personas unless you choose to generate custom personas."
+        )
+    orchestration_state.search_completed = True
+    orchestration_state.research = _workflow_research_report(state)
+    return orchestration_state
+
+
+async def _generate_persona_snapshot(state: Dict[str, Any]) -> Tuple[Dict[str, Any], OrchestrationState]:
+    agent = _guided_persona_agent()
+    orchestration_state = _workflow_persona_state(state)
+    try:
+        await agent.run(orchestration_state)
+    except Exception as exc:
+        raise _WorkflowPersonaError(str(exc), orchestration_state) from exc
+
+    place_label = context_location_label(orchestration_state.user_context)
+    library_label = agent._library_label(orchestration_state, place_label)
+    place_key = agent._place_key(library_label)
+    audience_filters = agent._normalized_audiences(orchestration_state)
+    fingerprint = agent._fingerprint(orchestration_state)
+    report = dict(orchestration_state.persona_generation_debug or {})
+    validation = dict(report.get("validation") or {})
+    evidence_summary = {
+        "signals": report.get("evidence_signals") or [],
+        "social_sentiment": report.get("social_sentiment") or {},
+        "research_summary": str((orchestration_state.research.summary if orchestration_state.research else "") or ""),
+    }
+    snapshot = {
+        "title": library_label,
+        "place_key": place_key,
+        "place_label": library_label,
+        "scope": "shared",
+        "source_policy": orchestration_state.persona_source_mode,
+        "source": "generated",
+        "generated_at": _now_ms(),
+        "persona_count": len(orchestration_state.personas),
+        "audience_filters": audience_filters,
+        "quality_score": float(report.get("quality_score") or 0.0),
+        "confidence_score": float(report.get("confidence_score") or 0.0),
+        "source_summary": str(report.get("source_summary") or ""),
+        "evidence_summary": evidence_summary,
+        "generation_config": {
+            "requested_count": report.get("target_count"),
+            "actual_count": report.get("actual_count"),
+            "batch_size": report.get("batch_size"),
+            "batch_count": report.get("batch_count"),
+            "context_type": orchestration_state.idea_context_type,
+            "source_mode": orchestration_state.persona_source_mode,
+        },
+        "validation": validation,
+        "developer_visibility": {
+            "current_stage": "persistence_completed",
+            "batch_count": report.get("batch_count"),
+            "evidence_signal_count": len(report.get("evidence_signals") or []),
+            "duplicate_rejection_count": report.get("duplicate_rejection_count", 0),
+            "final_persona_count": len(orchestration_state.personas),
+            "persistence_status": "pending",
+        },
+        "reusable_dataset_ref": fingerprint,
+        "personas": [persona.to_dict() for persona in orchestration_state.personas],
+    }
+
+    await db_core.upsert_persona_library_record(
+        user_id=state.get("user_id"),
+        place_key=place_key,
+        place_label=library_label,
+        scope="shared",
+        source_policy=orchestration_state.persona_source_mode,
+        audience_filters=audience_filters,
+        source_summary=str(report.get("source_summary") or ""),
+        evidence_summary=evidence_summary,
+        generation_config=dict(snapshot.get("generation_config") or {}),
+        quality_score=float(report.get("quality_score") or 0.0),
+        confidence_score=float(report.get("confidence_score") or 0.0),
+        quality_meta=dict(report.get("quality_meta") or {}),
+        validation_meta=validation,
+        reusable_dataset_ref=fingerprint,
+        context_type=orchestration_state.idea_context_type,
+        shared_asset=True,
+        payload=snapshot,
+    )
+    record = await db_core.fetch_persona_library_record(
+        user_id=state.get("user_id"),
+        place_key=place_key,
+        audience_filters=audience_filters,
+        source_mode=orchestration_state.persona_source_mode,
+    )
+    snapshot["persona_set"] = {
+        "id": (record or {}).get("id"),
+        "set_key": (record or {}).get("set_key"),
+        "place_key": (record or {}).get("place_key") or place_key,
+        "place_label": (record or {}).get("place_label") or library_label,
+        "created_at": (record or {}).get("created_at"),
+        "updated_at": (record or {}).get("updated_at"),
+        "persona_count": (record or {}).get("persona_count") or len(orchestration_state.personas),
+        "quality_score": (record or {}).get("quality_score") or float(report.get("quality_score") or 0.0),
+        "confidence_score": (record or {}).get("confidence_score") or float(report.get("confidence_score") or 0.0),
+        "reusable_dataset_ref": (record or {}).get("reusable_dataset_ref") or fingerprint,
+    }
+    snapshot["developer_visibility"]["persistence_status"] = "completed"
+    snapshot["persistence_status"] = "completed"
+    return snapshot, orchestration_state
 
 
 def _review_payload(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -412,9 +610,13 @@ def _review_payload(state: Dict[str, Any]) -> Dict[str, Any]:
         "location_summary": location_research.get("summary") or "",
         "persona_count": len(persona_snapshot.get("personas") or []),
         "persona_title": persona_snapshot.get("title") or "",
+        "persona_quality_score": persona_snapshot.get("quality_score"),
+        "persona_confidence_score": persona_snapshot.get("confidence_score"),
+        "persona_validation_errors": state.get("persona_validation_errors") or [],
+        "persona_persistence_status": persona_snapshot.get("persistence_status") or "pending",
         "applied_corrections": corrections[-5:],
         "estimated_runtime_seconds": 180,
-        "ready_to_start": True,
+        "ready_to_start": not bool(state.get("persona_validation_errors") or []),
     }
 
 
@@ -425,15 +627,18 @@ def _verify_stage(state: Dict[str, Any], stage: str) -> Dict[str, Any]:
         scope = _normalize_scope((state.get("draft_context") or {}).get("contextScope"))
         ok = scope != "specific_place" or bool((state.get("location_research") or {}).get("sources"))
     elif stage == "persona_synthesis":
-        ok = len((state.get("persona_snapshot") or {}).get("personas") or []) >= 4
+        snapshot = state.get("persona_snapshot") or {}
+        validation = snapshot.get("validation") if isinstance(snapshot.get("validation"), dict) else {}
+        ok = bool(snapshot.get("personas")) and not bool((state.get("persona_validation_errors") or []) or (validation.get("errors") or [])) and bool(snapshot.get("persona_set"))
     elif stage == "review":
-        ok = bool((state.get("review") or {}).get("ready_to_start"))
+        ok = bool((state.get("review") or {}).get("ready_to_start")) and not bool(state.get("persona_validation_errors") or [])
     else:
         ok = True
     return {
         "stage": stage,
         "ok": ok,
         "checked_at": _now_ms(),
+        "errors": list(state.get("persona_validation_errors") or []),
     }
 
 
@@ -489,10 +694,14 @@ def _invalidate_downstream(state: Dict[str, Any], *, field_updates: Dict[str, An
         state["clarification_answers"] = {}
         state["idea_research"] = None
         state["persona_snapshot"] = None
+        state["persona_generation_debug"] = {}
+        state["persona_validation_errors"] = []
         state["review"] = None
     if affected_keys & {"city", "country", "placeName", "contextScope"}:
         state["location_research"] = None
         state["persona_snapshot"] = None
+        state["persona_generation_debug"] = {}
+        state["persona_validation_errors"] = []
         state["review"] = None
     if affected_keys:
         state["review_approved"] = False
@@ -504,6 +713,8 @@ def _state_response(state: Dict[str, Any]) -> Dict[str, Any]:
     payload["estimated_total_seconds"] = _remaining_eta(state)
     payload["required_fields"] = _required_fields(state)
     payload["verification"] = state.get("verification") or {}
+    payload["persona_generation_debug"] = state.get("persona_generation_debug") or {}
+    payload["persona_validation_errors"] = state.get("persona_validation_errors") or []
     payload["context_options"] = CONTEXT_OPTIONS
     return payload
 
@@ -601,25 +812,49 @@ async def _advance_until_input(state: Dict[str, Any]) -> None:
     if state.get("persona_snapshot") is None:
         state["status"] = "in_progress"
         _mark_stage(state, "persona_synthesis", "in_progress", "Building personas.")
-        scope_label = _normalize_scope((state.get("draft_context") or {}).get("contextScope"))
-        place_label = str((state.get("draft_context") or {}).get("placeName") or (state.get("draft_context") or {}).get("city") or scope_label).strip()
-        place_key = _canonical_place_key(place_label or scope_label, scope_label)
-        existing_library = await db_core.fetch_persona_library_record(user_id=state.get("user_id"), place_key=place_key)
-        library_payload = existing_library.get("payload") if existing_library else None
-        snapshot = _synthesize_personas(state, library_payload=library_payload if isinstance(library_payload, dict) else None)
+        try:
+            snapshot, persona_state = await _generate_persona_snapshot(state)
+        except _WorkflowPersonaError as exc:
+            detail = str(exc).strip() or "Persona generation failed."
+            persona_state = exc.orchestration_state
+            state["persona_generation_debug"] = dict(persona_state.persona_generation_debug or {})
+            state["persona_validation_errors"] = list(persona_state.persona_validation_errors or [detail])
+            state["persona_snapshot"] = None
+            state["verification"] = _verify_stage(state, "persona_synthesis")
+            _mark_stage(state, "persona_synthesis", "awaiting_input", detail)
+            _add_guide_message(
+                state,
+                f"Persona generation is blocked: {detail}"
+                if state.get("language") == "en"
+                else f"تم إيقاف توليد الشخصيات: {detail}",
+                stage="persona_synthesis",
+                tone="status",
+            )
+            return
+        except Exception as exc:
+            detail = str(exc).strip() or "Persona generation failed."
+            state["persona_snapshot"] = None
+            state["persona_generation_debug"] = {}
+            state["persona_validation_errors"] = [detail]
+            state["verification"] = _verify_stage(state, "persona_synthesis")
+            _mark_stage(state, "persona_synthesis", "awaiting_input", detail)
+            _add_guide_message(
+                state,
+                f"Persona generation is blocked: {detail}"
+                if state.get("language") == "en"
+                else f"تم إيقاف توليد الشخصيات: {detail}",
+                stage="persona_synthesis",
+                tone="status",
+            )
+            return
         state["persona_snapshot"] = snapshot
-        await db_core.upsert_persona_library_record(
-            user_id=state.get("user_id"),
-            place_key=str(snapshot.get("place_key") or place_key),
-            place_label=str(snapshot.get("place_label") or place_label or scope_label),
-            scope=str(snapshot.get("scope") or scope_label or "internet"),
-            source_policy=str(snapshot.get("source_policy") or "open_socials"),
-            payload=snapshot,
-        )
+        state["persona_generation_debug"] = dict(persona_state.persona_generation_debug or {})
+        state["persona_validation_errors"] = list(persona_state.persona_validation_errors or [])
         state["persona_library"] = {
             "place_key": snapshot.get("place_key"),
             "place_label": snapshot.get("place_label"),
             "source": snapshot.get("source"),
+            "persona_set": snapshot.get("persona_set"),
         }
         state["verification"] = _verify_stage(state, "persona_synthesis")
         _mark_stage(state, "persona_synthesis", "completed", "Persona synthesis complete.")
@@ -693,6 +928,8 @@ async def start_workflow(
             "location_research": None,
             "persona_snapshot": None,
             "persona_library": None,
+            "persona_generation_debug": {},
+            "persona_validation_errors": [],
             "review": None,
             "review_approved": False,
             "corrections": [],
@@ -744,13 +981,27 @@ async def update_context_scope(
         if state is None:
             return None
         normalized_scope = _normalize_scope(scope)
+        changed_fields: Dict[str, Any] = {}
+        if state["draft_context"].get("contextScope") != normalized_scope:
+            changed_fields["contextScope"] = normalized_scope
         state["draft_context"]["contextScope"] = normalized_scope
+        normalized_place_name = str(place_name or "").strip()
+        if normalized_place_name and state["draft_context"].get("placeName") != normalized_place_name:
+            changed_fields["placeName"] = normalized_place_name
         if place_name:
-            state["draft_context"]["placeName"] = str(place_name).strip()
+            state["draft_context"]["placeName"] = normalized_place_name
         if normalized_scope != "specific_place":
+            if state["draft_context"].get("placeName"):
+                changed_fields["placeName"] = ""
+            if state["draft_context"].get("city"):
+                changed_fields["city"] = ""
+            if state["draft_context"].get("country"):
+                changed_fields["country"] = ""
             state["draft_context"]["placeName"] = ""
             state["draft_context"]["city"] = ""
             state["draft_context"]["country"] = ""
+        if changed_fields:
+            _invalidate_downstream(state, field_updates=changed_fields)
         _add_guide_message(
             state,
             f"Context scope locked to {normalized_scope.replace('_', ' ')}."
@@ -773,6 +1024,7 @@ async def submit_schema(
         state = await _hydrate(workflow_id, user_id)
         if state is None:
             return None
+        previous = dict(state.get("draft_context") or {})
         normalized = _normalize_draft_context({**(state.get("draft_context") or {}), **(updates or {})}, state.get("language") or "en")
         for key, value in normalized.items():
             if _is_empty_value(value) and not _is_empty_value(state["draft_context"].get(key)):
@@ -789,6 +1041,13 @@ async def submit_schema(
             else "تم تحديث بيانات الـschema. سأكمل فقط ما تبقى من نواقص.",
             stage="schema_intake",
         )
+        changed_fields = {
+            key: value
+            for key, value in state["draft_context"].items()
+            if previous.get(key) != value
+        }
+        if changed_fields:
+            _invalidate_downstream(state, field_updates=changed_fields)
         state["clarification_questions"] = None
         state["clarification_answers"] = {}
         state["review_approved"] = False
@@ -943,6 +1202,20 @@ async def list_persona_library(
     *,
     user_id: Optional[int],
     place_query: Optional[str],
+    audience: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    min_count: Optional[int] = None,
+    max_count: Optional[int] = None,
     limit: int = 10,
 ) -> List[Dict[str, Any]]:
-    return await db_core.list_persona_library_records(user_id=user_id, place_query=place_query, limit=limit)
+    return await db_core.list_persona_library_records(
+        user_id=user_id,
+        place_query=place_query,
+        audience=audience,
+        date_from=date_from,
+        date_to=date_to,
+        min_count=min_count,
+        max_count=max_count,
+        limit=limit,
+    )

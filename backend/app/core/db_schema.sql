@@ -332,6 +332,24 @@ CREATE TABLE IF NOT EXISTS guided_workflows (
     REFERENCES simulations(simulation_id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS persona_lab_jobs (
+  job_id VARCHAR(36) PRIMARY KEY,
+  user_id BIGINT NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'queued',
+  current_stage VARCHAR(64) NOT NULL DEFAULT 'preparing_request',
+  final_saved_set_id BIGINT NULL,
+  state_json LONGTEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_persona_lab_jobs_user (user_id),
+  INDEX idx_persona_lab_jobs_stage (current_stage),
+  INDEX idx_persona_lab_jobs_saved_set (final_saved_set_id),
+  CONSTRAINT fk_persona_lab_jobs_user FOREIGN KEY (user_id)
+    REFERENCES users(id) ON DELETE SET NULL,
+  CONSTRAINT fk_persona_lab_jobs_saved_set FOREIGN KEY (final_saved_set_id)
+    REFERENCES persona_sets(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS persona_library_records (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   user_id BIGINT NULL,
@@ -347,6 +365,80 @@ CREATE TABLE IF NOT EXISTS persona_library_records (
   INDEX idx_persona_library_place (place_key),
   CONSTRAINT fk_persona_library_user FOREIGN KEY (user_id)
     REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS persona_sets (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  set_key VARCHAR(191) NOT NULL UNIQUE,
+  creator_user_id BIGINT NULL,
+  place_key VARCHAR(191) NULL,
+  place_label VARCHAR(255) NULL,
+  audience_key VARCHAR(191) NOT NULL DEFAULT '',
+  audience_filters_json JSON NULL,
+  scope VARCHAR(32) NOT NULL DEFAULT 'shared',
+  shared_asset TINYINT(1) NOT NULL DEFAULT 1,
+  source_mode VARCHAR(48) NOT NULL,
+  context_type VARCHAR(32) NULL,
+  source_summary TEXT NULL,
+  evidence_summary_json JSON NULL,
+  generation_config_json JSON NULL,
+  quality_score FLOAT NULL,
+  confidence_score FLOAT NULL,
+  quality_meta_json JSON NULL,
+  validation_meta_json JSON NULL,
+  reusable_dataset_ref VARCHAR(191) NULL,
+  persona_count INT NOT NULL DEFAULT 0,
+  payload_json LONGTEXT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_persona_sets_place (place_key),
+  INDEX idx_persona_sets_audience (audience_key),
+  INDEX idx_persona_sets_created (created_at),
+  INDEX idx_persona_sets_count (persona_count),
+  CONSTRAINT fk_persona_sets_creator FOREIGN KEY (creator_user_id)
+    REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS persona_set_personas (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  persona_set_id BIGINT NOT NULL,
+  persona_uid VARCHAR(64) NOT NULL,
+  display_name VARCHAR(255) NOT NULL,
+  source_mode VARCHAR(48) NOT NULL,
+  target_audience_cluster VARCHAR(191) NOT NULL,
+  location_context VARCHAR(255) NULL,
+  age_band VARCHAR(64) NOT NULL,
+  life_stage VARCHAR(64) NOT NULL,
+  profession_role VARCHAR(191) NOT NULL,
+  attitude_baseline VARCHAR(191) NOT NULL,
+  skepticism_level FLOAT NOT NULL,
+  conformity_level FLOAT NOT NULL,
+  stubbornness_level FLOAT NOT NULL,
+  innovation_openness FLOAT NOT NULL,
+  financial_sensitivity FLOAT NOT NULL,
+  speaking_style VARCHAR(191) NOT NULL,
+  main_concerns_json JSON NULL,
+  probable_motivations_json JSON NULL,
+  influence_weight FLOAT NOT NULL,
+  tags_json JSON NULL,
+  category_id VARCHAR(64) NULL,
+  template_id VARCHAR(64) NULL,
+  archetype_name VARCHAR(191) NULL,
+  summary TEXT NULL,
+  location VARCHAR(255) NULL,
+  opinion VARCHAR(16) NULL,
+  confidence FLOAT NULL,
+  traits_json JSON NULL,
+  biases_json JSON NULL,
+  opinion_score FLOAT NULL,
+  source_attribution_json JSON NULL,
+  evidence_signals_json JSON NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_persona_set_persona_uid (persona_set_id, persona_uid),
+  INDEX idx_persona_set_personas_set (persona_set_id),
+  INDEX idx_persona_set_personas_cluster (target_audience_cluster),
+  CONSTRAINT fk_persona_set_personas_set FOREIGN KEY (persona_set_id)
+    REFERENCES persona_sets(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS developer_suite_runs (

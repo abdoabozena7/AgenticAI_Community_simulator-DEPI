@@ -1,27 +1,18 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiService } from '@/services/api';
-import { addIdeaLogEntry } from '@/lib/ideaLog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 
 interface ResearchResult {
-  search_results: any;
-  structured: any;
+  search_results: unknown;
+  structured: unknown;
   evidence_cards: { text: string }[];
   pages: { title: string; url: string; snippet?: string }[];
-  map_data: any;
+  map_data: unknown;
 }
 
-/**
- * AgentResearchScreen
- *
- * Allows a user to perform a research session on an idea or concept. The
- * backend fetches search results from multiple providers and returns
- * evidence cards, a structured summary, pages and map data. The user
- * can optionally kick off a simulation after reviewing the results.
- */
 const AgentResearchScreen = () => {
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
@@ -40,7 +31,7 @@ const AgentResearchScreen = () => {
       const res: ResearchResult = await apiService.runResearch(
         query.trim(),
         location.trim() || undefined,
-        category.trim() || undefined
+        category.trim() || undefined,
       );
       setResult(res);
     } catch (err: any) {
@@ -52,37 +43,19 @@ const AgentResearchScreen = () => {
 
   const handleStartSimulation = async () => {
     if (!result) return;
-    // Build a minimal simulation config using research results. For this
-    // prototype we embed summary and evidence cards into the config. The
-    // backend will extract these fields if present and include them in
-    // the simulation context.
-    const summary = result.structured?.summary || '';
-    const evidence = result.evidence_cards?.map((c) => c.text) || [];
-    const config = {
-      idea: query.trim(),
-      category: category.trim(),
-      targetAudience: [],
-      country: '',
-      city: '',
-      riskAppetite: 50,
-      ideaMaturity: 'concept',
-      goals: [],
-      research_summary: summary,
-      evidence_cards: evidence,
-      research_sources: result.pages,
-      research_structured: result.structured,
-    } as any;
-    // Start simulation and navigate to the main simulation route.
     try {
-      const response = await apiService.startSimulation(config);
-      addIdeaLogEntry(query.trim(), {
-        simulationId: response.simulation_id,
-        status: 'running',
-        category: category.trim() || undefined,
+      window.localStorage.setItem('pendingIdea', query.trim());
+      window.localStorage.setItem('pendingAutoStart', 'true');
+      window.localStorage.setItem('dashboardIdea', query.trim());
+      navigate('/simulate', {
+        state: {
+          idea: query.trim(),
+          autoStart: true,
+          source: 'agent_research',
+        },
       });
-      navigate(`/`);
     } catch (err: any) {
-      setError(err.message || 'تعذر بدء المحاكاة');
+      setError(err.message || 'تعذر فتح مسار المحاكاة');
     }
   };
 
@@ -106,7 +79,7 @@ const AgentResearchScreen = () => {
           onChange={(e) => setCategory(e.target.value)}
         />
         <Button onClick={runResearch} disabled={loading}>
-          {loading ? 'جارٍ البحث...' : 'بدء البحث'}
+          {loading ? 'جارٍ البحث...' : 'ابدأ البحث'}
         </Button>
       </div>
       {error && <p className="text-red-500">{error}</p>}
@@ -114,7 +87,7 @@ const AgentResearchScreen = () => {
         <div className="space-y-4">
           <h2 className="text-xl font-semibold">نتائج البحث</h2>
           <div>
-            <h3 className="font-semibold">ملخص منهيكل</h3>
+            <h3 className="font-semibold">ملخص مهيكل</h3>
             <pre className="whitespace-pre-wrap bg-muted p-2 rounded-md">
               {JSON.stringify(result.structured, null, 2)}
             </pre>
@@ -140,7 +113,7 @@ const AgentResearchScreen = () => {
               ))}
             </ul>
           </div>
-          <Button onClick={handleStartSimulation}>ابدأ المحاكاة الآن</Button>
+          <Button onClick={handleStartSimulation}>ابدأ خط الأنابيب الإلزامي</Button>
         </div>
       )}
     </div>
@@ -148,4 +121,3 @@ const AgentResearchScreen = () => {
 };
 
 export default AgentResearchScreen;
-

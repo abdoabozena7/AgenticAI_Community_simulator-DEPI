@@ -210,8 +210,20 @@ class SimulationRepository:
     async def count_runs(self, *, user_id: Optional[int], include_all: bool) -> int:
         return await db_core.count_simulations(user_id=user_id, include_all=include_all)
 
-    async def fetch_persona_library_record(self, *, user_id: Optional[int], place_key: str) -> Optional[Dict[str, Any]]:
-        return await db_core.fetch_persona_library_record(user_id=user_id, place_key=place_key)
+    async def fetch_persona_library_record(
+        self,
+        *,
+        user_id: Optional[int],
+        place_key: str,
+        audience_filters: Optional[List[str]] = None,
+        source_mode: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        return await db_core.fetch_persona_library_record(
+            user_id=user_id,
+            place_key=place_key,
+            audience_filters=audience_filters,
+            source_mode=source_mode,
+        )
 
     async def upsert_persona_library_record(
         self,
@@ -222,6 +234,17 @@ class SimulationRepository:
         scope: str,
         source_policy: str,
         payload: Dict[str, Any],
+        audience_filters: Optional[List[str]] = None,
+        source_summary: Optional[str] = None,
+        evidence_summary: Optional[Dict[str, Any]] = None,
+        generation_config: Optional[Dict[str, Any]] = None,
+        quality_score: Optional[float] = None,
+        confidence_score: Optional[float] = None,
+        quality_meta: Optional[Dict[str, Any]] = None,
+        validation_meta: Optional[Dict[str, Any]] = None,
+        reusable_dataset_ref: Optional[str] = None,
+        context_type: Optional[str] = None,
+        shared_asset: bool = True,
     ) -> None:
         await db_core.upsert_persona_library_record(
             user_id=user_id,
@@ -230,4 +253,49 @@ class SimulationRepository:
             scope=scope,
             source_policy=source_policy,
             payload=payload,
+            audience_filters=audience_filters,
+            source_summary=source_summary,
+            evidence_summary=evidence_summary,
+            generation_config=generation_config,
+            quality_score=quality_score,
+            confidence_score=confidence_score,
+            quality_meta=quality_meta,
+            validation_meta=validation_meta,
+            reusable_dataset_ref=reusable_dataset_ref,
+            context_type=context_type,
+            shared_asset=shared_asset,
+        )
+
+    async def list_persona_library_records(
+        self,
+        *,
+        user_id: Optional[int],
+        place_query: Optional[str] = None,
+        audience: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        min_count: Optional[int] = None,
+        max_count: Optional[int] = None,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        return await db_core.list_persona_library_records(
+            user_id=user_id,
+            place_query=place_query,
+            audience=audience,
+            date_from=date_from,
+            date_to=date_to,
+            min_count=min_count,
+            max_count=max_count,
+            limit=limit,
+        )
+
+    async def fetch_persona_library_record_by_set_key(
+        self,
+        *,
+        user_id: Optional[int],
+        set_key: str,
+    ) -> Optional[Dict[str, Any]]:
+        return await db_core.fetch_persona_library_record_by_set_key(
+            user_id=user_id,
+            set_key=set_key,
         )

@@ -83,6 +83,42 @@ export interface TopBarStep {
   subtleStatus?: string;
 }
 
+export type PipelineStepStatus = 'pending' | 'running' | 'completed' | 'blocked';
+
+export interface SimulationPipelineStep {
+  key: string;
+  label: {
+    ar?: string;
+    en?: string;
+  };
+  status: PipelineStepStatus;
+  detail?: string | null;
+  started_at?: number | null;
+  completed_at?: number | null;
+}
+
+export interface SimulationPersonaSourceOption {
+  mode: string;
+  label: string;
+  recommended?: boolean;
+}
+
+export interface SimulationPersonaSource {
+  mode?: string | null;
+  resolved: boolean;
+  auto_selected?: boolean;
+  notice?: string | null;
+  selected_set_key?: string | null;
+  selected_set_label?: string | null;
+  options: SimulationPersonaSourceOption[];
+}
+
+export interface SimulationPipeline {
+  ready_for_simulation: boolean;
+  blockers: string[];
+  steps: SimulationPipelineStep[];
+}
+
 export interface SimulationUiState {
   screenTitle: string;
   stageLabel: string;

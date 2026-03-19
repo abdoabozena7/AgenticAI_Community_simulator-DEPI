@@ -16,9 +16,11 @@ from .models.orchestration import (
     PHASE_ORDER,
     SimulationPhase,
     SimulationStatus,
+    classify_idea_context,
     context_location_label,
     normalize_context,
     phase_position,
+    resolve_persona_source_mode,
 )
 from .services.event_bus import EventBus
 from .services.llm_gateway import LLMGateway
@@ -141,11 +143,18 @@ class SimulationOrchestrator:
             state.schema[question.field_name] = text
         if not state.pending_questions():
             state.pending_input = False
-            state.status = SimulationStatus.RUNNING.value
-            state.status_reason = "running"
-            state.current_phase = SimulationPhase.SIMULATION_INITIALIZATION
-            await self.repository.save_state(state)
-            self._schedule(simulation_id, state.current_phase)
+            blockers = state.validate_pipeline_ready_for_simulation()
+            if blockers:
+                state.status = SimulationStatus.ERROR.value
+                state.status_reason = "error"
+                state.error = f"Simulation blocked until pipeline completes: {', '.join(blockers)}"
+                await self.repository.save_state(state)
+            else:
+                state.status = SimulationStatus.RUNNING.value
+                state.status_reason = "running"
+                state.current_phase = SimulationPhase.SIMULATION_INITIALIZATION
+                await self.repository.save_state(state)
+                self._schedule(simulation_id, state.current_phase)
         else:
             await self.repository.save_state(state)
         return state
@@ -286,6 +295,8 @@ class SimulationOrchestrator:
     async def _run_phase(self, state: OrchestrationState, phase: SimulationPhase) -> bool:
         if phase == SimulationPhase.IDEA_INTAKE:
             return await self._run_idea_intake(state)
+        if phase == SimulationPhase.CONTEXT_CLASSIFICATION:
+            return await self._run_context_classification(state)
         if phase == SimulationPhase.INTERNET_RESEARCH:
             await self.search_agent.run(state)
             return False
@@ -294,6 +305,14 @@ class SimulationOrchestrator:
             await self.event_bus.publish(
                 state,
                 "personas_generated",
+                {"agent": self.persona_agent.name, "count": len(state.personas)},
+            )
+            return False
+        if phase == SimulationPhase.PERSONA_PERSISTENCE:
+            await self.persona_agent.persist(state)
+            await self.event_bus.publish(
+                state,
+                "personas_saved",
                 {"agent": self.persona_agent.name, "count": len(state.personas)},
             )
             return False
@@ -316,6 +335,9 @@ class SimulationOrchestrator:
             )
             return False
         if phase == SimulationPhase.SIMULATION_INITIALIZATION:
+            blockers = state.validate_pipeline_ready_for_simulation()
+            if blockers:
+                raise RuntimeError(f"Simulation blocked until pipeline completes: {', '.join(blockers)}")
             await self.simulation_agent.initialize_simulation(state)
             await self.event_bus.publish(
                 state,
@@ -342,6 +364,10 @@ class SimulationOrchestrator:
     async def _run_idea_intake(self, state: OrchestrationState) -> bool:
         required = ["idea", "category"]
         missing = [field for field in required if not state.user_context.get(field)]
+        state.search_completed = False
+        state.persona_generation_completed = False
+        state.persona_persistence_completed = False
+        state.simulation_ready = False
         state.schema.update(
             {
                 "idea": state.user_context.get("idea"),
@@ -353,6 +379,7 @@ class SimulationOrchestrator:
                 "deliveryModel": state.user_context.get("deliveryModel"),
                 "monetization": state.user_context.get("monetization"),
                 "riskBoundary": state.user_context.get("riskBoundary"),
+                "persona_source_requested": state.user_context.get("personaSourceMode"),
             }
         )
         if not missing:
@@ -373,6 +400,53 @@ class SimulationOrchestrator:
         )
         return True
 
+    async def _run_context_classification(self, state: OrchestrationState) -> bool:
+        state.set_pipeline_step(
+            "analyzing_idea_type",
+            "running",
+            detail="Determining whether the idea is location-based, general, or hybrid.",
+        )
+        context_type = classify_idea_context(state.user_context)
+        persona_source_mode, auto_selected = resolve_persona_source_mode(
+            state.user_context,
+            context_type=context_type,
+        )
+        location_label = context_location_label(state.user_context)
+        notice: Optional[str] = None
+        if not location_label:
+            notice = (
+                "This idea looks general, so the system will use default audience personas unless you choose to generate custom personas."
+            )
+        state.idea_context_type = context_type.value
+        state.persona_source_mode = persona_source_mode
+        state.persona_source_auto_selected = auto_selected
+        state.persona_source_notice = notice
+        state.user_context["personaSourceMode"] = persona_source_mode
+        state.schema.update(
+            {
+                "idea_context_type": context_type.value,
+                "persona_source": persona_source_mode,
+                "location": location_label,
+            }
+        )
+        state.set_pipeline_step(
+            "analyzing_idea_type",
+            "completed",
+            detail=f"Classified as {context_type.value}. Persona source: {persona_source_mode}.",
+        )
+        await self.event_bus.publish(
+            state,
+            "context_classified",
+            {
+                "agent": "orchestrator",
+                "context_type": context_type.value,
+                "persona_source_mode": persona_source_mode,
+                "auto_selected": auto_selected,
+                "location": location_label,
+            },
+        )
+        return False
+
     def _classify_change(
         self,
         previous: Dict[str, Any],
@@ -383,9 +457,9 @@ class SimulationOrchestrator:
         medium_fields = {"targetAudience", "valueProposition", "monetization", "deliveryModel", "riskBoundary"}
         changed = {key for key in updated.keys() if updated.get(key) != previous.get(key)}
         if changed & major_fields:
-            return ChangeImpact.MAJOR, SimulationPhase.INTERNET_RESEARCH
+            return ChangeImpact.MAJOR, SimulationPhase.CONTEXT_CLASSIFICATION
         if changed & medium_fields:
-            return ChangeImpact.MAJOR, SimulationPhase.CLARIFICATION_QUESTIONS
+            return ChangeImpact.MAJOR, SimulationPhase.INTERNET_RESEARCH
         if phase_position(current_phase) >= phase_position(SimulationPhase.AGENT_DELIBERATION):
             return ChangeImpact.SMALL, SimulationPhase.AGENT_DELIBERATION
         return ChangeImpact.SMALL, current_phase

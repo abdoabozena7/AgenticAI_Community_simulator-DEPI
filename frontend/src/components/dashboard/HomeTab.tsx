@@ -22,12 +22,23 @@ const categories = [
 
 interface HomeTabProps {
   onStartResearch: (payload: { idea: string; location?: string; category?: string }) => void;
-  onStartSimulation: (idea: string) => void;
+  onStartSimulation: (idea: string, extras?: { location?: string; category?: string }) => void;
+  onChoosePersonaSource: (idea: string, extras?: { location?: string; category?: string }) => void;
+  onOpenPersonaLab: () => void;
+  hasDefaultPersonaSelection?: boolean;
   onRedeemPromo: (code: string) => Promise<string>;
   researchBusy?: boolean;
 }
 
-export default function HomeTab({ onStartResearch, onStartSimulation, onRedeemPromo, researchBusy }: HomeTabProps) {
+export default function HomeTab({
+  onStartResearch,
+  onStartSimulation,
+  onChoosePersonaSource,
+  onOpenPersonaLab,
+  hasDefaultPersonaSelection,
+  onRedeemPromo,
+  researchBusy,
+}: HomeTabProps) {
   const { language, isRTL } = useLanguage();
   const [idea, setIdea] = useState(() => {
     if (typeof window === 'undefined') return '';
@@ -67,7 +78,10 @@ export default function HomeTab({ onStartResearch, onStartSimulation, onRedeemPr
 
   const handleStartSimulation = () => {
     if (!idea.trim()) return;
-    onStartSimulation(idea.trim());
+    onStartSimulation(idea.trim(), {
+      location: location.trim() || undefined,
+      category: category || undefined,
+    });
   };
 
   const handleRedeemPromo = async () => {
@@ -96,10 +110,13 @@ export default function HomeTab({ onStartResearch, onStartSimulation, onRedeemPr
           <div className="p-2 rounded-xl bg-gradient-to-br from-cyan-500/20 to-purple-500/20 ai-glow-subtle">
             <Play className="w-6 h-6 text-cyan-400" />
           </div>
-          {t('Start New Simulation', 'ابدأ محاكاة جديدة')}
+          {t('Start New Simulation Pipeline', 'ابدأ خط أنابيب محاكاة جديد')}
         </h2>
         <p className="text-muted-foreground mb-6">
-          {t('Describe your idea and start simulation immediately', 'اكتب فكرتك وابدأ المحاكاة فورًا')}
+          {t(
+            'Describe your idea and launch the mandatory search-to-persona pipeline',
+            'اكتب فكرتك وابدأ خط الأنابيب الإلزامي من البحث إلى الشخصيات',
+          )}
         </p>
 
         <div className="space-y-5">
@@ -124,6 +141,17 @@ export default function HomeTab({ onStartResearch, onStartSimulation, onRedeemPr
                 className={`${isRTL ? 'pr-11' : 'pl-11'} bg-secondary/50 border-border`}
               />
             </div>
+            <p className="text-xs text-muted-foreground mt-2">
+              {location.trim()
+                ? t(
+                    'A place is already set. Starting now will generate personas from this place by default unless you override the persona source.',
+                    'تم تحديد مكان بالفعل. سيولّد النظام شخصيات من هذا المكان افتراضيًا ما لم تغيّر مصدر الشخصيات.'
+                  )
+                : t(
+                    'No place is set yet. General ideas must pick a persona source before simulation starts.',
+                    'لم يتم تحديد مكان بعد. الأفكار العامة يجب أن تختار مصدر الشخصيات قبل بدء المحاكاة.'
+                  )}
+            </p>
           </div>
 
           <div>
@@ -148,9 +176,35 @@ export default function HomeTab({ onStartResearch, onStartSimulation, onRedeemPr
             className="w-full liquid-glass-button py-6 text-lg rgb-shadow-hover ai-glow-button"
           >
             <Play className="w-5 h-5 mr-2" />
-            {t('Start Simulation', 'ابدأ المحاكاة')}
+            {t('Run Mandatory Pipeline', 'شغّل خط الأنابيب الإلزامي')}
             <ArrowRight className="w-5 h-5 ml-2" />
           </Button>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Button
+              onClick={() => onChoosePersonaSource(idea.trim(), {
+                location: location.trim() || undefined,
+                category: category || undefined,
+              })}
+              disabled={!idea.trim()}
+              variant="secondary"
+              className="py-5"
+            >
+              {t('Choose Persona Source', 'اختر مصدر الشخصيات')}
+            </Button>
+            <Button onClick={onOpenPersonaLab} variant="secondary" className="py-5">
+              {t('Open Persona Lab', 'افتح مختبر الشخصيات')}
+            </Button>
+          </div>
+
+          {hasDefaultPersonaSelection ? (
+            <div className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-4 py-3 text-sm text-foreground">
+              {t(
+                'A Persona Lab set is marked as the default for the current simulation draft.',
+                'تم تعيين مجموعة من مختبر الشخصيات كإعداد افتراضي لمسودة المحاكاة الحالية.'
+              )}
+            </div>
+          ) : null}
 
           <Button
             onClick={handleStartResearch}
@@ -159,7 +213,7 @@ export default function HomeTab({ onStartResearch, onStartSimulation, onRedeemPr
             className="w-full py-6 text-lg"
           >
             <Zap className="w-5 h-5 mr-2" />
-            {researchBusy ? t('Researching...', 'جارٍ البحث...') : t('Start Agent Research', 'ابدأ بحث الوكلاء')}
+            {researchBusy ? t('Researching...', 'جارٍ البحث...') : t('Preview Research Only', 'عرض البحث فقط')}
           </Button>
         </div>
       </motion.div>

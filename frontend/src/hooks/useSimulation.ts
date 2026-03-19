@@ -1,7 +1,7 @@
 ﻿import { useState, useCallback, useEffect, useReducer, useRef } from 'react';
 import { websocketService, WebSocketEvent, MetricsEvent, ReasoningStepEvent, ReasoningDebugEvent, AgentsEvent } from '@/services/websocket';
 import { apiService, clearAuthTokens, getRealtimeBaseUrl, SimulationConfig, SimulationStateResponse } from '@/services/api';
-import { Agent, ReasoningMessage, ReasoningDebug, SimulationMetrics, SimulationStatus, SimulationChatEvent, PendingClarification, PendingResearchReview, CoachIntervention } from '@/types/simulation';
+import { Agent, ReasoningMessage, ReasoningDebug, SimulationMetrics, SimulationStatus, SimulationChatEvent, PendingClarification, PendingResearchReview, CoachIntervention, SimulationPipeline, SimulationPersonaSource } from '@/types/simulation';
 import type { SearchLiveEvent } from '@/lib/searchPanelModel';
 
 interface SimulationState {
@@ -41,6 +41,9 @@ interface SimulationState {
   researchGate: 'none' | 'prestart_review' | 'runtime_review';
   researchGateCycleId: string | null;
   researchGateVersion: number | null;
+  ideaContextType: 'location_based' | 'general_non_location' | 'hybrid' | null;
+  personaSource: SimulationPersonaSource | null;
+  pipeline: SimulationPipeline | null;
   activePulses: { from: string; to: string; active: boolean; pulseProgress: number }[];
 }
 
@@ -67,6 +70,7 @@ type SimulationAction =
   | { type: 'SET_RESEARCH_REVIEW'; payload: PendingResearchReview | null }
   | { type: 'SET_COACH'; payload: { coachIntervention: CoachIntervention | null; coachHistory: SimulationState['coachHistory'] } }
   | { type: 'SET_RESEARCH_GATE'; payload: { gate: SimulationState['researchGate']; cycleId: string | null; version: number | null } }
+  | { type: 'SET_PIPELINE_META'; payload: { ideaContextType: SimulationState['ideaContextType']; personaSource: SimulationState['personaSource']; pipeline: SimulationState['pipeline'] } }
   | { type: 'SET_PULSES'; payload: { from: string; to: string; active: boolean; pulseProgress: number }[] }
   | { type: 'ADD_PULSES'; payload: { from: string; to: string; active: boolean; pulseProgress: number }[] }
   | { type: 'RESET' };
@@ -110,6 +114,9 @@ const initialState: SimulationState = {
   researchGate: 'none',
   researchGateCycleId: null,
   researchGateVersion: null,
+  ideaContextType: null,
+  personaSource: null,
+  pipeline: null,
   activePulses: [],
 };
 
@@ -353,6 +360,9 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
         researchGate: 'none',
         researchGateCycleId: null,
         researchGateVersion: null,
+        ideaContextType: null,
+        personaSource: null,
+        pipeline: null,
         activePulses: [],
       };
 
@@ -612,6 +622,15 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
         researchGate: action.payload.gate,
         researchGateCycleId: action.payload.cycleId,
         researchGateVersion: action.payload.version,
+      };
+    }
+
+    case 'SET_PIPELINE_META': {
+      return {
+        ...state,
+        ideaContextType: action.payload.ideaContextType,
+        personaSource: action.payload.personaSource,
+        pipeline: action.payload.pipeline,
       };
     }
 
@@ -1067,6 +1086,77 @@ export function useSimulation(options?: UseSimulationOptions) {
         gate: normalizedGate,
         cycleId: gateCycleId,
         version: gateVersion,
+      },
+    });
+    const mappedPersonaSource: SimulationState['personaSource'] =
+      stateResponse.persona_source && typeof stateResponse.persona_source === 'object'
+        ? {
+            mode: typeof stateResponse.persona_source.mode === 'string' ? stateResponse.persona_source.mode : null,
+            resolved: Boolean(stateResponse.persona_source.resolved),
+            auto_selected: Boolean(stateResponse.persona_source.auto_selected),
+            notice: typeof stateResponse.persona_source.notice === 'string' ? stateResponse.persona_source.notice : null,
+            selected_set_key: typeof stateResponse.persona_source.selected_set_key === 'string'
+              ? stateResponse.persona_source.selected_set_key
+              : null,
+            selected_set_label: typeof stateResponse.persona_source.selected_set_label === 'string'
+              ? stateResponse.persona_source.selected_set_label
+              : null,
+            options: Array.isArray(stateResponse.persona_source.options)
+              ? stateResponse.persona_source.options
+                  .map((item) => {
+                    if (!item || typeof item !== 'object') return null;
+                    const mode = typeof item.mode === 'string' ? item.mode : '';
+                    const label = typeof item.label === 'string' ? item.label : '';
+                    if (!mode || !label) return null;
+                    return {
+                      mode,
+                      label,
+                      recommended: Boolean(item.recommended),
+                    };
+                  })
+                  .filter((item): item is NonNullable<SimulationState['personaSource']>['options'][number] => Boolean(item))
+              : [],
+          }
+        : null;
+    const mappedPipeline: SimulationState['pipeline'] =
+      stateResponse.pipeline && typeof stateResponse.pipeline === 'object'
+        ? {
+            ready_for_simulation: Boolean(stateResponse.pipeline.ready_for_simulation),
+            blockers: Array.isArray(stateResponse.pipeline.blockers)
+              ? stateResponse.pipeline.blockers.map((item) => String(item || '').trim()).filter(Boolean)
+              : [],
+            steps: Array.isArray(stateResponse.pipeline.steps)
+              ? stateResponse.pipeline.steps
+                  .map((item) => {
+                    if (!item || typeof item !== 'object') return null;
+                    const key = typeof item.key === 'string' ? item.key : '';
+                    if (!key) return null;
+                    return {
+                      key,
+                      label: item.label && typeof item.label === 'object'
+                        ? {
+                            ar: typeof item.label.ar === 'string' ? item.label.ar : undefined,
+                            en: typeof item.label.en === 'string' ? item.label.en : undefined,
+                          }
+                        : {},
+                      status: item.status === 'running' || item.status === 'completed' || item.status === 'blocked'
+                        ? item.status
+                        : 'pending',
+                      detail: typeof item.detail === 'string' ? item.detail : null,
+                      started_at: typeof item.started_at === 'number' ? item.started_at : null,
+                      completed_at: typeof item.completed_at === 'number' ? item.completed_at : null,
+                    };
+                  })
+                  .filter((item): item is NonNullable<SimulationState['pipeline']>['steps'][number] => Boolean(item))
+              : [],
+          }
+        : null;
+    dispatch({
+      type: 'SET_PIPELINE_META',
+      payload: {
+        ideaContextType: stateResponse.idea_context_type ?? null,
+        personaSource: mappedPersonaSource,
+        pipeline: mappedPipeline,
       },
     });
     dispatch({

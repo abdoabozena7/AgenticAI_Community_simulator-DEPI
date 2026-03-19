@@ -30,6 +30,7 @@ class EventBus:
         event = state.append_event(event_type, payload)
         message = event.to_dict(state.simulation_id)
         if persist_research:
+            message["type"] = "research_update"
             await self._repository.persist_research_event(state.simulation_id, event.seq, payload)
         await self._broadcaster(message)
         return message

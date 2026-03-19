@@ -378,7 +378,9 @@ async def get_state(simulation_id: str, authorization: str = Header(None)) -> Di
     state = await _get_orchestrator().get_state(simulation_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Simulation not found")
-    return state.to_public_state()
+    payload = state.to_public_state()
+    payload["research_sources"] = await _get_orchestrator().repository.fetch_research_events(simulation_id)
+    return payload
 
 
 @router.get("/result")

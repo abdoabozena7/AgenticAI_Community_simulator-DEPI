@@ -183,6 +183,11 @@ async def attach_simulation(payload: Dict[str, Any], authorization: str = Header
 @router.get("/personas")
 async def list_persona_library(
     place: str = Query("", alias="place"),
+    audience: str = Query("", alias="audience"),
+    date_from: Optional[str] = Query(None, alias="date_from"),
+    date_to: Optional[str] = Query(None, alias="date_to"),
+    min_count: Optional[int] = Query(None, ge=1, alias="min_count"),
+    max_count: Optional[int] = Query(None, ge=1, alias="max_count"),
     limit: int = Query(10, ge=1, le=50),
     authorization: str = Header(None),
 ) -> Dict[str, Any]:
@@ -190,6 +195,11 @@ async def list_persona_library(
     items = await workflow_core.list_persona_library(
         user_id=int(user.get("id")) if user else None,
         place_query=place.strip() or None,
+        audience=audience.strip() or None,
+        date_from=date_from,
+        date_to=date_to,
+        min_count=min_count,
+        max_count=max_count,
         limit=limit,
     )
     return {"items": items, "total": len(items)}

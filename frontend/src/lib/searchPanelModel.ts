@@ -1,4 +1,5 @@
 import type { PendingResearchReview } from '@/types/simulation';
+import type { SimulationPipeline } from '@/types/simulation';
 import type { SearchResponse } from '@/services/api';
 
 export type SearchLiveEvent = {
@@ -114,6 +115,15 @@ const ACTION_LABELS: Record<string, { ar: string; en: string; progress: number }
   search_completed: { ar: 'اكتمل البحث', en: 'Search completed', progress: 100 },
   search_failed: { ar: 'تعذر البحث', en: 'Search failed', progress: 100 },
   url_failed: { ar: 'تعذر استخراج الرابط', en: 'URL extraction failed', progress: 100 },
+  persona_signal_extraction_started: { ar: 'استخراج إشارات الشخصيات', en: 'Extracting persona signals...', progress: 18 },
+  persona_signal_extraction_completed: { ar: 'اكتمل تحليل إشارات الشخصيات', en: 'Persona signals ready', progress: 24 },
+  persona_batch_started: { ar: 'جارٍ توليد دفعة شخصيات', en: 'Generating persona batch...', progress: 58 },
+  persona_batch_completed: { ar: 'اكتملت دفعة شخصيات', en: 'Persona batch complete', progress: 78 },
+  persona_duplicates_rejected: { ar: 'تم رفض شخصيات مكررة', en: 'Rejected duplicate personas', progress: 80 },
+  persona_validation_passed: { ar: 'تم اعتماد جودة الشخصيات', en: 'Persona validation passed', progress: 90 },
+  persona_validation_failed: { ar: 'فشل التحقق من الشخصيات', en: 'Persona validation failed', progress: 100 },
+  persona_persistence_started: { ar: 'جارٍ حفظ الشخصيات', en: 'Saving persona asset...', progress: 92 },
+  persona_persistence_completed: { ar: 'تم حفظ أصل الشخصيات', en: 'Persona asset saved', progress: 100 },
 };
 
 const FALLBACK_FAVICON = (domain: string) =>
@@ -265,6 +275,8 @@ export const buildSearchPanelModel = ({
   isRunActive,
   simulationActuallyStarted,
   reasoningPanelAvailable,
+  currentPhaseKey,
+  pipeline,
 }: {
   language: Language;
   activePanel: 'chat' | 'reasoning' | 'config';
@@ -277,12 +289,25 @@ export const buildSearchPanelModel = ({
   isRunActive: boolean;
   simulationActuallyStarted: boolean;
   reasoningPanelAvailable: boolean;
+  currentPhaseKey?: string | null;
+  pipeline?: SimulationPipeline | null;
 }): SearchPanelModel => {
+  const phaseKey = String(currentPhaseKey || '').trim().toLowerCase();
+  const pipelineActive = Boolean(
+    pipeline
+    && !pipeline.ready_for_simulation
+    && pipeline.steps.some((step) => step.status === 'running' || step.status === 'completed')
+  );
+  const researchPhases = ['context_classification', 'internet_research', 'persona_generation', 'persona_persistence'];
   const visible = activePanel === 'chat'
-    && !isRunStarting
-    && !isRunActive
-    && !simulationActuallyStarted
-    && !reasoningPanelAvailable;
+    && !reasoningPanelAvailable
+    && (
+      pipelineActive
+      || searchState.status !== 'idle'
+      || reviewRequired
+      || (!simulationActuallyStarted && !isRunStarting && !isRunActive)
+      || researchPhases.includes(phaseKey)
+    );
 
   if (!visible) {
     return {

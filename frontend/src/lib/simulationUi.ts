@@ -1,4 +1,4 @@
-import type { SimulationMetrics, SimulationUiState, TopBarStep } from '@/types/simulation';
+import type { SimulationMetrics, SimulationPipeline, SimulationUiState, TopBarStep } from '@/types/simulation';
 
 type SupportedLanguage = 'ar' | 'en';
 
@@ -22,148 +22,68 @@ type UiProgress = {
   elapsedMs?: number;
 };
 
-const PHASES = [
-  {
-    key: 'idea_intake',
-    aliases: ['intake', 'idea', 'schema', 'clarification', 'review', 'ready'],
-    labels: { ar: 'توضيح الفكرة', en: 'Idea intake' },
-  },
-  {
-    key: 'internet_research',
-    aliases: ['search', 'research', 'evidence', 'location', 'persona'],
-    labels: { ar: 'بحث الإنترنت', en: 'Internet research' },
-  },
-  {
-    key: 'agent_deliberation',
-    aliases: ['agent', 'debate', 'deliberation'],
-    labels: { ar: 'نقاش الوكلاء', en: 'Agent debate' },
-  },
-  {
-    key: 'convergence',
-    aliases: ['convergence', 'resolution'],
-    labels: { ar: 'التقارب', en: 'Convergence' },
-  },
-  {
-    key: 'summary',
-    aliases: ['summary', 'completed'],
-    labels: { ar: 'الخلاصة', en: 'Summary' },
-  },
-] as const;
-
 const STAGE_LABELS: Record<BusyStage, { ar: string; en: string }> = {
   extracting_schema: { ar: 'نحلل الفكرة ونرتب عناصرها', en: 'Structuring the idea' },
-  detecting_mode: { ar: 'نحدد أفضل مسار للعمل', en: 'Detecting the best flow' },
+  detecting_mode: { ar: 'نحدد مسار التنفيذ', en: 'Detecting the execution flow' },
   assistant_reply: { ar: 'نحضّر الرد التالي', en: 'Preparing the next reply' },
-  prestart_research: { ar: 'نجمع مصادر من الإنترنت', en: 'Collecting internet sources' },
-  starting_simulation: { ar: 'نطلق المحاكاة الآن', en: 'Starting the simulation' },
+  prestart_research: { ar: 'نحضّر البحث الإلزامي', en: 'Preparing mandatory research' },
+  starting_simulation: { ar: 'نطلق خط أنابيب التنفيذ', en: 'Launching the execution pipeline' },
   checking_session: { ar: 'نتأكد من الجلسة الحالية', en: 'Checking the current session' },
 };
 
 const FALLBACK_BY_STATUS = {
   idle: { ar: 'جاهز للمتابعة', en: 'Ready to continue', tone: 'idle' as const },
-  running: { ar: 'المحاكاة تعمل الآن', en: 'Simulation is running', tone: 'info' as const },
-  paused: { ar: 'المحاكاة متوقفة مؤقتًا', en: 'Simulation is paused', tone: 'warning' as const },
+  running: { ar: 'خط التنفيذ يعمل الآن', en: 'The execution pipeline is running', tone: 'info' as const },
+  paused: { ar: 'التنفيذ متوقف مؤقتًا', en: 'Execution is paused', tone: 'warning' as const },
   completed: { ar: 'اكتملت المحاكاة', en: 'Simulation completed', tone: 'success' as const },
-  error: { ar: 'توجد مشكلة تحتاج تدخلًا', en: 'There is an issue that needs attention', tone: 'error' as const },
+  error: { ar: 'يوجد خطأ يحتاج مراجعة', en: 'There is an issue that needs review', tone: 'error' as const },
 } as const;
 
 const EMPTY_COPY = {
   ar: {
-    screenTitle: 'مسار تقييم الفكرة',
+    screenTitle: 'خط أنابيب تقييم الفكرة',
     graphTitle: 'خريطة الحوار بين الوكلاء',
     graphDescription: 'توضح كيف تنتقل الآراء بين الوكلاء أثناء النقاش.',
-    graphEmptyTitle: 'سيظهر ترابط الآراء هنا بعد بدء النقاش',
-    graphEmptyDescription: 'ابدأ المحاكاة أو افتح النقاش لترى من يؤثر على من.',
+    graphEmptyTitle: 'ستظهر خريطة الحوار بعد اكتمال خط الأنابيب وبدء النقاش',
+    graphEmptyDescription: 'ابدأ التشغيل ليتم تنفيذ البحث ثم بناء الشخصيات قبل النقاش.',
     metricsHeadline: 'مؤشرات القرار',
     metricsDescription: 'ملخص سريع يساعدك على فهم اتجاه التقييم الآن.',
     metricsEmptyLabel: 'بانتظار البيانات',
   },
   en: {
-    screenTitle: 'Idea evaluation flow',
+    screenTitle: 'Idea evaluation pipeline',
     graphTitle: 'Agent discussion map',
     graphDescription: 'Shows how opinions move between agents during debate.',
-    graphEmptyTitle: 'The relationship map will appear after debate starts',
-    graphEmptyDescription: 'Start the simulation or open reasoning to see who influences whom.',
+    graphEmptyTitle: 'The discussion map appears after the mandatory pipeline finishes',
+    graphEmptyDescription: 'Start the run and the system will research, generate personas, and only then begin debate.',
     metricsHeadline: 'Decision metrics',
     metricsDescription: 'A compact summary to understand the current direction.',
     metricsEmptyLabel: 'Waiting for data',
   },
 };
 
-export const formatPercent = (
-  value: number | null | undefined,
-  fallbackLabel: string,
-  digits = 0,
-): string => {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return fallbackLabel;
-  return `${value.toFixed(digits)}%`;
+const pipelineStatusToStepState = (status: string): TopBarStep['state'] => {
+  if (status === 'completed') return 'completed';
+  if (status === 'running') return 'current';
+  return 'upcoming';
 };
 
-export const formatCount = (
-  value: number | null | undefined,
-  fallbackLabel: string,
-): string => {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return fallbackLabel;
-  return `${Math.round(value)}`;
-};
+const pipelineStepLabel = (language: SupportedLanguage, step: NonNullable<SimulationPipeline>['steps'][number]) =>
+  step.label?.[language] || step.label?.en || step.key;
 
-export const formatOptionalText = (
-  value: string | null | undefined,
-  fallbackLabel: string,
-): string => {
-  const next = value?.trim();
-  return next ? next : fallbackLabel;
-};
+const buildPipelineSteps = (language: SupportedLanguage, pipeline: SimulationPipeline): TopBarStep[] =>
+  pipeline.steps.map((step) => ({
+    key: step.key,
+    label: pipelineStepLabel(language, step),
+    state: pipelineStatusToStepState(step.status),
+    subtleStatus: step.detail || undefined,
+  }));
 
-const findPhaseIndex = (phaseKey?: string | null) => {
-  const current = String(phaseKey || '').toLowerCase();
-  const index = PHASES.findIndex((phase) => phase.aliases.some((alias) => current.includes(alias)));
-  return index >= 0 ? index : 0;
-};
-
-const labelForPhase = (language: SupportedLanguage, phaseKey?: string | null) =>
-  PHASES[findPhaseIndex(phaseKey)].labels[language];
-
-const resolveDisplayPhaseKey = ({
-  phaseKey,
-  simulationStatus,
-  searchState,
-  uiProgress,
-}: {
-  phaseKey?: string | null;
-  simulationStatus: 'idle' | 'configuring' | 'running' | 'paused' | 'completed' | 'error';
-  searchState?: SearchState;
-  uiProgress?: UiProgress;
-}) => {
-  const normalizedPhaseKey = String(phaseKey || '').trim();
-  const phaseIndex = findPhaseIndex(phaseKey);
-
-  if (simulationStatus === 'completed') {
-    return 'summary';
-  }
-
-  if (normalizedPhaseKey && phaseIndex > 0) {
-    return phaseKey;
-  }
-
-  if (uiProgress?.active && uiProgress.stage === 'starting_simulation') {
-    return 'agent_deliberation';
-  }
-
-  if (simulationStatus === 'running' || simulationStatus === 'configuring' || simulationStatus === 'paused') {
-    return normalizedPhaseKey || 'agent_deliberation';
-  }
-
-  if (searchState?.status && searchState.status !== 'idle') {
-    return 'internet_research';
-  }
-
-  if (uiProgress?.active && uiProgress.stage === 'prestart_research') {
-    return 'internet_research';
-  }
-
-  return normalizedPhaseKey || 'idea_intake';
-};
+const currentPipelineStep = (pipeline?: SimulationPipeline | null) =>
+  pipeline?.steps.find((step) => step.status === 'running')
+  || pipeline?.steps.find((step) => step.status === 'pending')
+  || [...(pipeline?.steps || [])].reverse().find((step) => step.status === 'completed')
+  || null;
 
 const getStatusCopy = ({
   language,
@@ -171,12 +91,14 @@ const getStatusCopy = ({
   simulationError,
   searchState,
   uiProgress,
+  pipeline,
 }: {
   language: SupportedLanguage;
   simulationStatus: 'idle' | 'configuring' | 'running' | 'paused' | 'completed' | 'error';
   simulationError?: string | null;
   searchState?: SearchState;
   uiProgress?: UiProgress;
+  pipeline?: SimulationPipeline | null;
 }) => {
   if (simulationError) {
     return {
@@ -184,28 +106,25 @@ const getStatusCopy = ({
       tone: 'error' as const,
     };
   }
+  if (pipeline?.blockers?.length) {
+    return {
+      label: language === 'ar'
+        ? `المحاكاة محجوبة: ${pipeline.blockers.join('، ')}`
+        : `Simulation blocked: ${pipeline.blockers.join(', ')}`,
+      tone: 'warning' as const,
+    };
+  }
+  const activeStep = currentPipelineStep(pipeline);
+  if (activeStep) {
+    return {
+      label: activeStep.detail || pipelineStepLabel(language, activeStep),
+      tone: activeStep.status === 'completed' ? 'success' as const : 'info' as const,
+    };
+  }
   if (searchState?.status === 'searching') {
     return {
       label: STAGE_LABELS[searchState.stage || 'prestart_research'][language],
       tone: 'info' as const,
-    };
-  }
-  if (searchState?.status === 'timeout') {
-    return {
-      label: language === 'ar' ? 'انتهت مهلة البحث ويمكنك إعادة المحاولة' : 'Search timed out and can be retried',
-      tone: 'warning' as const,
-    };
-  }
-  if (searchState?.status === 'error') {
-    return {
-      label: language === 'ar' ? 'تعذر إكمال البحث الحالي' : 'Could not complete the current search',
-      tone: 'error' as const,
-    };
-  }
-  if (searchState?.status === 'complete') {
-    return {
-      label: language === 'ar' ? 'اكتمل جمع النتائج ويمكنك المتابعة' : 'Results are ready and you can continue',
-      tone: 'success' as const,
     };
   }
   if (uiProgress?.active) {
@@ -221,15 +140,6 @@ const getStatusCopy = ({
   };
 };
 
-const buildSteps = (language: SupportedLanguage, phaseKey?: string | null): TopBarStep[] => {
-  const currentIndex = findPhaseIndex(phaseKey);
-  return PHASES.map((phase, index) => ({
-    key: phase.key,
-    label: phase.labels[language],
-    state: index < currentIndex ? 'completed' : index === currentIndex ? 'current' : 'upcoming',
-  }));
-};
-
 export const buildSimulationUiState = ({
   language,
   phaseKey,
@@ -237,6 +147,7 @@ export const buildSimulationUiState = ({
   simulationError,
   searchState,
   uiProgress,
+  pipeline,
 }: {
   language: SupportedLanguage;
   phaseKey?: string | null;
@@ -244,22 +155,29 @@ export const buildSimulationUiState = ({
   simulationError?: string | null;
   searchState?: SearchState;
   uiProgress?: UiProgress;
+  pipeline?: SimulationPipeline | null;
 }): SimulationUiState => {
   const copy = EMPTY_COPY[language];
-  const statusCopy = getStatusCopy({ language, simulationStatus, simulationError, searchState, uiProgress });
-  const displayPhaseKey = resolveDisplayPhaseKey({
-    phaseKey,
-    simulationStatus,
-    searchState,
-    uiProgress,
-  });
+  const statusCopy = getStatusCopy({ language, simulationStatus, simulationError, searchState, uiProgress, pipeline });
+  const activeStep = currentPipelineStep(pipeline);
+  const steps = pipeline?.steps?.length
+    ? buildPipelineSteps(language, pipeline)
+    : [{
+        key: phaseKey || 'idea_intake',
+        label: language === 'ar' ? 'استقبال الفكرة' : 'Idea intake',
+        state: simulationStatus === 'completed' ? 'completed' : 'current',
+      }];
   return {
     screenTitle: copy.screenTitle,
-    stageLabel: labelForPhase(language, displayPhaseKey),
+    stageLabel: activeStep ? pipelineStepLabel(language, activeStep) : (language === 'ar' ? 'استقبال الفكرة' : 'Idea intake'),
     currentStatusLabel: statusCopy.label,
     currentStatusTone: statusCopy.tone,
-    steps: buildSteps(language, displayPhaseKey),
-    currentStepLoading: Boolean(searchState?.status === 'searching' || uiProgress?.active),
+    steps,
+    currentStepLoading: Boolean(
+      pipeline?.steps?.some((step) => step.status === 'running')
+      || searchState?.status === 'searching'
+      || uiProgress?.active
+    ),
     graphTitle: copy.graphTitle,
     graphDescription: copy.graphDescription,
     graphLegend: [
@@ -274,6 +192,20 @@ export const buildSimulationUiState = ({
     metricsDescription: copy.metricsDescription,
     metricsEmptyLabel: copy.metricsEmptyLabel,
   };
+};
+
+export const formatCount = (value: number | null | undefined, fallback = '0'): string =>
+  typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : fallback;
+
+export const formatPercent = (
+  value: number | null | undefined,
+  fallback = '0%',
+  decimals = 0,
+): string => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return `${value.toFixed(decimals)}%`;
 };
 
 export const hasMetricsData = (metrics: SimulationMetrics): boolean =>

@@ -129,7 +129,7 @@ export default function ResearchTab({ loading, result, query, onStartSimulation 
           {result && onStartSimulation && (
             <Button onClick={onStartSimulation} size="sm" className="liquid-glass-button">
               <Play className="w-4 h-4 mr-1" />
-              {isRTL ? 'ابدأ المحاكاة' : 'Start Simulation'}
+              {isRTL ? 'تابع إلى خط الأنابيب الإلزامي' : 'Continue to Mandatory Pipeline'}
             </Button>
           )}
         </div>

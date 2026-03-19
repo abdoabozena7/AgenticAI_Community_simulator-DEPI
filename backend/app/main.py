@@ -36,6 +36,7 @@ from .api import admin as admin_routes
 from .api import health as health_routes
 from .api import devlab as devlab_routes
 from .api import guided_workflow as guided_workflow_routes
+from .api import persona_lab as persona_lab_routes
 
 
 def _allowed_origins() -> list[str]:
@@ -94,6 +95,7 @@ def create_app() -> FastAPI:
     app.include_router(devlab_routes.router)
     app.include_router(health_routes.router)
     app.include_router(guided_workflow_routes.router)
+    app.include_router(persona_lab_routes.router)
 
     @app.on_event("startup")
     async def startup_event() -> None:

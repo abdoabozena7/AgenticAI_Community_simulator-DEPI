@@ -1,17 +1,19 @@
 ﻿import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { useCallback } from 'react';
 import { motion } from 'framer-motion';
 import {
   Brain, TrendingUp, Users, Zap, Settings,
   LogOut, Plus, Search, Bell, User,
   CreditCard, Shield, Globe, Moon, Sun, Home,
-  Scale, Sparkles, BarChart3, Clock, CheckCircle2, AlertTriangle, Target, Beaker,
+  Scale, Sparkles, BarChart3, Clock, CheckCircle2, AlertTriangle, Target, Beaker, Loader2,
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { RippleButton } from '@/components/ui/ripple-button';
 import { RippleInput } from '@/components/ui/ripple-input';
 import { Progress } from '@/components/ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
@@ -21,7 +23,7 @@ import {
   BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from 'recharts';
-import { apiService, UserMe, SimulationListItem, SimulationAnalyticsResponse, NotificationLogItem } from '@/services/api';
+import { apiService, UserMe, SimulationListItem, SimulationAnalyticsResponse, NotificationLogItem, PersonaLibrarySetRecord } from '@/services/api';
 import HomeTab from '@/components/dashboard/HomeTab';
 import SimulationDetails, { type SimulationData } from '@/components/dashboard/SimulationDetails';
 import ResearchTab from '@/components/dashboard/ResearchTab';
@@ -30,6 +32,7 @@ import AdminTab from '@/components/dashboard/AdminTab';
 import DeveloperLabTab from '@/components/dashboard/DeveloperLabTab';
 import NotificationsPanel, { type NotificationItem } from '@/components/dashboard/NotificationsPanel';
 import { getIdeaLog, type IdeaLogEntry } from '@/lib/ideaLog';
+import PersonaLabTab from '@/components/dashboard/PersonaLabTab';
 
 interface Simulation {
   id: string;
@@ -52,6 +55,19 @@ interface ResearchResult {
   structured?: any;
   evidence_cards?: string[];
 }
+
+type PersonaSelection = {
+  persona_source_mode: 'saved_place_personas';
+  persona_set_key: string;
+  persona_set_label?: string;
+  city?: string;
+};
+
+type SimulationLaunchDraft = {
+  idea: string;
+  category?: string;
+  location?: string;
+};
 
 const CHART_COLORS = ['#22d3ee', '#f472b6', '#facc15', '#4ade80', '#a78bfa', '#f97316'];
 
@@ -150,6 +166,7 @@ const saveReadNotificationIds = (ids: string[]) => {
 };
 
 export default function DashboardPage() {
+  const location = useLocation();
   const navigate = useNavigate();
   const { isRTL, language, setLanguage } = useLanguage();
   const { theme, toggleTheme } = useTheme();
@@ -168,6 +185,17 @@ export default function DashboardPage() {
     error?: string | null;
     query?: string;
   }>({ loading: false, result: null, error: null, query: undefined });
+  const [personaSourceDialogOpen, setPersonaSourceDialogOpen] = useState(false);
+  const [personaLaunchDraft, setPersonaLaunchDraft] = useState<SimulationLaunchDraft | null>(null);
+  const [savedPersonaSets, setSavedPersonaSets] = useState<PersonaLibrarySetRecord[]>([]);
+  const [savedPersonaSetsLoading, setSavedPersonaSetsLoading] = useState(false);
+  const [savedPersonaSetsError, setSavedPersonaSetsError] = useState<string | null>(null);
+  const [savedPersonaSearch, setSavedPersonaSearch] = useState('');
+  const [selectedSavedPersonaSetKey, setSelectedSavedPersonaSetKey] = useState('');
+  const [defaultPersonaSelection, setDefaultPersonaSelection] = useState<{
+    draft: SimulationLaunchDraft;
+    selection: PersonaSelection;
+  } | null>(null);
   const [simulationItems, setSimulationItems] = useState<SimulationListItem[]>([]);
   const [analytics, setAnalytics] = useState<SimulationAnalyticsResponse | null>(null);
   const [dataError, setDataError] = useState<string | null>(null);
@@ -179,6 +207,17 @@ export default function DashboardPage() {
     () => notifications.filter((n) => !n.read).length,
     [notifications]
   );
+
+  useEffect(() => {
+    const routeState = location.state as {
+      openTab?: string;
+      personaLaunchDraft?: SimulationLaunchDraft | null;
+    } | null;
+    if (routeState?.openTab !== 'persona-lab') return;
+    setActiveNav('persona-lab');
+    setPersonaLaunchDraft(routeState.personaLaunchDraft || null);
+    navigate(location.pathname, { replace: true, state: null });
+  }, [location.pathname, location.state, navigate]);
 
   useEffect(() => {
     const load = async () => {
@@ -289,6 +328,7 @@ export default function DashboardPage() {
     { label: isRTL ? 'الرئيسية' : 'Home', icon: Home, id: 'home' },
     { label: isRTL ? 'المحاكاة' : 'Simulations', icon: Brain, id: 'simulations' },
     { label: isRTL ? 'البحث' : 'Research', icon: Search, id: 'research' },
+    { label: isRTL ? 'مختبر الشخصيات' : 'Persona Lab', icon: Sparkles, id: 'persona-lab' },
     { label: isRTL ? 'محكمة الأفكار' : 'Idea Court', icon: Scale, id: 'idea-court' },
     { label: isRTL ? 'التحليلات' : 'Analytics', icon: BarChart3, id: 'analytics' },
     ...(isDeveloper ? [{ label: isRTL ? 'مختبر المطور' : 'Developer Lab', icon: Beaker, id: 'developer-lab' }] : []),
@@ -338,24 +378,87 @@ export default function DashboardPage() {
     }
   };
 
-  const handleStartSimulation = (idea: string) => {
-    if (!idea.trim()) return;
-    const trimmedIdea = idea.trim();
+  const loadSavedPersonaSets = useCallback(async (place = '') => {
+    setSavedPersonaSetsLoading(true);
+    setSavedPersonaSetsError(null);
     try {
-      localStorage.setItem('pendingIdea', trimmedIdea);
-      localStorage.setItem('pendingAutoStart', 'true');
+      const res = await apiService.listPersonaLibrary({
+        place: place || undefined,
+        min_count: 10,
+        limit: 12,
+      });
+      setSavedPersonaSets(res.items || []);
+    } catch (err: any) {
+      setSavedPersonaSetsError(err?.message || 'Failed to load persona sets');
+      setSavedPersonaSets([]);
+    } finally {
+      setSavedPersonaSetsLoading(false);
+    }
+  }, []);
+
+  const continueToSimulation = useCallback((draft: SimulationLaunchDraft, options?: {
+    persona_source_mode?: 'default_audience_only' | 'generate_new_from_place' | 'saved_place_personas';
+    persona_set_key?: string;
+    persona_set_label?: string;
+    city?: string;
+  }) => {
+    const trimmedIdea = draft.idea.trim();
+    if (!trimmedIdea) return;
+    const pendingDraft = {
+      idea: trimmedIdea,
+      autoStart: true,
+      category: draft.category || '',
+      city: options?.city || draft.location || '',
+      persona_source_mode: options?.persona_source_mode || (draft.location ? 'generate_new_from_place' : 'default_audience_only'),
+      persona_set_key: options?.persona_set_key || '',
+      persona_set_label: options?.persona_set_label || '',
+    };
+    try {
       localStorage.setItem('dashboardIdea', trimmedIdea);
+      localStorage.removeItem('pendingIdea');
+      localStorage.removeItem('pendingAutoStart');
+      localStorage.setItem('pendingSimulationDraft', JSON.stringify(pendingDraft));
     } catch {
       // ignore
     }
     navigate('/simulate', {
       state: {
-        idea: trimmedIdea,
-        autoStart: true,
+        ...pendingDraft,
         source: 'dashboard',
       },
     });
-  };
+  }, [navigate]);
+
+  const handleOpenPersonaChoice = useCallback((draft: SimulationLaunchDraft) => {
+    setPersonaLaunchDraft(draft);
+    setSelectedSavedPersonaSetKey(defaultPersonaSelection?.draft.idea === draft.idea ? defaultPersonaSelection.selection.persona_set_key : '');
+    setPersonaSourceDialogOpen(true);
+    void loadSavedPersonaSets(draft.location || savedPersonaSearch);
+  }, [defaultPersonaSelection, loadSavedPersonaSets, savedPersonaSearch]);
+
+  const handleStartSimulation = useCallback((payload: { idea: string; location?: string; category?: string; forceChoice?: boolean }) => {
+    const draft = {
+      idea: payload.idea.trim(),
+      location: payload.location?.trim() || '',
+      category: payload.category?.trim() || '',
+    };
+    if (!draft.idea) return;
+    const matchingDefault = defaultPersonaSelection && defaultPersonaSelection.draft.idea === draft.idea
+      ? defaultPersonaSelection.selection
+      : null;
+    if (matchingDefault) {
+      continueToSimulation(draft, matchingDefault);
+      return;
+    }
+    if (draft.location && !payload.forceChoice) {
+      continueToSimulation(draft, {
+        persona_source_mode: 'generate_new_from_place',
+        city: draft.location,
+      });
+      return;
+    }
+    handleOpenPersonaChoice(draft);
+  }, [continueToSimulation, defaultPersonaSelection, handleOpenPersonaChoice]);
 
   const mapAuditToNotification = (log: NotificationLogItem): NotificationItem => {
     const action = log.action || '';
@@ -496,6 +599,11 @@ export default function DashboardPage() {
     if (!showNotifications) return;
     loadNotifications();
   }, [showNotifications]);
+
+  useEffect(() => {
+    if (!personaSourceDialogOpen) return;
+    void loadSavedPersonaSets(savedPersonaSearch || personaLaunchDraft?.location || '');
+  }, [loadSavedPersonaSets, personaLaunchDraft?.location, personaSourceDialogOpen, savedPersonaSearch]);
 
   useEffect(() => {
     if (!notifications.length) return;
@@ -935,7 +1043,22 @@ export default function DashboardPage() {
       case 'home': return (
         <HomeTab
           onStartResearch={handleStartResearch}
-          onStartSimulation={handleStartSimulation}
+          onStartSimulation={(idea, extras) => handleStartSimulation({
+            idea,
+            location: extras?.location,
+            category: extras?.category,
+          })}
+          onChoosePersonaSource={(idea, extras) => handleStartSimulation({
+            idea,
+            location: extras?.location,
+            category: extras?.category,
+            forceChoice: true,
+          })}
+          onOpenPersonaLab={() => {
+            setPersonaLaunchDraft(null);
+            setActiveNav('persona-lab');
+          }}
+          hasDefaultPersonaSelection={Boolean(defaultPersonaSelection)}
           onRedeemPromo={handleRedeemPromo}
           researchBusy={researchState.loading}
         />
@@ -952,10 +1075,24 @@ export default function DashboardPage() {
             result={researchState.result}
             query={researchState.query}
             onStartSimulation={() => {
-              if (researchState.query) handleStartSimulation(researchState.query);
+              if (researchState.query) handleStartSimulation({ idea: researchState.query });
             }}
           />
         </div>
+      );
+      case 'persona-lab': return (
+        <PersonaLabTab
+          launchContext={personaLaunchDraft}
+          onUseForSimulation={(selection) => {
+            if (!personaLaunchDraft) return;
+            continueToSimulation(personaLaunchDraft, selection);
+          }}
+          onMarkDefaultForSimulation={(selection) => {
+            if (!personaLaunchDraft) return;
+            setDefaultPersonaSelection({ draft: personaLaunchDraft, selection });
+            setActiveNav('home');
+          }}
+        />
       );
       case 'idea-court': return <IdeaCourtTab />;
       case 'developer-lab': return <DeveloperLabTab />;
@@ -966,6 +1103,8 @@ export default function DashboardPage() {
       default: return renderOverview();
     }
   };
+
+  const selectedSavedPersonaSet = savedPersonaSets.find((item) => item.set_key === selectedSavedPersonaSetKey) || null;
 
   if (loading) {
     return (
@@ -1077,11 +1216,124 @@ export default function DashboardPage() {
           </motion.div>
         </div>
       </main>
+
+      <Dialog open={personaSourceDialogOpen} onOpenChange={setPersonaSourceDialogOpen}>
+        <DialogContent className="max-w-3xl border-border/60 bg-background/95">
+          <DialogHeader>
+            <DialogTitle>{isRTL ? 'اختيار مصدر الشخصيات' : 'Choose Persona Source'}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-5">
+            <div className="rounded-2xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm">
+              <div className="font-medium text-foreground">
+                {personaLaunchDraft?.location
+                  ? (isRTL ? 'تم تحديد مكان مسبقًا. سيتم استخدام توليد شخصيات المكان افتراضيًا ما لم تغيّره يدويًا.' : 'A place is already set. The default path is to generate personas from that place unless you override it.')
+                  : (isRTL ? 'هذه الفكرة تبدو عامة، لذلك سيستخدم النظام شخصيات الجمهور الافتراضية ما لم تختر مصدرًا آخر للشخصيات.' : 'This idea looks general, so the system will use default audience personas unless you choose another persona source.')}
+              </div>
+              {personaLaunchDraft?.idea ? <div className="text-muted-foreground mt-1">{personaLaunchDraft.idea}</div> : null}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <button
+                type="button"
+                onClick={() => {
+                  if (!personaLaunchDraft) return;
+                  setPersonaSourceDialogOpen(false);
+                  continueToSimulation(personaLaunchDraft, { persona_source_mode: 'default_audience_only' });
+                }}
+                className="rounded-2xl border border-border/50 bg-background/60 p-4 text-left hover:bg-white/5 transition"
+              >
+                <div className="font-medium">{isRTL ? 'شخصيات الجمهور فقط' : 'Target audience personas only'}</div>
+                <div className="text-sm text-muted-foreground mt-2">{isRTL ? 'أكثر عمومية وعشوائية من الشخصيات المولدة من البحث.' : 'More generic and randomized than research-derived personas.'}</div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (!personaLaunchDraft?.location) return;
+                  setPersonaSourceDialogOpen(false);
+                  continueToSimulation(personaLaunchDraft, {
+                    persona_source_mode: 'generate_new_from_place',
+                    city: personaLaunchDraft.location,
+                  });
+                }}
+                disabled={!personaLaunchDraft?.location}
+                className="rounded-2xl border border-border/50 bg-background/60 p-4 text-left hover:bg-white/5 transition disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <div className="font-medium">{isRTL ? 'ولّد شخصيات من هذا المكان' : 'Generate personas from this place'}</div>
+                <div className="text-sm text-muted-foreground mt-2">{personaLaunchDraft?.location || (isRTL ? 'هذا الخيار يحتاج إلى مكان.' : 'This option requires a place.')}</div>
+              </button>
+            </div>
+
+            <div className="rounded-2xl border border-border/50 bg-background/40 p-4 space-y-3">
+              <div className="font-medium">{isRTL ? 'شخصيات محفوظة من أماكن محددة' : 'Saved personas from specific places'}</div>
+              <div className="flex flex-col md:flex-row gap-3">
+                <RippleInput
+                  value={savedPersonaSearch}
+                  onChange={(e) => setSavedPersonaSearch(e.target.value)}
+                  placeholder={isRTL ? 'ابحث عن مكان محفوظ' : 'Search saved places'}
+                  className="bg-white/5 border-border/50"
+                />
+                <RippleButton variant="outline" onClick={() => void loadSavedPersonaSets(savedPersonaSearch)}>
+                  {isRTL ? 'تحديث' : 'Refresh'}
+                </RippleButton>
+              </div>
+              {savedPersonaSetsError ? <div className="text-sm text-rose-300">{savedPersonaSetsError}</div> : null}
+              <div className="max-h-52 overflow-auto space-y-2 pr-1">
+                {savedPersonaSetsLoading ? (
+                  <div className="text-sm text-muted-foreground flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />{isRTL ? 'جارٍ تحميل المجموعات المحفوظة...' : 'Loading saved sets...'}</div>
+                ) : savedPersonaSets.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">{isRTL ? 'لا توجد مجموعات محفوظة مطابقة.' : 'No saved persona sets matched.'}</div>
+                ) : savedPersonaSets.map((item) => (
+                  <button
+                    type="button"
+                    key={item.set_key || item.id}
+                    onClick={() => setSelectedSavedPersonaSetKey(item.set_key || '')}
+                    className={cn(
+                      'w-full rounded-xl border px-3 py-3 text-left transition',
+                      selectedSavedPersonaSetKey === item.set_key ? 'border-cyan-400/60 bg-cyan-500/10' : 'border-border/40 bg-background/40 hover:bg-white/5',
+                    )}
+                  >
+                    <div className="font-medium">{item.place_label || item.set_key}</div>
+                    <div className="text-xs text-muted-foreground mt-1">{item.persona_count || 0} {isRTL ? 'شخصية' : 'personas'} • {item.audience_filters?.join(', ') || (isRTL ? 'كل الجماهير' : 'all audiences')}</div>
+                  </button>
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <RippleButton
+                  disabled={!selectedSavedPersonaSetKey || !personaLaunchDraft}
+                  onClick={() => {
+                    if (!personaLaunchDraft || !selectedSavedPersonaSetKey) return;
+                    setPersonaSourceDialogOpen(false);
+                    continueToSimulation(personaLaunchDraft, {
+                      persona_source_mode: 'saved_place_personas',
+                      persona_set_key: selectedSavedPersonaSetKey,
+                      persona_set_label: selectedSavedPersonaSet?.place_label || undefined,
+                      city: selectedSavedPersonaSet?.place_label || undefined,
+                    });
+                  }}
+                >
+                  {isRTL ? 'استخدم هذه المجموعة' : 'Use this saved set'}
+                </RippleButton>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-3">
+              <RippleButton
+                variant="secondary"
+                onClick={() => {
+                  setPersonaSourceDialogOpen(false);
+                  setActiveNav('persona-lab');
+                }}
+              >
+                {isRTL ? 'اذهب إلى مختبر الشخصيات' : 'Go to Persona Lab'}
+              </RippleButton>
+              <RippleButton variant="ghost" onClick={() => setPersonaSourceDialogOpen(false)}>
+                {isRTL ? 'إلغاء وتعديل السياق' : 'Cancel and edit idea context'}
+              </RippleButton>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
-
-
-
-
-

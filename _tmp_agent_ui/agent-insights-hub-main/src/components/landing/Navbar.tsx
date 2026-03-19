@@ -53,7 +53,7 @@ export function Navbar({ onLogin, onRegister }: NavbarProps) {
             <span className="text-background font-bold text-sm">AS</span>
           </div>
           <span className="text-foreground font-semibold text-lg hidden sm:block">
-            ASSET
+            SocitySim
           </span>
         </div>
 

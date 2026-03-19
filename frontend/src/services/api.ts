@@ -166,6 +166,9 @@ export interface SimulationConfig {
   society_profile_id?: string;
   society_custom_spec?: Record<string, unknown>;
   start_path?: 'inspect_default' | 'build_custom' | 'start_default';
+  persona_source_mode?: 'default_audience_only' | 'saved_place_personas' | 'generate_new_from_search' | 'generate_new_from_place';
+  persona_set_key?: string;
+  persona_set_label?: string;
   preflight_ready?: boolean;
   preflight_summary?: string;
   preflight_answers?: Record<string, unknown>;
@@ -198,6 +201,35 @@ export interface SimulationStateResponse {
   simulation_id: string;
   status: 'running' | 'paused' | 'completed' | 'error';
   status_reason?: 'running' | 'interrupted' | 'paused_manual' | 'paused_search_failed' | 'paused_research_review' | 'paused_credits_exhausted' | 'paused_clarification_needed' | 'paused_coach_intervention' | 'error' | 'completed';
+  idea_context_type?: 'location_based' | 'general_non_location' | 'hybrid' | null;
+  persona_source?: {
+    mode?: string | null;
+    resolved?: boolean;
+    auto_selected?: boolean;
+    notice?: string | null;
+    selected_set_key?: string | null;
+    selected_set_label?: string | null;
+    options?: Array<{
+      mode?: string;
+      label?: string;
+      recommended?: boolean;
+    }>;
+  } | null;
+  pipeline?: {
+    ready_for_simulation?: boolean;
+    blockers?: string[];
+    steps?: Array<{
+      key?: string;
+      label?: {
+        ar?: string;
+        en?: string;
+      } | null;
+      status?: 'pending' | 'running' | 'completed' | 'blocked';
+      detail?: string | null;
+      started_at?: number | null;
+      completed_at?: number | null;
+    }>;
+  } | null;
   policy_mode?: 'normal' | 'safety_guard_hard';
   policy_reason?: string | null;
   search_quality?: {
@@ -898,6 +930,97 @@ export interface GuidedWorkflowPersonaLibraryResponse {
     created_at?: string;
     updated_at?: string;
   }>;
+  total: number;
+}
+
+export interface PersonaLibrarySetRecord {
+  id?: number;
+  set_key?: string;
+  place_key?: string;
+  place_label?: string;
+  audience_key?: string;
+  audience_filters?: string[];
+  source_policy?: string;
+  context_type?: string;
+  source_summary?: string;
+  quality_score?: number | null;
+  confidence_score?: number | null;
+  reusable_dataset_ref?: string | null;
+  persona_count?: number;
+  payload?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface PersonaLibraryListResponse {
+  items: PersonaLibrarySetRecord[];
+  total: number;
+}
+
+export interface PersonaLabStage {
+  key: string;
+  label: string;
+  status: 'pending' | 'running' | 'completed' | 'blocked';
+  detail?: string | null;
+  started_at?: number | null;
+  completed_at?: number | null;
+  meta?: Record<string, unknown>;
+}
+
+export interface PersonaLabJobResponse {
+  job_id: string;
+  status: 'queued' | 'running' | 'completed' | 'failed';
+  current_stage: string;
+  stages: PersonaLabStage[];
+  config: {
+    source_mode: 'audience_only' | 'saved_place_reuse' | 'new_deep_search_place' | 'hybrid';
+    desired_count: number;
+    target_audience_family?: string;
+    place?: string;
+    saved_set_key?: string;
+    generation_depth: 'standard' | 'deep';
+    stubbornness_preset?: 'low' | 'balanced' | 'high';
+    skepticism_preset?: 'low' | 'balanced' | 'high';
+    conformity_preset?: 'low' | 'balanced' | 'high';
+    randomness_level?: number;
+    speaking_style_intensity?: number;
+    economic_sensitivity_bias?: number;
+  };
+  partial_results: {
+    current_persona_count: number;
+    sample_personas: Array<{
+      persona_id: string;
+      display_name: string;
+      target_audience_cluster?: string;
+      location_context?: string;
+      profession_role?: string;
+      attitude_baseline?: string;
+      speaking_style?: string;
+      main_concerns?: string[];
+      probable_motivations?: string[];
+      tags?: string[];
+      summary?: string;
+    }>;
+    saved_set_name?: string | null;
+    saved_set_id?: number | null;
+    saved_set_key?: string | null;
+  };
+  developer: {
+    current_stage?: string;
+    batch_number?: number;
+    evidence_signals_found?: number;
+    duplicate_rejection_count?: number;
+    final_persona_count?: number;
+    persistence_status?: string;
+  };
+  validation_errors: string[];
+  final_saved_set_id?: number | null;
+  created_at?: number | string;
+  updated_at?: number | string;
+}
+
+export interface PersonaLabJobListResponse {
+  items: PersonaLabJobResponse[];
   total: number;
 }
 
@@ -1717,6 +1840,67 @@ class ApiService {
     if (place) params.set('place', place);
     params.set('limit', String(limit));
     return this.request<GuidedWorkflowPersonaLibraryResponse>(`/simulation/workflow/personas?${params.toString()}`);
+  }
+
+  async startPersonaLabJob(payload: {
+    source_mode: 'audience_only' | 'saved_place_reuse' | 'new_deep_search_place' | 'hybrid';
+    desired_count: number;
+    target_audience_family?: string;
+    place?: string;
+    saved_set_key?: string;
+    generation_depth: 'standard' | 'deep';
+    stubbornness_preset?: 'low' | 'balanced' | 'high';
+    skepticism_preset?: 'low' | 'balanced' | 'high';
+    conformity_preset?: 'low' | 'balanced' | 'high';
+    randomness_level?: number;
+    speaking_style_intensity?: number;
+    economic_sensitivity_bias?: number;
+  }): Promise<PersonaLabJobResponse> {
+    return this.request<PersonaLabJobResponse>('/simulation/persona-lab/jobs', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async getPersonaLabJob(jobId: string): Promise<PersonaLabJobResponse> {
+    return this.request<PersonaLabJobResponse>(`/simulation/persona-lab/jobs/${encodeURIComponent(jobId)}`, {
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async listPersonaLabJobs(limit = 20): Promise<PersonaLabJobListResponse> {
+    return this.request<PersonaLabJobListResponse>(`/simulation/persona-lab/jobs?limit=${encodeURIComponent(String(limit))}`, {
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async listPersonaLibrary(options?: {
+    place?: string;
+    audience?: string;
+    date_from?: string;
+    date_to?: string;
+    min_count?: number;
+    max_count?: number;
+    limit?: number;
+  }): Promise<PersonaLibraryListResponse> {
+    const params = new URLSearchParams();
+    if (options?.place) params.set('place', options.place);
+    if (options?.audience) params.set('audience', options.audience);
+    if (options?.date_from) params.set('date_from', options.date_from);
+    if (options?.date_to) params.set('date_to', options.date_to);
+    if (typeof options?.min_count === 'number') params.set('min_count', String(options.min_count));
+    if (typeof options?.max_count === 'number') params.set('max_count', String(options.max_count));
+    params.set('limit', String(options?.limit ?? 20));
+    return this.request<PersonaLibraryListResponse>(`/simulation/persona-lab/library?${params.toString()}`, {
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
+  }
+
+  async getPersonaLibrarySet(setKey: string): Promise<PersonaLibrarySetRecord> {
+    return this.request<PersonaLibrarySetRecord>(`/simulation/persona-lab/library/${encodeURIComponent(setKey)}`, {
+      timeoutMs: ApiService.LONG_TIMEOUT_MS,
+    });
   }
 
   async listSimulations(limit = 25, offset = 0): Promise<SimulationListResponse> {

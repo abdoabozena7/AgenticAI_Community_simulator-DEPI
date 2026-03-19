@@ -8,6 +8,7 @@ and metrics into a local MySQL (XAMPP) instance.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import threading
@@ -396,6 +397,25 @@ def _apply_migrations(cursor: mysql.connector.cursor.MySQLCursor) -> None:
         ),
         "ALTER TABLE guided_workflows ADD COLUMN attached_simulation_id VARCHAR(36) NULL AFTER state_json",
         (
+            "CREATE TABLE IF NOT EXISTS persona_lab_jobs ("
+            "job_id VARCHAR(36) PRIMARY KEY, "
+            "user_id BIGINT NULL, "
+            "status VARCHAR(24) NOT NULL DEFAULT 'queued', "
+            "current_stage VARCHAR(64) NOT NULL DEFAULT 'preparing_request', "
+            "final_saved_set_id BIGINT NULL, "
+            "state_json LONGTEXT NOT NULL, "
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, "
+            "INDEX idx_persona_lab_jobs_user (user_id), "
+            "INDEX idx_persona_lab_jobs_stage (current_stage), "
+            "INDEX idx_persona_lab_jobs_saved_set (final_saved_set_id), "
+            "CONSTRAINT fk_persona_lab_jobs_user FOREIGN KEY (user_id) "
+            "REFERENCES users(id) ON DELETE SET NULL, "
+            "CONSTRAINT fk_persona_lab_jobs_saved_set FOREIGN KEY (final_saved_set_id) "
+            "REFERENCES persona_sets(id) ON DELETE SET NULL"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        ),
+        (
             "CREATE TABLE IF NOT EXISTS persona_library_records ("
             "id BIGINT AUTO_INCREMENT PRIMARY KEY, "
             "user_id BIGINT NULL, "
@@ -415,6 +435,82 @@ def _apply_migrations(cursor: mysql.connector.cursor.MySQLCursor) -> None:
         ),
         "ALTER TABLE persona_library_records ADD COLUMN source_policy VARCHAR(32) NOT NULL DEFAULT 'open_socials' AFTER scope",
         "ALTER TABLE persona_library_records ADD COLUMN persona_count INT NOT NULL DEFAULT 0 AFTER source_policy",
+        (
+            "CREATE TABLE IF NOT EXISTS persona_sets ("
+            "id BIGINT AUTO_INCREMENT PRIMARY KEY, "
+            "set_key VARCHAR(191) NOT NULL UNIQUE, "
+            "creator_user_id BIGINT NULL, "
+            "place_key VARCHAR(191) NULL, "
+            "place_label VARCHAR(255) NULL, "
+            "audience_key VARCHAR(191) NOT NULL DEFAULT '', "
+            "audience_filters_json JSON NULL, "
+            "scope VARCHAR(32) NOT NULL DEFAULT 'shared', "
+            "shared_asset TINYINT(1) NOT NULL DEFAULT 1, "
+            "source_mode VARCHAR(48) NOT NULL, "
+            "context_type VARCHAR(32) NULL, "
+            "source_summary TEXT NULL, "
+            "evidence_summary_json JSON NULL, "
+            "generation_config_json JSON NULL, "
+            "quality_score FLOAT NULL, "
+            "confidence_score FLOAT NULL, "
+            "quality_meta_json JSON NULL, "
+            "validation_meta_json JSON NULL, "
+            "reusable_dataset_ref VARCHAR(191) NULL, "
+            "persona_count INT NOT NULL DEFAULT 0, "
+            "payload_json LONGTEXT NULL, "
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, "
+            "INDEX idx_persona_sets_place (place_key), "
+            "INDEX idx_persona_sets_audience (audience_key), "
+            "INDEX idx_persona_sets_created (created_at), "
+            "INDEX idx_persona_sets_count (persona_count), "
+            "CONSTRAINT fk_persona_sets_creator FOREIGN KEY (creator_user_id) "
+            "REFERENCES users(id) ON DELETE SET NULL"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        ),
+        (
+            "CREATE TABLE IF NOT EXISTS persona_set_personas ("
+            "id BIGINT AUTO_INCREMENT PRIMARY KEY, "
+            "persona_set_id BIGINT NOT NULL, "
+            "persona_uid VARCHAR(64) NOT NULL, "
+            "display_name VARCHAR(255) NOT NULL, "
+            "source_mode VARCHAR(48) NOT NULL, "
+            "target_audience_cluster VARCHAR(191) NOT NULL, "
+            "location_context VARCHAR(255) NULL, "
+            "age_band VARCHAR(64) NOT NULL, "
+            "life_stage VARCHAR(64) NOT NULL, "
+            "profession_role VARCHAR(191) NOT NULL, "
+            "attitude_baseline VARCHAR(191) NOT NULL, "
+            "skepticism_level FLOAT NOT NULL, "
+            "conformity_level FLOAT NOT NULL, "
+            "stubbornness_level FLOAT NOT NULL, "
+            "innovation_openness FLOAT NOT NULL, "
+            "financial_sensitivity FLOAT NOT NULL, "
+            "speaking_style VARCHAR(191) NOT NULL, "
+            "main_concerns_json JSON NULL, "
+            "probable_motivations_json JSON NULL, "
+            "influence_weight FLOAT NOT NULL, "
+            "tags_json JSON NULL, "
+            "category_id VARCHAR(64) NULL, "
+            "template_id VARCHAR(64) NULL, "
+            "archetype_name VARCHAR(191) NULL, "
+            "summary TEXT NULL, "
+            "location VARCHAR(255) NULL, "
+            "opinion VARCHAR(16) NULL, "
+            "confidence FLOAT NULL, "
+            "traits_json JSON NULL, "
+            "biases_json JSON NULL, "
+            "opinion_score FLOAT NULL, "
+            "source_attribution_json JSON NULL, "
+            "evidence_signals_json JSON NULL, "
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "UNIQUE KEY uq_persona_set_persona_uid (persona_set_id, persona_uid), "
+            "INDEX idx_persona_set_personas_set (persona_set_id), "
+            "INDEX idx_persona_set_personas_cluster (target_audience_cluster), "
+            "CONSTRAINT fk_persona_set_personas_set FOREIGN KEY (persona_set_id) "
+            "REFERENCES persona_sets(id) ON DELETE CASCADE"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        ),
     ]
     for stmt in migrations:
         try:
@@ -1351,6 +1447,81 @@ async def fetch_guided_workflow_by_simulation(
     return await fetch_guided_workflow(str(workflow_id), user_id=user_id)
 
 
+async def upsert_persona_lab_job(
+    job_id: str,
+    state: Dict[str, Any],
+    *,
+    user_id: Optional[int] = None,
+    status: Optional[str] = None,
+    current_stage: Optional[str] = None,
+    final_saved_set_id: Optional[int] = None,
+) -> None:
+    payload = json.dumps(state, ensure_ascii=False)
+    safe_status = str(status or state.get("status") or "queued")[:24]
+    safe_stage = str(current_stage or state.get("current_stage") or "preparing_request")[:64]
+    await execute(
+        "INSERT INTO persona_lab_jobs (job_id, user_id, status, current_stage, final_saved_set_id, state_json) "
+        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "ON DUPLICATE KEY UPDATE "
+        "user_id=COALESCE(VALUES(user_id), user_id), "
+        "status=VALUES(status), "
+        "current_stage=VALUES(current_stage), "
+        "final_saved_set_id=VALUES(final_saved_set_id), "
+        "state_json=VALUES(state_json), "
+        "updated_at=CURRENT_TIMESTAMP",
+        (job_id, user_id, safe_status, safe_stage, final_saved_set_id, payload),
+    )
+
+
+async def fetch_persona_lab_job(job_id: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    rows = await execute(
+        "SELECT job_id, user_id, status, current_stage, final_saved_set_id, state_json, created_at, updated_at "
+        "FROM persona_lab_jobs WHERE job_id=%s",
+        (job_id,),
+        fetch=True,
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    owner_id = row.get("user_id")
+    if owner_id is not None and user_id is not None and int(owner_id) != int(user_id):
+        return None
+    state = _safe_json(row.get("state_json"), {})
+    if not isinstance(state, dict):
+        state = {}
+    state.setdefault("job_id", row.get("job_id"))
+    state.setdefault("status", row.get("status") or "queued")
+    state.setdefault("current_stage", row.get("current_stage") or "preparing_request")
+    state.setdefault("final_saved_set_id", row.get("final_saved_set_id"))
+    state.setdefault("created_at", _iso_datetime(row.get("created_at")))
+    state["updated_at"] = _iso_datetime(row.get("updated_at"))
+    return state
+
+
+async def list_persona_lab_jobs(
+    *,
+    user_id: Optional[int],
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    safe_limit = max(1, min(50, int(limit or 20)))
+    rows = await execute(
+        "SELECT job_id FROM persona_lab_jobs "
+        "WHERE (user_id <=> %s OR user_id IS NULL) "
+        "ORDER BY updated_at DESC LIMIT %s",
+        (user_id, safe_limit),
+        fetch=True,
+    ) or []
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        job_id = str(row.get("job_id") or "").strip()
+        if not job_id:
+            continue
+        payload = await fetch_persona_lab_job(job_id, user_id=user_id)
+        if payload:
+            items.append(payload)
+    return items
+
+
 async def upsert_persona_library_record(
     *,
     user_id: Optional[int],
@@ -1359,6 +1530,17 @@ async def upsert_persona_library_record(
     scope: str,
     source_policy: str,
     payload: Dict[str, Any],
+    audience_filters: Optional[List[str]] = None,
+    source_summary: Optional[str] = None,
+    evidence_summary: Optional[Dict[str, Any]] = None,
+    generation_config: Optional[Dict[str, Any]] = None,
+    quality_score: Optional[float] = None,
+    confidence_score: Optional[float] = None,
+    quality_meta: Optional[Dict[str, Any]] = None,
+    validation_meta: Optional[Dict[str, Any]] = None,
+    reusable_dataset_ref: Optional[str] = None,
+    context_type: Optional[str] = None,
+    shared_asset: bool = True,
 ) -> None:
     safe_place_key = str(place_key or "").strip().lower()[:191]
     if not safe_place_key:
@@ -1366,86 +1548,426 @@ async def upsert_persona_library_record(
     safe_label = str(place_label or safe_place_key)[:255]
     safe_scope = str(scope or "global")[:32]
     safe_policy = str(source_policy or "open_socials")[:32]
-    persona_count = len(payload.get("personas") or []) if isinstance(payload, dict) else 0
+    raw_payload = dict(payload or {})
+    payload_meta = raw_payload.get("meta") if isinstance(raw_payload.get("meta"), dict) else {}
+    personas = raw_payload.get("personas") if isinstance(raw_payload.get("personas"), list) else []
+    persona_count = len(personas)
+    normalized_audience = audience_filters if audience_filters is not None else (
+        payload_meta.get("audience_filters") if isinstance(payload_meta.get("audience_filters"), list) else raw_payload.get("audience_filters")
+    )
+    audience_values = [
+        str(item).strip().lower()
+        for item in (normalized_audience or [])
+        if str(item).strip()
+    ]
+    audience_key = "-".join(sorted(dict.fromkeys(audience_values)))[:191]
+    fingerprint = str(
+        payload_meta.get("fingerprint")
+        or raw_payload.get("fingerprint")
+        or reusable_dataset_ref
+        or ""
+    ).strip()
+    set_key_base = "|".join(
+        [
+            safe_place_key,
+            audience_key or "all",
+            safe_policy,
+            fingerprint or json.dumps(raw_payload, ensure_ascii=False, sort_keys=True)[:160],
+        ]
+    )
+    set_key = hashlib.sha1(set_key_base.encode("utf-8")).hexdigest()[:40]
+    source_summary_value = str(
+        source_summary
+        or payload_meta.get("source_summary")
+        or raw_payload.get("source_summary")
+        or ""
+    ).strip()
+    evidence_summary_value = (
+        evidence_summary
+        if evidence_summary is not None
+        else (payload_meta.get("evidence_summary") if isinstance(payload_meta.get("evidence_summary"), dict) else raw_payload.get("evidence_summary"))
+    )
+    generation_config_value = (
+        generation_config
+        if generation_config is not None
+        else (payload_meta.get("generation_config") if isinstance(payload_meta.get("generation_config"), dict) else raw_payload.get("generation_config"))
+    )
+    quality_meta_value = (
+        quality_meta
+        if quality_meta is not None
+        else (payload_meta.get("quality_meta") if isinstance(payload_meta.get("quality_meta"), dict) else raw_payload.get("quality_meta"))
+    )
+    validation_meta_value = (
+        validation_meta
+        if validation_meta is not None
+        else (payload_meta.get("validation_meta") if isinstance(payload_meta.get("validation_meta"), dict) else raw_payload.get("validation_meta"))
+    )
+    quality_score_value = quality_score if quality_score is not None else payload_meta.get("quality_score")
+    confidence_score_value = confidence_score if confidence_score is not None else payload_meta.get("confidence_score")
+    reusable_dataset_ref_value = str(
+        reusable_dataset_ref
+        or payload_meta.get("reusable_dataset_ref")
+        or raw_payload.get("reusable_dataset_ref")
+        or set_key
+    )[:191]
+    context_type_value = str(context_type or payload_meta.get("context_type") or raw_payload.get("context_type") or "")[:32] or None
     await execute(
-        "INSERT INTO persona_library_records (user_id, place_key, place_label, scope, source_policy, persona_count, payload_json) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+        "INSERT INTO persona_sets ("
+        "set_key, creator_user_id, place_key, place_label, audience_key, audience_filters_json, scope, shared_asset, "
+        "source_mode, context_type, source_summary, evidence_summary_json, generation_config_json, quality_score, "
+        "confidence_score, quality_meta_json, validation_meta_json, reusable_dataset_ref, persona_count, payload_json"
+        ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
         "ON DUPLICATE KEY UPDATE "
+        "creator_user_id=COALESCE(VALUES(creator_user_id), creator_user_id), "
+        "place_key=VALUES(place_key), "
         "place_label=VALUES(place_label), "
+        "audience_key=VALUES(audience_key), "
+        "audience_filters_json=VALUES(audience_filters_json), "
         "scope=VALUES(scope), "
-        "source_policy=VALUES(source_policy), "
+        "shared_asset=VALUES(shared_asset), "
+        "source_mode=VALUES(source_mode), "
+        "context_type=VALUES(context_type), "
+        "source_summary=VALUES(source_summary), "
+        "evidence_summary_json=VALUES(evidence_summary_json), "
+        "generation_config_json=VALUES(generation_config_json), "
+        "quality_score=VALUES(quality_score), "
+        "confidence_score=VALUES(confidence_score), "
+        "quality_meta_json=VALUES(quality_meta_json), "
+        "validation_meta_json=VALUES(validation_meta_json), "
+        "reusable_dataset_ref=VALUES(reusable_dataset_ref), "
         "persona_count=VALUES(persona_count), "
         "payload_json=VALUES(payload_json), "
         "updated_at=CURRENT_TIMESTAMP",
         (
+            set_key,
             user_id,
             safe_place_key,
             safe_label,
+            audience_key,
+            json.dumps(audience_values, ensure_ascii=False),
             safe_scope,
+            1 if shared_asset else 0,
             safe_policy,
+            context_type_value,
+            source_summary_value or None,
+            json.dumps(evidence_summary_value or {}, ensure_ascii=False),
+            json.dumps(generation_config_value or {}, ensure_ascii=False),
+            float(quality_score_value) if quality_score_value is not None else None,
+            float(confidence_score_value) if confidence_score_value is not None else None,
+            json.dumps(quality_meta_value or {}, ensure_ascii=False),
+            json.dumps(validation_meta_value or {}, ensure_ascii=False),
+            reusable_dataset_ref_value,
             persona_count,
-            json.dumps(payload, ensure_ascii=False),
+            json.dumps(raw_payload, ensure_ascii=False),
         ),
     )
+    rows = await execute(
+        "SELECT id FROM persona_sets WHERE set_key=%s LIMIT 1",
+        (set_key,),
+        fetch=True,
+    ) or []
+    if not rows:
+        return
+    persona_set_id = int(rows[0].get("id") or 0)
+    if persona_set_id <= 0:
+        return
+    await execute("DELETE FROM persona_set_personas WHERE persona_set_id=%s", (persona_set_id,))
+    persona_rows = []
+    for item in personas:
+        if not isinstance(item, dict):
+            continue
+        persona_rows.append(
+            (
+                persona_set_id,
+                str(item.get("persona_id") or item.get("id") or ""),
+                str(item.get("display_name") or item.get("name") or "")[:255],
+                str(item.get("source_mode") or safe_policy)[:48],
+                str(item.get("target_audience_cluster") or "")[:191],
+                str(item.get("location_context") or item.get("location") or "")[:255] or None,
+                str(item.get("age_band") or "")[:64],
+                str(item.get("life_stage") or "")[:64],
+                str(item.get("profession_role") or "")[:191],
+                str(item.get("attitude_baseline") or "")[:191],
+                float(item.get("skepticism_level") or 0.5),
+                float(item.get("conformity_level") or 0.5),
+                float(item.get("stubbornness_level") or 0.5),
+                float(item.get("innovation_openness") or 0.5),
+                float(item.get("financial_sensitivity") or 0.5),
+                str(item.get("speaking_style") or "")[:191],
+                json.dumps(item.get("main_concerns") or item.get("concerns") or [], ensure_ascii=False),
+                json.dumps(item.get("probable_motivations") or item.get("motivations") or [], ensure_ascii=False),
+                float(item.get("influence_weight") or 1.0),
+                json.dumps(item.get("tags") or [], ensure_ascii=False),
+                str(item.get("category_id") or "")[:64] or None,
+                str(item.get("template_id") or "")[:64] or None,
+                str(item.get("archetype_name") or "")[:191] or None,
+                str(item.get("summary") or ""),
+                str(item.get("location") or "")[:255] or None,
+                str(item.get("opinion") or "neutral")[:16] or None,
+                float(item.get("confidence") or 0.5),
+                json.dumps(item.get("traits") or {}, ensure_ascii=False),
+                json.dumps(item.get("biases") or [], ensure_ascii=False),
+                float(item.get("opinion_score") or 0.0),
+                json.dumps(item.get("source_attribution") or {}, ensure_ascii=False),
+                json.dumps(item.get("evidence_signals") or [], ensure_ascii=False),
+            )
+        )
+    if persona_rows:
+        await execute(
+            "INSERT INTO persona_set_personas ("
+            "persona_set_id, persona_uid, display_name, source_mode, target_audience_cluster, location_context, "
+            "age_band, life_stage, profession_role, attitude_baseline, skepticism_level, conformity_level, "
+            "stubbornness_level, innovation_openness, financial_sensitivity, speaking_style, main_concerns_json, "
+            "probable_motivations_json, influence_weight, tags_json, category_id, template_id, archetype_name, "
+            "summary, location, opinion, confidence, traits_json, biases_json, opinion_score, "
+            "source_attribution_json, evidence_signals_json"
+            ") VALUES ("
+            "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s"
+            ")",
+            persona_rows,
+            many=True,
+        )
 
 
 async def fetch_persona_library_record(
     *,
     user_id: Optional[int],
     place_key: str,
+    audience_filters: Optional[List[str]] = None,
+    source_mode: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     safe_place_key = str(place_key or "").strip().lower()
     if not safe_place_key:
         return None
+    normalized_audience = [
+        str(item).strip().lower()
+        for item in (audience_filters or [])
+        if str(item).strip()
+    ]
+    audience_key = "-".join(sorted(dict.fromkeys(normalized_audience)))[:191]
     query = (
-        "SELECT id, user_id, place_key, place_label, scope, source_policy, persona_count, payload_json, created_at, updated_at "
-        "FROM persona_library_records WHERE user_id <=> %s AND place_key=%s LIMIT 1"
+        "SELECT id, set_key, creator_user_id, place_key, place_label, audience_key, audience_filters_json, scope, "
+        "shared_asset, source_mode, context_type, source_summary, evidence_summary_json, generation_config_json, "
+        "quality_score, confidence_score, quality_meta_json, validation_meta_json, reusable_dataset_ref, persona_count, "
+        "payload_json, created_at, updated_at "
+        "FROM persona_sets WHERE place_key=%s "
     )
-    rows = await execute(query, (user_id, safe_place_key), fetch=True)
+    params: List[Any] = [safe_place_key]
+    if source_mode:
+        query += "AND source_mode=%s "
+        params.append(str(source_mode)[:48])
+    query += "AND (shared_asset=1 OR creator_user_id <=> %s) "
+    params.append(user_id)
+    query += (
+        "ORDER BY "
+        "CASE WHEN audience_key=%s THEN 0 WHEN audience_key='' THEN 1 ELSE 2 END, "
+        "COALESCE(quality_score, 0) DESC, "
+        "updated_at DESC LIMIT 1"
+    )
+    params.append(audience_key)
+    rows = await execute(query, params, fetch=True)
     if not rows:
-        return None
-    row = rows[0]
-    return {
-        "id": row.get("id"),
-        "user_id": row.get("user_id"),
-        "place_key": row.get("place_key"),
-        "place_label": row.get("place_label"),
-        "scope": row.get("scope") or "global",
-        "source_policy": row.get("source_policy") or "open_socials",
-        "persona_count": int(row.get("persona_count") or 0),
-        "payload": _safe_json(row.get("payload_json"), {}),
-        "created_at": _iso_datetime(row.get("created_at")),
-        "updated_at": _iso_datetime(row.get("updated_at")),
-    }
-
-
-async def list_persona_library_records(
-    *,
-    user_id: Optional[int],
-    place_query: Optional[str] = None,
-    limit: int = 10,
-) -> List[Dict[str, Any]]:
-    safe_limit = max(1, min(50, int(limit or 10)))
-    like = f"%{str(place_query or '').strip().lower()}%" if place_query else None
-    params: List[Any] = [user_id]
-    query = (
-        "SELECT id, user_id, place_key, place_label, scope, source_policy, persona_count, payload_json, created_at, updated_at "
-        "FROM persona_library_records WHERE user_id <=> %s"
-    )
-    if like:
-        query += " AND (LOWER(place_key) LIKE %s OR LOWER(place_label) LIKE %s)"
-        params.extend([like, like])
-    query += " ORDER BY updated_at DESC LIMIT %s"
-    params.append(safe_limit)
-    rows = await execute(query, params, fetch=True) or []
-    return [
-        {
+        legacy_rows = await execute(
+            "SELECT id, user_id, place_key, place_label, scope, source_policy, persona_count, payload_json, created_at, updated_at "
+            "FROM persona_library_records WHERE user_id <=> %s AND place_key=%s LIMIT 1",
+            (user_id, safe_place_key),
+            fetch=True,
+        )
+        if not legacy_rows:
+            return None
+        row = legacy_rows[0]
+        return {
             "id": row.get("id"),
             "user_id": row.get("user_id"),
             "place_key": row.get("place_key"),
             "place_label": row.get("place_label"),
             "scope": row.get("scope") or "global",
             "source_policy": row.get("source_policy") or "open_socials",
+            "persona_count": int(row.get("persona_count") or 0),
+            "payload": _safe_json(row.get("payload_json"), {}),
+            "created_at": _iso_datetime(row.get("created_at")),
+            "updated_at": _iso_datetime(row.get("updated_at")),
+        }
+    return await _hydrate_persona_set_row(rows[0])
+
+
+async def _hydrate_persona_set_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    persona_rows = await execute(
+        "SELECT persona_uid, display_name, source_mode, target_audience_cluster, location_context, age_band, life_stage, "
+        "profession_role, attitude_baseline, skepticism_level, conformity_level, stubbornness_level, innovation_openness, "
+        "financial_sensitivity, speaking_style, main_concerns_json, probable_motivations_json, influence_weight, tags_json, "
+        "category_id, template_id, archetype_name, summary, location, opinion, confidence, traits_json, biases_json, "
+        "opinion_score, source_attribution_json, evidence_signals_json "
+        "FROM persona_set_personas WHERE persona_set_id=%s ORDER BY id ASC",
+        (row.get("id"),),
+        fetch=True,
+    ) or []
+    payload = _safe_json(row.get("payload_json"), {})
+    if not isinstance(payload, dict):
+        payload = {}
+    if persona_rows:
+        payload["personas"] = [
+            {
+                "persona_id": persona.get("persona_uid"),
+                "display_name": persona.get("display_name"),
+                "name": persona.get("display_name"),
+                "source_mode": persona.get("source_mode"),
+                "target_audience_cluster": persona.get("target_audience_cluster"),
+                "location_context": persona.get("location_context"),
+                "age_band": persona.get("age_band"),
+                "life_stage": persona.get("life_stage"),
+                "profession_role": persona.get("profession_role"),
+                "attitude_baseline": persona.get("attitude_baseline"),
+                "skepticism_level": float(persona.get("skepticism_level") or 0.5),
+                "conformity_level": float(persona.get("conformity_level") or 0.5),
+                "stubbornness_level": float(persona.get("stubbornness_level") or 0.5),
+                "innovation_openness": float(persona.get("innovation_openness") or 0.5),
+                "financial_sensitivity": float(persona.get("financial_sensitivity") or 0.5),
+                "speaking_style": persona.get("speaking_style"),
+                "main_concerns": _safe_json(persona.get("main_concerns_json"), []),
+                "probable_motivations": _safe_json(persona.get("probable_motivations_json"), []),
+                "concerns": _safe_json(persona.get("main_concerns_json"), []),
+                "motivations": _safe_json(persona.get("probable_motivations_json"), []),
+                "influence_weight": float(persona.get("influence_weight") or 1.0),
+                "tags": _safe_json(persona.get("tags_json"), []),
+                "category_id": persona.get("category_id"),
+                "template_id": persona.get("template_id"),
+                "archetype_name": persona.get("archetype_name"),
+                "summary": persona.get("summary"),
+                "location": persona.get("location"),
+                "opinion": persona.get("opinion") or "neutral",
+                "confidence": float(persona.get("confidence") or 0.5),
+                "traits": _safe_json(persona.get("traits_json"), {}),
+                "biases": _safe_json(persona.get("biases_json"), []),
+                "opinion_score": float(persona.get("opinion_score") or 0.0),
+                "source_attribution": _safe_json(persona.get("source_attribution_json"), {}),
+                "evidence_signals": _safe_json(persona.get("evidence_signals_json"), []),
+            }
+            for persona in persona_rows
+        ]
+    payload.setdefault(
+        "meta",
+        {
+            "source_summary": row.get("source_summary"),
+            "audience_filters": _safe_json(row.get("audience_filters_json"), []),
+            "quality_score": row.get("quality_score"),
+            "confidence_score": row.get("confidence_score"),
+            "quality_meta": _safe_json(row.get("quality_meta_json"), {}),
+            "validation_meta": _safe_json(row.get("validation_meta_json"), {}),
+            "generation_config": _safe_json(row.get("generation_config_json"), {}),
+            "evidence_summary": _safe_json(row.get("evidence_summary_json"), {}),
+            "reusable_dataset_ref": row.get("reusable_dataset_ref"),
+            "context_type": row.get("context_type"),
+        },
+    )
+    return {
+        "id": row.get("id"),
+        "set_key": row.get("set_key"),
+        "user_id": row.get("creator_user_id"),
+        "place_key": row.get("place_key"),
+        "place_label": row.get("place_label"),
+        "audience_key": row.get("audience_key") or "",
+        "audience_filters": _safe_json(row.get("audience_filters_json"), []),
+        "scope": row.get("scope") or "shared",
+        "shared_asset": bool(row.get("shared_asset")),
+        "source_policy": row.get("source_mode") or "open_socials",
+        "context_type": row.get("context_type"),
+        "source_summary": row.get("source_summary") or "",
+        "evidence_summary": _safe_json(row.get("evidence_summary_json"), {}),
+        "generation_config": _safe_json(row.get("generation_config_json"), {}),
+        "quality_score": float(row.get("quality_score")) if row.get("quality_score") is not None else None,
+        "confidence_score": float(row.get("confidence_score")) if row.get("confidence_score") is not None else None,
+        "quality_meta": _safe_json(row.get("quality_meta_json"), {}),
+        "validation_meta": _safe_json(row.get("validation_meta_json"), {}),
+        "reusable_dataset_ref": row.get("reusable_dataset_ref"),
+        "persona_count": int(row.get("persona_count") or 0),
+        "payload": payload,
+        "created_at": _iso_datetime(row.get("created_at")),
+        "updated_at": _iso_datetime(row.get("updated_at")),
+    }
+
+
+async def fetch_persona_library_record_by_set_key(
+    *,
+    user_id: Optional[int],
+    set_key: str,
+) -> Optional[Dict[str, Any]]:
+    safe_set_key = str(set_key or "").strip()
+    if not safe_set_key:
+        return None
+    rows = await execute(
+        "SELECT id, set_key, creator_user_id, place_key, place_label, audience_key, audience_filters_json, scope, "
+        "shared_asset, source_mode, context_type, source_summary, evidence_summary_json, generation_config_json, "
+        "quality_score, confidence_score, quality_meta_json, validation_meta_json, reusable_dataset_ref, persona_count, "
+        "payload_json, created_at, updated_at "
+        "FROM persona_sets WHERE set_key=%s AND (shared_asset=1 OR creator_user_id <=> %s) LIMIT 1",
+        (safe_set_key, user_id),
+        fetch=True,
+    )
+    if not rows:
+        return None
+    return await _hydrate_persona_set_row(rows[0])
+
+
+async def list_persona_library_records(
+    *,
+    user_id: Optional[int],
+    place_query: Optional[str] = None,
+    audience: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    min_count: Optional[int] = None,
+    max_count: Optional[int] = None,
+    limit: int = 10,
+) -> List[Dict[str, Any]]:
+    safe_limit = max(1, min(50, int(limit or 10)))
+    like = f"%{str(place_query or '').strip().lower()}%" if place_query else None
+    audience_like = f"%{str(audience or '').strip().lower()}%" if audience else None
+    params: List[Any] = [user_id]
+    query = (
+        "SELECT id, set_key, creator_user_id, place_key, place_label, audience_key, audience_filters_json, scope, shared_asset, "
+        "source_mode, context_type, source_summary, quality_score, confidence_score, reusable_dataset_ref, persona_count, "
+        "payload_json, created_at, updated_at "
+        "FROM persona_sets WHERE (shared_asset=1 OR creator_user_id <=> %s)"
+    )
+    if like:
+        query += " AND (LOWER(place_key) LIKE %s OR LOWER(place_label) LIKE %s)"
+        params.extend([like, like])
+    if audience_like:
+        query += " AND LOWER(audience_key) LIKE %s"
+        params.append(audience_like)
+    if date_from:
+        query += " AND DATE(created_at) >= %s"
+        params.append(str(date_from))
+    if date_to:
+        query += " AND DATE(created_at) <= %s"
+        params.append(str(date_to))
+    if min_count is not None:
+        query += " AND persona_count >= %s"
+        params.append(int(min_count))
+    if max_count is not None:
+        query += " AND persona_count <= %s"
+        params.append(int(max_count))
+    query += " ORDER BY COALESCE(quality_score, 0) DESC, updated_at DESC LIMIT %s"
+    params.append(safe_limit)
+    rows = await execute(query, params, fetch=True) or []
+    return [
+        {
+            "id": row.get("id"),
+            "set_key": row.get("set_key"),
+            "user_id": row.get("creator_user_id"),
+            "place_key": row.get("place_key"),
+            "place_label": row.get("place_label"),
+            "audience_key": row.get("audience_key") or "",
+            "audience_filters": _safe_json(row.get("audience_filters_json"), []),
+            "scope": row.get("scope") or "shared",
+            "shared_asset": bool(row.get("shared_asset")),
+            "source_policy": row.get("source_mode") or "open_socials",
+            "context_type": row.get("context_type"),
+            "source_summary": row.get("source_summary") or "",
+            "quality_score": float(row.get("quality_score")) if row.get("quality_score") is not None else None,
+            "confidence_score": float(row.get("confidence_score")) if row.get("confidence_score") is not None else None,
+            "reusable_dataset_ref": row.get("reusable_dataset_ref"),
             "persona_count": int(row.get("persona_count") or 0),
             "payload": _safe_json(row.get("payload_json"), {}),
             "created_at": _iso_datetime(row.get("created_at")),

@@ -102,6 +102,7 @@ const CATEGORY_KEYWORDS: Record<string, string> = {
 const DEFAULT_CATEGORY = 'technology';
 const DEFAULT_AUDIENCE = ['Consumers'];
 const DEFAULT_GOALS = ['Market Validation'];
+const PENDING_SIMULATION_DRAFT_KEY = 'pendingSimulationDraft';
 const MAX_CHAT_MESSAGES = 40;
 const SEARCH_TIMEOUT_BASE_MS = 60000;
 const SEARCH_TIMEOUT_STEP_MS = 30000;
@@ -114,6 +115,23 @@ type UiBusyStage =
   | 'prestart_research'
   | 'starting_simulation'
   | 'checking_session';
+
+type PendingSimulationDraft = {
+  idea?: string;
+  autoStart?: boolean;
+  category?: string;
+  country?: string;
+  city?: string;
+  persona_source_mode?: SimulationConfig['persona_source_mode'];
+  persona_set_key?: string;
+  persona_set_label?: string;
+};
+
+type PersonaSourceOverride = {
+  mode: NonNullable<SimulationConfig['persona_source_mode']>;
+  setKey?: string;
+  setLabel?: string;
+};
 
 type RealtimeConnectionState = 'connected' | 'disconnected' | 'reconnecting';
 
@@ -221,10 +239,17 @@ const Index = () => {
     if (typeof window === 'undefined') return false;
     const pendingAutoStart = window.localStorage.getItem('pendingAutoStart') === 'true';
     const pendingIdea = (window.localStorage.getItem('pendingIdea') || '').trim();
-    const routeState = location.state as { idea?: string; autoStart?: boolean } | null;
+    let pendingDraft: PendingSimulationDraft | null = null;
+    try {
+      const pendingDraftRaw = window.localStorage.getItem(PENDING_SIMULATION_DRAFT_KEY);
+      pendingDraft = pendingDraftRaw ? JSON.parse(pendingDraftRaw) as PendingSimulationDraft : null;
+    } catch {
+      pendingDraft = null;
+    }
+    const routeState = location.state as PendingSimulationDraft | null;
     const routeIdea = typeof routeState?.idea === 'string' ? routeState.idea.trim() : '';
     const routeAutoStart = Boolean(routeState?.autoStart && routeIdea);
-    return Boolean(routeAutoStart || pendingAutoStart || pendingIdea);
+    return Boolean(routeAutoStart || pendingAutoStart || pendingIdea || pendingDraft?.autoStart || pendingDraft?.idea);
   })();
   const simulation = useSimulation({ suppressAutoRestore });
   const guidedWorkflow = useGuidedWorkflow({
@@ -244,6 +269,23 @@ const Index = () => {
     goals: [],
     agentCount: 20,
   });
+  const [requestedPersonaSourceMode, setRequestedPersonaSourceMode] = useState<SimulationConfig['persona_source_mode'] | null>(null);
+  const [requestedPersonaSetKey, setRequestedPersonaSetKey] = useState('');
+  const [requestedPersonaSetLabel, setRequestedPersonaSetLabel] = useState('');
+  const [personaSourceModalOpen, setPersonaSourceModalOpen] = useState(false);
+  const [personaSourceFilter, setPersonaSourceFilter] = useState('');
+  const [personaSourceSetsLoading, setPersonaSourceSetsLoading] = useState(false);
+  const [personaSourceSetsError, setPersonaSourceSetsError] = useState<string | null>(null);
+  const [personaSourceSets, setPersonaSourceSets] = useState<Array<{
+    id?: number;
+    set_key?: string;
+    place_label?: string;
+    persona_count?: number;
+    audience_filters?: string[];
+    source_summary?: string;
+  }>>([]);
+  const [selectedPersonaSourceSetKey, setSelectedPersonaSourceSetKey] = useState('');
+  const [personaSourceStartPending, setPersonaSourceStartPending] = useState(false);
   const [touched, setTouched] = useState({
     category: false,
     audience: false,
@@ -1060,7 +1102,7 @@ const Index = () => {
   }, []);
 
   useEffect(() => {
-    const routeState = location.state as { idea?: string; autoStart?: boolean } | null;
+    const routeState = location.state as PendingSimulationDraft | null;
     const canUseRouteState = !consumedRouteStartRef.current;
     const routeIdea = canUseRouteState && typeof routeState?.idea === 'string'
       ? routeState.idea.trim()
@@ -1073,23 +1115,42 @@ const Index = () => {
     const pendingIdea = (localStorage.getItem('pendingIdea') || '').trim();
     const dashboardIdea = (localStorage.getItem('dashboardIdea') || '').trim();
     const pendingAutoStart = localStorage.getItem('pendingAutoStart');
-    const hasNewRunIntent = Boolean(routeAutoStart || pendingAutoStart || pendingIdea);
+    let pendingDraft: PendingSimulationDraft | null = null;
+    try {
+      const raw = localStorage.getItem(PENDING_SIMULATION_DRAFT_KEY);
+      pendingDraft = raw ? JSON.parse(raw) as PendingSimulationDraft : null;
+    } catch {
+      pendingDraft = null;
+    }
+    const hasNewRunIntent = Boolean(routeAutoStart || pendingAutoStart || pendingIdea || pendingDraft?.autoStart || pendingDraft?.idea);
     if (requestedSimulationId && !hasNewRunIntent) return;
     if (requestedSimulationId && hasNewRunIntent) {
       const next = new URLSearchParams(searchParams);
       next.delete('simulation_id');
       setSearchParams(next, { replace: true });
     }
-    const nextIdea = routeIdea || pendingIdea || ((routeAutoStart || pendingAutoStart) ? dashboardIdea : '');
+    const nextIdea = routeIdea || pendingDraft?.idea || pendingIdea || ((routeAutoStart || pendingAutoStart) ? dashboardIdea : '');
     if (nextIdea) {
-      setUserInput((prev) => ({ ...prev, idea: nextIdea }));
+      setUserInput((prev) => ({
+        ...prev,
+        idea: nextIdea,
+        category: routeState?.category || pendingDraft?.category || prev.category,
+        country: routeState?.country || pendingDraft?.country || prev.country,
+        city: routeState?.city || pendingDraft?.city || prev.city,
+      }));
     }
+    setRequestedPersonaSourceMode(routeState?.persona_source_mode || pendingDraft?.persona_source_mode || null);
+    setRequestedPersonaSetKey(routeState?.persona_set_key || pendingDraft?.persona_set_key || '');
+    setRequestedPersonaSetLabel(routeState?.persona_set_label || pendingDraft?.persona_set_label || '');
     if (pendingIdea) localStorage.removeItem('pendingIdea');
-    if (routeAutoStart || pendingAutoStart) {
+    if (routeAutoStart || pendingAutoStart || pendingDraft?.autoStart) {
       setAutoStartPending(true);
     }
     if (pendingAutoStart) {
       localStorage.removeItem('pendingAutoStart');
+    }
+    if (pendingDraft) {
+      localStorage.removeItem(PENDING_SIMULATION_DRAFT_KEY);
     }
   }, [location.state, requestedSimulationId, searchParams, setSearchParams]);
 
@@ -1442,7 +1503,7 @@ const Index = () => {
     userInput,
   ]);
 
-  const buildConfig = useCallback((input: UserInput) => {
+  const buildConfig = useCallback((input: UserInput, personaOverride?: PersonaSourceOverride) => {
     const trimmedIdea = input.idea.trim();
     const hasMatchingResearch = Boolean(trimmedIdea && researchIdea && researchIdea === trimmedIdea);
     const researchSummary = hasMatchingResearch ? researchContext.summary : '';
@@ -1468,6 +1529,11 @@ const Index = () => {
       agentCount: input.agentCount,
       society_mode: selectedStartPath === 'custom_build' ? 'custom' : 'default',
       start_path: selectedStartPath === 'custom_build' ? 'build_custom' : 'start_default',
+      persona_source_mode: personaOverride?.mode || requestedPersonaSourceMode || (input.city.trim() || input.country.trim()
+        ? 'generate_new_from_place'
+        : 'default_audience_only'),
+      persona_set_key: personaOverride?.setKey || requestedPersonaSetKey || undefined,
+      persona_set_label: personaOverride?.setLabel || requestedPersonaSetLabel || undefined,
       society_custom_spec: selectedStartPath === 'custom_build'
         ? {
             profile_name: settings.language === 'ar' ? 'مجتمع مخصص' : 'Custom society',
@@ -1510,7 +1576,18 @@ const Index = () => {
       payload.preflight_assumptions = preflightPayload.preflight_assumptions;
     }
     return payload;
-  }, [preflightContextKey, researchContext, researchIdea, settings.language, simulationSpeed, selectedStartPath, societyControls]);
+  }, [
+    preflightContextKey,
+    requestedPersonaSetKey,
+    requestedPersonaSetLabel,
+    requestedPersonaSourceMode,
+    researchContext,
+    researchIdea,
+    settings.language,
+    simulationSpeed,
+    selectedStartPath,
+    societyControls,
+  ]);
 
   const buildGuidedSimulationConfig = useCallback((input: UserInput) => {
     const config = buildConfig(input);
@@ -1544,6 +1621,29 @@ const Index = () => {
     };
     return config;
   }, [buildConfig, guidedContextScope, guidedWorkflowState]);
+
+  const loadPersonaSourceSets = useCallback(async (place = '') => {
+    setPersonaSourceSetsLoading(true);
+    setPersonaSourceSetsError(null);
+    try {
+      const response = await apiService.listPersonaLibrary({
+        place: place || undefined,
+        min_count: 10,
+        limit: 12,
+      });
+      setPersonaSourceSets(Array.isArray(response.items) ? response.items : []);
+    } catch (err: unknown) {
+      setPersonaSourceSets([]);
+      setPersonaSourceSetsError(err instanceof Error ? err.message : 'Failed to load saved persona sets');
+    } finally {
+      setPersonaSourceSetsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!personaSourceModalOpen) return;
+    void loadPersonaSourceSets(personaSourceFilter);
+  }, [loadPersonaSourceSets, personaSourceFilter, personaSourceModalOpen]);
 
   const applyCoachContextPatch = useCallback((baseInput: UserInput, patch: Record<string, unknown>) => {
     const nextInput: UserInput = { ...baseInput };
@@ -1965,92 +2065,16 @@ const Index = () => {
     return true;
   }, [isConfigLocked, notifyConfigLocked]);
 
-  const handleStart = useCallback(async () => {
-    if (isPrestartSearchActive || isRunStarting || isRunActive) {
-      notifyActionBlocked();
-      return;
-    }
-    const missing = getMissingForStart(userInput);
-    const asked = await promptForMissing(missing);
-    if (asked) return;
-
-    const preflightReady = await runPreflightGate();
-    if (!preflightReady) {
-      setActivePanel('chat');
-      const waitingIdeaConfirmation = Boolean(
-        preflightStartPayloadRef.current
-        && preflightConfirmedKeyRef.current !== preflightContextKey
-      );
-      if (pendingPreflightQuestion) return;
-      if (waitingIdeaConfirmation || pendingIdeaConfirmation) {
-        addSystemMessage(
-          settings.language === 'ar'
-            ? 'راجع وصف الفكرة المقترح ثم اضغط تأكيد الوصف قبل بدء التنفيذ.'
-            : 'Review the proposed idea description, then confirm it before execution.'
-        );
-        return;
-      }
-      addSystemMessage(
-        settings.language === 'ar'
-          ? 'قبل التشغيل نحتاج توضيح سريع لبعض النقاط الأساسية.'
-          : 'Before execution, we need a quick clarification on key decisions.'
-      );
-      return;
-    }
-
-    const ideaQuery = userInput.idea.trim();
-    const hasCurrentResearchData = Boolean(
-      researchContext.summary
-      || researchContext.sources.length > 0
-      || researchContext.structured
-    );
-    const hasSearchForCurrentIdea = (
-      searchState.status === 'complete'
-      && researchIdea === ideaQuery
-      && hasCurrentResearchData
-    );
-    const researchReviewed = researchReviewedKeyRef.current === researchGateKey;
-
-    if (!researchReviewed) {
-      if (!hasSearchForCurrentIdea) {
-        const runSearchCurrent = runSearchRef.current;
-        if (!runSearchCurrent) return;
-        const result = await runSearchCurrent(ideaQuery, SEARCH_TIMEOUT_BASE_MS, { promptOnTimeout: true });
-        if (result.status !== 'complete') {
-          setActivePanel('chat');
-          return;
-        }
-      }
-      if (!pendingResearchReview) {
-        setPendingResearchReview(true);
-        setActivePanel('chat');
-        addSystemMessage(
-          settings.language === 'ar'
-            ? 'أجريت بحثًا خفيفًا لربط المحاكاة ببيانات واقعية. هل أبدأ المحاكاة الآن بناءً على هذه النتائج؟'
-            : 'I ran a light research pass to ground the simulation in real signals. Should I start the simulation now based on these findings?'
-        );
-      }
-      return;
-    }
-
-    if (startChoiceResolvedKeyRef.current !== startChoiceKey) {
-      setStartChoiceModalOpen(true);
-      if (!requestConfigPanel({ silent: true })) {
-        notifyConfigLocked();
-        return;
-      }
-      addSystemMessage(
-        settings.language === 'ar'
-          ? 'اختر طريقة التشغيل: استعراض المجتمع الحالي، بناء مجتمعك، أو البدء بالمجتمع الافتراضي.'
-          : 'Choose run mode: inspect current society, build your own, or start with default society.'
-      );
-      return;
-    }
-
+  const executeSimulationStart = useCallback(async (personaOverride?: PersonaSourceOverride) => {
     if (hasStarted || simulation.status === 'running') return;
+    if (personaOverride) {
+      setRequestedPersonaSourceMode(personaOverride.mode);
+      setRequestedPersonaSetKey(personaOverride.setKey || '');
+      setRequestedPersonaSetLabel(personaOverride.setLabel || '');
+    }
     if (isCreditsBlocked(meSnapshot)) {
       const msg = settings.language === 'ar'
-        ? 'نفد رصيد التوكنز. اشحن Credits للمتابعة.'
+        ? 'ظ†ظپط¯ ط±طµظٹط¯ ط§ظ„طھظˆظƒظ†ط². ط§ط´ط­ظ† Credits ظ„ظ„ظ…طھط§ط¨ط¹ط©.'
         : 'Token budget exhausted. Add credits to continue.';
       setCreditNotice(msg);
       addSystemMessage(msg);
@@ -2074,7 +2098,209 @@ const Index = () => {
     }
     const startBusyToken = beginUiBusy('starting_simulation');
     try {
-      addSystemMessage(settings.language === 'ar' ? 'بدء المحاكاة...' : 'Starting simulation...');
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'جارٍ تجهيز التشغيل: سنبدأ بالبحث ثم تجهيز الشخصيات قبل المحاكاة.'
+          : 'Preparing the run: research and persona preparation will complete before simulation starts.'
+      );
+      const config = buildConfig(userInput, personaOverride);
+      if (selectedStartPath === 'custom_build') {
+        try {
+          const built = await apiService.buildCustomSociety({
+            profile_name: settings.language === 'ar' ? 'ظ…ط¬طھظ…ط¹ ظ…ط®طµطµ' : 'Custom society',
+            agent_count: userInput.agentCount ?? 20,
+            distribution: {
+              skeptic_ratio: Math.max(0, Math.min(100, societyControls.skepticRatio)),
+              optimist_ratio: Math.max(0, Math.min(100, 100 - societyControls.skepticRatio)),
+              pragmatic_ratio: Math.max(0, Math.min(100, societyControls.diversity)),
+              policy_guard_ratio: Math.max(0, Math.min(100, societyControls.strictPolicy ? 35 : 15)),
+            },
+            controls: {
+              diversity: societyControls.diversity,
+              innovation_bias: societyControls.innovationBias,
+              risk_sensitivity: 100 - Math.max(0, Math.min(100, userInput.riskAppetite ?? 50)),
+              strict_policy: societyControls.strictPolicy,
+              human_debate_style: societyControls.humanDebate,
+              persona_hint: societyControls.personaHint.trim(),
+            },
+          });
+          config.society_profile_id = built.society_profile_id;
+        } catch {
+          // Custom profile build is best-effort; simulation can still start with inline custom spec.
+        }
+      }
+      await simulation.startSimulation(config, { throwOnError: true });
+      researchReviewedKeyRef.current = '';
+      setPendingResearchReview(false);
+      void apiService.getMe().then((me) => {
+        setMeSnapshot(me);
+        if (!isCreditsBlocked(me)) {
+          setCreditNotice(null);
+        }
+      }).catch((err: unknown) => {
+        if (isAuthError(err)) {
+          handleSessionExpired();
+        }
+      });
+    } catch (err: unknown) {
+      console.warn('Simulation start failed.', err);
+      setReasoningActive(false);
+      const status = (err as { status?: number })?.status;
+      if (status === 429) {
+        try {
+          const me = await apiService.getMe();
+          setMeSnapshot(me);
+          const exhausted = isCreditsBlocked(me);
+          addSystemMessage(settings.language === 'ar'
+            ? exhausted
+              ? 'ظ†ظپط¯ ط±طµظٹط¯ ط§ظ„طھظˆظƒظ†ط². ط§ط´ط­ظ† Credits ظ„ظ„ظ…طھط§ط¨ط¹ط©.'
+              : 'ط§ظ†طھظ‡طھ ط§ظ„ط­طµط© ط§ظ„ظٹظˆظ…ظٹط© ط§ظ„ظ…ط¬ط§ظ†ظٹط© ظ…ظ† ط§ظ„طھظˆظƒظ†ط². ط§ط´ط­ظ† Credits ط£ظˆ ط§ظ†طھط¸ط± ظ„ظ„ط؛ط¯.'
+            : exhausted
+              ? 'Token budget exhausted. Add credits to continue.'
+              : 'Daily free token quota reached. Add credits or wait until tomorrow.');
+          if (exhausted) {
+            setCreditNotice(settings.language === 'ar'
+              ? 'ظ†ظپط¯ ط±طµظٹط¯ ط§ظ„طھظˆظƒظ†ط². ط§ط´ط­ظ† Credits ظ„ظ„ظ…طھط§ط¨ط¹ط©.'
+              : 'Token budget exhausted. Add credits to continue.');
+          }
+        } catch (meErr: unknown) {
+          if (isAuthError(meErr)) {
+            handleSessionExpired();
+            return;
+          }
+          addSystemMessage(settings.language === 'ar'
+            ? 'ط§ظ†طھظ‡طھ ط§ظ„ط­طµط© ط§ظ„ظٹظˆظ…ظٹط© ط§ظ„ظ…ط¬ط§ظ†ظٹط© ظ…ظ† ط§ظ„طھظˆظƒظ†ط². ط§ط´ط­ظ† Credits ط£ظˆ ط§ظ†طھط¸ط± ظ„ظ„ط؛ط¯.'
+            : 'Daily free token quota reached. Add credits to continue.');
+        }
+        return;
+      }
+      if (isAuthError(err)) {
+        handleSessionExpired();
+        return;
+      }
+      const msg = err instanceof Error && err.message ? ` ${err.message}` : '';
+      addSystemMessage(settings.language === 'ar'
+        ? `Failed to start simulation.${msg}`.trim()
+        : `Failed to start simulation.${msg}`.trim());
+    } finally {
+      endUiBusy(startBusyToken);
+    }
+  }, [
+    addSystemMessage,
+    addUserMessage,
+    beginUiBusy,
+    buildConfig,
+    endUiBusy,
+    hasStarted,
+    handleSessionExpired,
+    isAuthError,
+    isCreditsBlocked,
+    meSnapshot,
+    selectedStartPath,
+    settings.language,
+    simulation,
+    societyControls,
+    userInput,
+  ]);
+
+  const handleStart = useCallback(async () => {
+    if (isPrestartSearchActive || isRunStarting || isRunActive) {
+      notifyActionBlocked();
+      return;
+    }
+    const missing = getMissingForStart(userInput);
+    const asked = await promptForMissing(missing);
+    if (asked) return;
+
+    const preflightReady = await runPreflightGate();
+    if (!preflightReady) {
+      setActivePanel('chat');
+      const waitingIdeaConfirmation = Boolean(
+        preflightStartPayloadRef.current
+        && preflightConfirmedKeyRef.current !== preflightContextKey
+      );
+      if (pendingPreflightQuestion) return;
+      if (waitingIdeaConfirmation || pendingIdeaConfirmation) {
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'راجع وصف الفكرة المقترح ثم أكده قبل أن يبدأ البحث.'
+          : 'Review the proposed idea description, then confirm it before research starts.'
+      );
+        return;
+      }
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'قبل أن نبدأ البحث، نحتاج إجابات سريعة على بعض الأسئلة الأساسية.'
+          : 'Before research starts, we need quick answers on a few key decisions.'
+      );
+      return;
+    }
+
+    if (startChoiceResolvedKeyRef.current !== startChoiceKey) {
+      setStartChoiceModalOpen(true);
+      if (!requestConfigPanel({ silent: true })) {
+        notifyConfigLocked();
+        return;
+      }
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'اختر كيف تريد المتابعة: استعراض المجتمع الحالي، بناء مجتمعك، أو المتابعة بالمجتمع الافتراضي.'
+          : 'Choose how to continue: inspect the current society, build your own, or continue with the default society.'
+      );
+      return;
+    }
+
+    if (!userInput.city.trim() && !userInput.country.trim() && !requestedPersonaSourceMode) {
+      setSelectedPersonaSourceSetKey('');
+      setPersonaSourceFilter('');
+      setPersonaSourceModalOpen(true);
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'هذه الفكرة تبدو عامة، لذلك يجب اختيار مصدر الشخصيات أولًا قبل المتابعة.'
+          : 'This idea looks general, so you need to choose the persona source before continuing.'
+      );
+      return;
+    }
+
+    if (hasStarted || simulation.status === 'running') return;
+    if (isCreditsBlocked(meSnapshot)) {
+      const msg = settings.language === 'ar'
+        ? 'نفد رصيد التوكنز. اشحن Credits للمتابعة.'
+        : 'Token budget exhausted. Add credits to continue.';
+      setCreditNotice(msg);
+      addSystemMessage(msg);
+      return;
+    }
+    if (
+      simulation.status === 'completed'
+      || simulation.status === 'error'
+      || simulation.status === 'paused'
+      || simulation.reasoningFeed.length > 0
+      || simulation.metrics.currentIteration > 0
+    ) {
+      simulation.stopSimulation();
+    }
+    if (!userInput.city.trim() && !userInput.country.trim()) {
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'هذه الفكرة تبدو عامة، لذلك سيستخدم النظام شخصيات الجمهور الافتراضية ما لم تختر توليد شخصيات مخصصة. الخيارات المتاحة: شخصيات الجمهور الافتراضية، شخصيات مكان محفوظة، الذهاب إلى مختبر الشخصيات، أو المتابعة بالشخصيات الافتراضية المولدة.'
+          : 'This idea looks general, so the system will use default audience personas unless you choose to generate custom personas. Available options: default audience personas, saved place personas, go to persona lab, or continue with default generated audience personas.'
+      );
+    }
+    addUserMessage(userInput.idea, { dedupe: true });
+    setHasStarted(true);
+    setActivePanel('chat');
+    setReasoningActive(false);
+    if (reasoningTimerRef.current) {
+      window.clearTimeout(reasoningTimerRef.current);
+    }
+    const startBusyToken = beginUiBusy('starting_simulation');
+    try {
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'جارٍ تجهيز التشغيل: سنبدأ بالبحث ثم تجهيز الشخصيات قبل المحاكاة.'
+          : 'Preparing the run: research and persona preparation will complete before simulation starts.'
+      );
       const config = buildConfig(userInput);
       if (selectedStartPath === 'custom_build') {
         try {
@@ -2179,6 +2405,7 @@ const Index = () => {
     pendingResearchReview,
     promptForMissing,
     preflightContextKey,
+    requestedPersonaSourceMode,
     researchContext.sources.length,
     researchContext.structured,
     researchContext.summary,
@@ -2195,6 +2422,12 @@ const Index = () => {
     userInput,
   ]);
 
+  useEffect(() => {
+    if (!personaSourceStartPending || !requestedPersonaSourceMode) return;
+    setPersonaSourceStartPending(false);
+    void handleStart();
+  }, [handleStart, personaSourceStartPending, requestedPersonaSourceMode]);
+
   const handleGuidedStartSimulation = useCallback(async () => {
     if (!guidedWorkflow.canStartSimulation) return;
     if (simulation.status === 'running') return;
@@ -2204,7 +2437,11 @@ const Index = () => {
     const startBusyToken = beginUiBusy('starting_simulation');
     guidedWorkflowStartingSimulationRef.current = true;
     try {
-      addSystemMessage(settings.language === 'ar' ? 'Starting guided simulation...' : 'Starting guided simulation...');
+      addSystemMessage(
+        settings.language === 'ar'
+          ? 'جارٍ تجهيز المحاكاة الموجّهة.'
+          : 'Preparing the guided simulation.'
+      );
       const response = await simulation.startSimulation(config, { throwOnError: true });
       const simulationId = typeof response === 'object' && response && 'simulation_id' in response
         ? String(response.simulation_id || '')
@@ -2635,8 +2872,8 @@ const Index = () => {
     if (ready) {
       addSystemMessage(
         settings.language === 'ar'
-          ? 'تم حفظ توضيحات ما قبل البدء. جاري تشغيل المحاكاة.'
-          : 'Pre-start clarifications saved. Starting simulation now.'
+          ? 'تم حفظ الإجابات. سننتقل الآن إلى البحث وتجهيز الشخصيات.'
+          : 'Clarifications saved. Moving now to research and persona preparation.'
       );
       await handleStart();
       return;
@@ -2656,8 +2893,8 @@ const Index = () => {
     setPendingIdeaConfirmation(null);
     addSystemMessage(
       settings.language === 'ar'
-        ? 'تم تأكيد وصف الفكرة. سنبدأ التنفيذ الآن.'
-        : 'Idea description confirmed. Starting execution now.'
+        ? 'تم تأكيد وصف الفكرة. سنبدأ البحث وتجهيز الشخصيات الآن.'
+        : 'Idea description confirmed. Starting research and persona preparation now.'
     );
     await handleStart();
   }, [addSystemMessage, handleStart, preflightContextKey, settings.language]);
@@ -2690,8 +2927,8 @@ const Index = () => {
       if (requestConfigPanel()) {
         addSystemMessage(
           settings.language === 'ar'
-            ? 'فعّلت وضع بناء المجتمع المخصص. عدّل الإعدادات ثم ابدأ المحاكاة.'
-            : 'Custom society builder enabled. Adjust settings, then start simulation.'
+            ? 'تم تفعيل بناء مجتمع مخصص. عدّل الإعدادات ثم ابدأ البحث وتجهيز الشخصيات.'
+            : 'Custom society builder enabled. Adjust the settings, then start research and persona preparation.'
         );
       }
       return;
@@ -2704,8 +2941,8 @@ const Index = () => {
     setActivePanel('chat');
     addSystemMessage(
       settings.language === 'ar'
-        ? 'تم اختيار التشغيل بالمجتمع الافتراضي.'
-        : 'Default society start selected.'
+        ? 'تم اختيار المجتمع الافتراضي. سنراجع المتطلبات أولًا ثم نبدأ البحث إذا كان كل شيء جاهزًا.'
+        : 'Default society selected. The app will check requirements first, then start research when everything is ready.'
     );
     void handleStart();
   }, [addSystemMessage, handleStart, requestConfigPanel, settings.language, startChoiceKey]);
@@ -3651,21 +3888,14 @@ Write 4 to 6 short sentences that summarize an initial local market estimate. St
   ]);
 
   const handleStartAnywayAfterWeakResearch = useCallback(async () => {
-    const warningText = settings.language === 'ar'
-      ? 'جودة البحث الحالية أقل من الحد المطلوب، وقد تكون دقة المحاكاة أقل. هل تريد بدء المحاكاة رغم ذلك؟'
-      : 'Research quality is below threshold and simulation confidence may be lower. Start anyway?';
-    if (typeof window !== 'undefined' && !window.confirm(warningText)) {
-      return;
-    }
-    researchReviewedKeyRef.current = researchGateKey;
     setPendingResearchReview(false);
     addSystemMessage(
       settings.language === 'ar'
-        ? 'تم تجاوز بوابة جودة البحث بتحذير صريح. سيتم بدء المحاكاة بالبيانات المتاحة.'
-        : 'Research gate was bypassed with warning confirmation. Starting with available evidence.'
+        ? 'لا يمكن تجاوز البحث الإلزامي. سيُعاد تشغيل البحث المطلوب قبل السماح بالمحاكاة.'
+        : 'Mandatory research cannot be bypassed. The required research will run again before simulation is allowed.'
     );
-    await handleStart();
-  }, [addSystemMessage, handleStart, researchGateKey, settings.language]);
+    await handleSearchRetry();
+  }, [addSystemMessage, handleSearchRetry, settings.language]);
 
   const handleRetryPrestartResearch = useCallback(async () => {
     const query = userInput.idea.trim();
@@ -3676,8 +3906,8 @@ Write 4 to 6 short sentences that summarize an initial local market estimate. St
       setPendingResearchReview(true);
       addSystemMessage(
         settings.language === 'ar'
-          ? 'تم تحديث البحث المبدئي. هل أبدأ المحاكاة الآن؟'
-          : 'Prestart research was refreshed. Should I start simulation now?'
+          ? 'تم تحديث البحث. هل تريد إعادة تجهيز البحث والشخصيات الآن؟'
+          : 'Research was refreshed. Do you want to rerun research and persona preparation now?'
       );
     }
   }, [addSystemMessage, runSearch, settings.language, userInput.idea]);
@@ -4345,7 +4575,7 @@ If rejection is about competition or location, suggest searching for a better lo
       ]
     : pendingConfigReview
     ? [
-        { label: settings.language === 'ar' ? 'ابدأ' : 'Start', value: 'yes' },
+        { label: settings.language === 'ar' ? 'كمّل' : 'Continue', value: 'yes' },
         { label: settings.language === 'ar' ? 'تعديل' : 'Edit', value: 'edit' },
       ]
     : null;
@@ -4445,10 +4675,10 @@ If rejection is about competition or location, suggest searching for a better lo
     if (pendingPreflightQuestion) {
       return {
         key: 'preflight_required',
-        label: settings.language === 'ar' ? 'مطلوب توضيح للاستكمال' : 'Clarification needed to continue',
+        label: settings.language === 'ar' ? 'جاوب على الأسئلة أولًا' : 'Answer the questions first',
         description: settings.language === 'ar'
-          ? 'أجب على سؤال التوضيح داخل الدردشة قبل بدء البحث.'
-          : 'Answer the clarification card in chat before running research.',
+          ? 'افتح الدردشة وأجب على بطاقة الأسئلة قبل بدء البحث.'
+          : 'Open the chat and answer the clarification card before research starts.',
         disabled: false,
         busy: preflightBusy,
         tone: 'warning' as const,
@@ -4462,8 +4692,8 @@ If rejection is about competition or location, suggest searching for a better lo
         key: 'idea_confirmation_required',
         label: settings.language === 'ar' ? 'مراجعة وصف الفكرة أولًا' : 'Review idea description first',
         description: settings.language === 'ar'
-          ? 'أكد وصف الفكرة من الدردشة قبل تشغيل البحث.'
-          : 'Confirm the idea description in chat before running research.',
+          ? 'أكد وصف الفكرة داخل الدردشة قبل بدء البحث.'
+          : 'Confirm the idea description in chat before research starts.',
         disabled: false,
         busy: false,
         tone: 'warning' as const,
@@ -4489,25 +4719,21 @@ If rejection is about competition or location, suggest searching for a better lo
         key: 'retry_search',
         label: settings.language === 'ar' ? 'إعادة البحث' : 'Retry research',
         description: settings.language === 'ar'
-          ? 'سيظهر بدء المحاكاة بعد بحث كافٍ أو بعد تجاوز التحذير.'
-          : 'Start simulation unlocks after sufficient research or warning-confirm bypass.',
+          ? 'ستبقى المحاكاة محجوبة حتى يكتمل البحث الإلزامي بنجاح.'
+          : 'Simulation remains blocked until mandatory research completes successfully.',
         disabled: false,
         busy: false,
         tone: 'warning' as const,
         icon: 'retry' as const,
         onClick: () => { void handleSearchRetry(); },
-        secondary: {
-          label: settings.language === 'ar' ? 'ابدأ المحاكاة رغم ذلك' : 'Start anyway',
-          onClick: () => { void handleStartAnywayAfterWeakResearch(); },
-        },
       };
     }
 
     if (pendingConfigReview) {
       return {
         key: 'confirm_start',
-        label: settings.language === 'ar' ? 'ابدأ البحث' : 'Run research',
-        description: settings.language === 'ar' ? 'سيتم تنفيذ البحث أولًا ثم ستظهر لك خطوة بدء المحاكاة' : 'Research runs first, then start simulation appears',
+        label: settings.language === 'ar' ? 'ابدأ البحث وتجهيز الشخصيات' : 'Start research and persona preparation',
+        description: settings.language === 'ar' ? 'سنحلل الفكرة ونبحث عنها ونجهز الشخصيات ونحفظها قبل بدء المحاكاة' : 'The app will classify the idea, run research, prepare personas, save them, and only then start simulation',
         disabled: isPrestartSearchActive,
         busy: isPrestartSearchActive,
         tone: 'primary' as const,
@@ -4524,13 +4750,15 @@ If rejection is about competition or location, suggest searching for a better lo
       return {
         key: 'start_reasoning',
         label: selectedStartPath === 'custom_build'
-          ? (settings.language === 'ar' ? 'ابدأ المحاكاة بالمجتمع المخصص' : 'Start with your custom society')
-          : (settings.language === 'ar' ? 'ابدأ المحاكاة الآن' : 'Start simulation now'),
-        description: settings.language === 'ar' ? 'سيتم تشغيل مرحلة التفكير مباشرة' : 'Reasoning phase will begin now',
+          ? (settings.language === 'ar' ? 'أعد تجهيز البحث والشخصيات بالمجتمع المخصص' : 'Rerun research and persona preparation with your custom society')
+          : (settings.language === 'ar' ? 'أعد تجهيز البحث والشخصيات' : 'Rerun research and persona preparation'),
+        description: settings.language === 'ar'
+          ? 'سيُعاد تحليل الفكرة والبحث وتجهيز الشخصيات وحفظها قبل السماح بالمحاكاة'
+          : 'Idea analysis, research, persona preparation, and saving will rerun before simulation is allowed',
         disabled: false,
         busy: false,
-        tone: 'success' as const,
-        icon: 'play' as const,
+        tone: 'primary' as const,
+        icon: 'sparkles' as const,
         onClick: () => { void handleConfirmStart(); },
         secondary: {
           label: settings.language === 'ar' ? 'إعادة البحث' : 'Retry research',
@@ -4542,9 +4770,9 @@ If rejection is about competition or location, suggest searching for a better lo
     return {
       key: 'start',
       label: selectedStartPath === 'custom_build'
-        ? (settings.language === 'ar' ? 'ابدأ البحث بالمجتمع المخصص' : 'Run research with your custom society')
-        : (settings.language === 'ar' ? 'ابدأ البحث' : 'Run research'),
-      description: settings.language === 'ar' ? 'ابدأ ببحث واقعي أولًا، ثم سنعرض زر بدء المحاكاة' : 'Start with real research first; start simulation comes next',
+        ? (settings.language === 'ar' ? 'ابدأ البحث بالمجتمع المخصص' : 'Start research with your custom society')
+        : (settings.language === 'ar' ? 'ابدأ البحث وتجهيز الشخصيات' : 'Start research and persona preparation'),
+      description: settings.language === 'ar' ? 'سنحلل الفكرة ونبحث عنها ونجهز الشخصيات قبل بدء المحاكاة' : 'The app will classify the idea, run research, prepare personas, and only then allow simulation',
       disabled: !hasIdea,
       busy: false,
       tone: 'primary' as const,
@@ -4656,7 +4884,8 @@ If rejection is about competition or location, suggest searching for a better lo
     simulationError: simulation.error,
     searchState,
     uiProgress,
-  }), [settings.language, searchState, simulation.currentPhaseKey, simulation.error, simulation.status, uiProgress]);
+    pipeline: simulation.pipeline,
+  }), [settings.language, searchState, simulation.currentPhaseKey, simulation.error, simulation.pipeline, simulation.status, uiProgress]);
 
   const searchPanelModel = useMemo(() => buildSearchPanelModel({
     language: settings.language,
@@ -4670,6 +4899,8 @@ If rejection is about competition or location, suggest searching for a better lo
     isRunActive,
     simulationActuallyStarted,
     reasoningPanelAvailable,
+    currentPhaseKey: simulation.currentPhaseKey,
+    pipeline: simulation.pipeline,
   }), [
     activePanel,
     isResearchReviewPause,
@@ -4680,7 +4911,9 @@ If rejection is about competition or location, suggest searching for a better lo
     researchContext,
     searchState,
     settings.language,
+    simulation.currentPhaseKey,
     simulation.pendingResearchReview,
+    simulation.pipeline,
     simulation.researchSources,
     simulationActuallyStarted,
   ]);
@@ -4934,6 +5167,133 @@ If rejection is about competition or location, suggest searching for a better lo
           )}
         </div>
       )}
+      {personaSourceModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/55 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-3xl rounded-2xl border border-border/60 bg-background/95 shadow-2xl p-4 sm:p-5 space-y-4">
+            <div className="rounded-2xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm">
+              <div className="font-medium text-foreground">
+                {settings.language === 'ar'
+                  ? 'هذه الفكرة تبدو عامة، لذلك سنستخدم شخصيات الجمهور الافتراضية ما لم تختر مصدرًا آخر للشخصيات.'
+                  : 'This idea looks general, so default audience personas will be used unless you choose another persona source.'}
+              </div>
+              {userInput.idea.trim() ? <div className="text-muted-foreground mt-1">{userInput.idea.trim()}</div> : null}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setRequestedPersonaSourceMode('default_audience_only');
+                  setRequestedPersonaSetKey('');
+                  setRequestedPersonaSetLabel('');
+                  setPersonaSourceModalOpen(false);
+                  setPersonaSourceStartPending(true);
+                }}
+                className="rounded-xl border border-border/50 bg-secondary/25 hover:bg-secondary/40 p-4 text-start transition"
+              >
+                <div className="text-sm font-medium text-foreground">
+                  {settings.language === 'ar' ? 'المتابعة بشخصيات الجمهور' : 'Continue with audience personas'}
+                </div>
+                <div className="text-xs text-muted-foreground mt-1">
+                  {settings.language === 'ar' ? 'هذه الشخصيات أكثر عمومية وعشوائية من الشخصيات المشتقة من البحث.' : 'These personas are more generic and randomized than research-derived personas.'}
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPersonaSourceModalOpen(false);
+                  navigate('/dashboard', {
+                    state: {
+                      openTab: 'persona-lab',
+                      personaLaunchDraft: {
+                        idea: userInput.idea.trim(),
+                        category: userInput.category,
+                        location: userInput.city.trim() || userInput.country.trim(),
+                      },
+                    },
+                  });
+                }}
+                className="rounded-xl border border-primary/40 bg-primary/10 hover:bg-primary/15 p-4 text-start transition"
+              >
+                <div className="text-sm font-medium text-foreground">
+                  {settings.language === 'ar' ? 'افتح مختبر الشخصيات' : 'Open Persona Lab'}
+                </div>
+                <div className="text-xs text-muted-foreground mt-1">
+                  {settings.language === 'ar' ? 'أنشئ مجموعة شخصيات جديدة خارج مسار المحاكاة ثم أعد استخدامها.' : 'Create a reusable persona set outside the simulation flow.'}
+                </div>
+              </button>
+            </div>
+
+            <div className="rounded-2xl border border-border/50 bg-background/40 p-4 space-y-3">
+              <div className="font-medium">{settings.language === 'ar' ? 'اختر شخصيات محفوظة من أماكن محددة' : 'Choose saved personas from specific places'}</div>
+              <div className="flex flex-col md:flex-row gap-3">
+                <input
+                  value={personaSourceFilter}
+                  onChange={(e) => setPersonaSourceFilter(e.target.value)}
+                  placeholder={settings.language === 'ar' ? 'ابحث عن مكان محفوظ' : 'Search saved places'}
+                  className="flex-1 rounded-xl border border-border/50 bg-background/70 px-3 py-2 text-sm outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => void loadPersonaSourceSets(personaSourceFilter)}
+                  className="rounded-xl border border-border/50 bg-secondary/25 px-4 py-2 text-sm"
+                >
+                  {settings.language === 'ar' ? 'تحديث' : 'Refresh'}
+                </button>
+              </div>
+              {personaSourceSetsError ? <div className="text-sm text-rose-300">{personaSourceSetsError}</div> : null}
+              <div className="max-h-56 overflow-auto space-y-2 pr-1">
+                {personaSourceSetsLoading ? (
+                  <div className="text-sm text-muted-foreground">{settings.language === 'ar' ? 'جارٍ تحميل المجموعات المحفوظة...' : 'Loading saved persona sets...'}</div>
+                ) : personaSourceSets.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">{settings.language === 'ar' ? 'لا توجد مجموعات محفوظة مطابقة.' : 'No saved persona sets matched.'}</div>
+                ) : personaSourceSets.map((item) => (
+                  <button
+                    key={item.set_key || String(item.id || Math.random())}
+                    type="button"
+                    onClick={() => setSelectedPersonaSourceSetKey(item.set_key || '')}
+                    className={cn(
+                      'w-full rounded-xl border px-3 py-3 text-left transition',
+                      selectedPersonaSourceSetKey === item.set_key ? 'border-cyan-400/60 bg-cyan-500/10' : 'border-border/40 bg-background/40 hover:bg-white/5',
+                    )}
+                  >
+                    <div className="font-medium">{item.place_label || item.set_key}</div>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      {(item.persona_count || 0)} {settings.language === 'ar' ? 'شخصية' : 'personas'}
+                      {' • '}
+                      {(item.audience_filters || []).join(', ') || (settings.language === 'ar' ? 'كل الجماهير' : 'all audiences')}
+                    </div>
+                  </button>
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  disabled={!selectedPersonaSourceSetKey}
+                  onClick={() => {
+                    const selectedSet = personaSourceSets.find((item) => item.set_key === selectedPersonaSourceSetKey);
+                    setRequestedPersonaSourceMode('saved_place_personas');
+                    setRequestedPersonaSetKey(selectedPersonaSourceSetKey);
+                    setRequestedPersonaSetLabel(selectedSet?.place_label || '');
+                    setPersonaSourceModalOpen(false);
+                    setPersonaSourceStartPending(true);
+                  }}
+                  className="rounded-xl border border-cyan-400/40 bg-cyan-500/10 px-4 py-2 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {settings.language === 'ar' ? 'استخدم هذه المجموعة' : 'Use this saved set'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPersonaSourceModalOpen(false)}
+                  className="rounded-xl border border-border/50 bg-background/40 px-4 py-2 text-sm"
+                >
+                  {settings.language === 'ar' ? 'إلغاء وتعديل السياق' : 'Cancel and edit idea context'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       {startChoiceModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/55 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-2xl rounded-2xl border border-border/60 bg-background/95 shadow-2xl p-4 sm:p-5 space-y-4">
@@ -4943,8 +5303,8 @@ If rejection is about competition or location, suggest searching for a better lo
               </h3>
               <p className="text-xs sm:text-sm text-muted-foreground mt-1">
                 {settings.language === 'ar'
-                  ? 'اختر المسار المناسب قبل بدء التنفيذ.'
-                  : 'Choose a run path before execution starts.'}
+                  ? 'اختر كيف تريد المتابعة قبل أن يبدأ التطبيق العمل.'
+                  : 'Choose how you want to continue before the app starts working.'}
               </p>
               {societyCatalog && (
                 <p className="text-[11px] sm:text-xs text-muted-foreground mt-2">
@@ -4985,10 +5345,10 @@ If rejection is about competition or location, suggest searching for a better lo
                 className="rounded-xl border border-emerald-500/45 bg-emerald-500/10 hover:bg-emerald-500/15 p-3 text-start transition"
               >
                 <div className="text-sm font-medium text-emerald-200">
-                  {settings.language === 'ar' ? 'ابدأ بالمجتمع الافتراضي' : 'Start with default society'}
+                  {settings.language === 'ar' ? 'كمّل بالمجتمع الافتراضي' : 'Continue with default society'}
                 </div>
                 <div className="text-xs text-emerald-100/80 mt-1">
-                  {settings.language === 'ar' ? 'ابدأ التنفيذ فورًا بالإعدادات الحالية.' : 'Run immediately with current defaults.'}
+                  {settings.language === 'ar' ? 'استخدم الإعدادات الحالية ثم انتقل للبحث والتجهيز.' : 'Use the current defaults, then move into research and preparation.'}
                 </div>
               </button>
             </div>

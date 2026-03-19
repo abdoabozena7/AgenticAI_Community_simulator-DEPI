@@ -950,7 +950,7 @@ export function GuidedSimulationPanel({
                       className="guided-chat-button guided-chat-button-primary"
                     >
                       <Play className="mr-2 h-4 w-4" />
-                      {language === 'ar' ? 'ابدأ المحاكاة' : 'Start simulation'}
+                      {language === 'ar' ? 'تابع إلى المحاكاة' : 'Continue to simulation'}
                     </Button>
                   ) : null}
                 </ChatActionRow>

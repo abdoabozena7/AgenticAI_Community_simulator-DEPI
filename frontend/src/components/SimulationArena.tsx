@@ -283,7 +283,7 @@ export const SimulationArena = ({
               {emptyTitle || (language === 'ar' ? 'سيظهر ترابط الآراء هنا بعد بدء النقاش' : 'The relationship map will appear after debate starts')}
             </h3>
             <p className="mt-2 text-sm leading-7 text-muted-foreground">
-              {emptyDescription || (language === 'ar' ? 'ابدأ المحاكاة أو افتح النقاش لترى من يؤثر على من.' : 'Start the simulation or open reasoning to see who influences whom.')}
+              {emptyDescription || (language === 'ar' ? 'شغّل خط الأنابيب الإلزامي أولاً، ثم افتح النقاش لترى من يؤثر على من.' : 'Run the mandatory pipeline first, then open reasoning to see who influences whom.')}
             </p>
           </div>
         </div>

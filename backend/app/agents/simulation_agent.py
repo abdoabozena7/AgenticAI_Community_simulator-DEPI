@@ -16,6 +16,9 @@ class SimulationAgent(BaseAgent):
         return state
 
     async def initialize_simulation(self, state: OrchestrationState) -> OrchestrationState:
+        blockers = state.validate_pipeline_ready_for_simulation()
+        if blockers:
+            raise RuntimeError(f"Simulation cannot initialize before the mandatory pipeline completes: {', '.join(blockers)}")
         if not state.personas:
             raise RuntimeError("Simulation cannot initialize without personas")
         self._ensure_runtime_metadata(state)

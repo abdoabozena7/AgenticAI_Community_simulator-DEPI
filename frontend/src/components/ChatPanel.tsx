@@ -299,7 +299,7 @@ export function ChatPanel(props: ChatPanelProps) {
     if (inputValue.trim()) return { key: 'send', label: language === 'ar' ? 'إرسال الرسالة' : 'Send message', icon: <Send className="h-4 w-4" />, onClick: () => { const next = inputValue.trim(); if (!next) return; onSendMessage(next); setInputValue(''); allowAutoFocusRef.current = true; window.requestAnimationFrame(() => inputRef.current?.focus()); } };
     if (searchState?.status === 'timeout' && onSearchRetry) return { key: 'retry-search', label: language === 'ar' ? 'إعادة البحث' : 'Retry search', description: language === 'ar' ? 'يمكنك إعادة المحاولة أو استخدام البديل المحلي.' : 'Retry or use the local fallback.', tone: 'warning', icon: <Search className="h-4 w-4" />, onClick: () => (onSearchUseLlm ? setMenuOpen((open) => !open) : onSearchRetry()) };
     if (showRetry && onRetryLlm) return { key: 'fallback', label: language === 'ar' ? 'استخدام بديل LLM' : 'Use LLM fallback', tone: 'warning', icon: <Wand2 className="h-4 w-4" />, onClick: onRetryLlm };
-    if (canConfirmStart && onConfirmStart) return { key: 'start', label: language === 'ar' ? 'ابدأ المحاكاة' : 'Start simulation', icon: <Play className="h-4 w-4" />, onClick: onConfirmStart };
+    if (canConfirmStart && onConfirmStart) return { key: 'start', label: language === 'ar' ? 'شغّل خط الأنابيب الإلزامي' : 'Run mandatory pipeline', icon: <Play className="h-4 w-4" />, onClick: onConfirmStart };
     if (primaryControl?.onClick) return {
       key: primaryControl.key,
       label: primaryControl.label,
