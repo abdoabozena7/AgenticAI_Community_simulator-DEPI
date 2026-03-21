@@ -26,6 +26,7 @@ interface SimulationState {
   chatEvents: SimulationChatEvent[];
   researchSources: SearchLiveEvent[];
   summary: string | null;
+  reasoningStarted: boolean;
   canResume: boolean;
   resumeReason: string | null;
   pendingClarification: PendingClarification | null;
@@ -52,7 +53,7 @@ interface SimulationState {
 type SimulationAction =
   | { type: 'SET_STATUS'; payload: SimulationStatus }
   | { type: 'SET_STATUS_REASON'; payload: SimulationState['statusReason'] }
-  | { type: 'SET_RUNTIME_STATE'; payload: { pendingInputKind: string | null; schema: Record<string, unknown> } }
+  | { type: 'SET_RUNTIME_STATE'; payload: { pendingInputKind: string | null; schema: Record<string, unknown>; reasoningStarted: boolean } }
   | { type: 'SET_POLICY'; payload: { policyMode: SimulationState['policyMode']; policyReason: string | null; searchQuality: SimulationState['searchQuality'] } }
   | { type: 'SET_SIMULATION_ID'; payload: string }
   | { type: 'SET_PHASE'; payload: { currentPhaseKey: string | null; phaseProgressPct: number } }
@@ -108,6 +109,7 @@ const initialState: SimulationState = {
   chatEvents: [],
   researchSources: [],
   summary: null,
+  reasoningStarted: false,
   canResume: false,
   resumeReason: null,
   pendingClarification: null,
@@ -342,6 +344,7 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
         ...state,
         pendingInputKind: action.payload.pendingInputKind,
         schema: action.payload.schema,
+        reasoningStarted: action.payload.reasoningStarted || state.reasoningStarted,
       };
 
     case 'SET_POLICY':
@@ -364,6 +367,7 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
         phaseProgressPct: 0,
         statusReason: null,
         summary: null,
+        reasoningStarted: false,
         pendingClarification: null,
         canAnswerClarification: false,
         pendingResearchReview: null,
@@ -505,6 +509,7 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
         lastEventSeq: typeof event.event_seq === 'number' ? Math.max(state.lastEventSeq, event.event_seq) : state.lastEventSeq,
         agents: nextAgents,
         reasoningFeed: [...state.reasoningFeed, newMessage],
+        reasoningStarted: true,
         activePulses: [...state.activePulses, ...newPulses],
       };
     }
@@ -532,6 +537,7 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
       return {
         ...state,
         reasoningFeed: action.payload,
+        reasoningStarted: action.payload.length > 0 || state.reasoningStarted,
       };
     }
 
@@ -577,9 +583,9 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
 
     case 'ADD_RESEARCH_SOURCE': {
       const item = action.payload;
-      const key = `${item.eventSeq ?? 'x'}|${item.url ?? ''}|${item.action ?? ''}|${item.status ?? ''}|${item.timestamp}`;
+      const key = `${item.eventSeq ?? 'x'}|${item.cycleId ?? ''}|${item.url ?? ''}|${item.action ?? ''}|${item.status ?? ''}`;
       const exists = state.researchSources.some((entry) => {
-        const entryKey = `${entry.eventSeq ?? 'x'}|${entry.url ?? ''}|${entry.action ?? ''}|${entry.status ?? ''}|${entry.timestamp}`;
+        const entryKey = `${entry.eventSeq ?? 'x'}|${entry.cycleId ?? ''}|${entry.url ?? ''}|${entry.action ?? ''}|${entry.status ?? ''}`;
         return entryKey === key;
       });
       if (exists) {
@@ -965,8 +971,9 @@ export function useSimulation(options?: UseSimulationOptions) {
       },
     });
     const pendingClarificationRaw = stateResponse.pending_clarification;
+    const clarificationActive = stateResponse.pending_input_kind === 'clarification' && Boolean(stateResponse.can_answer_clarification);
     const mappedPendingClarification: PendingClarification | null =
-      pendingClarificationRaw && typeof pendingClarificationRaw === 'object'
+      clarificationActive && pendingClarificationRaw && typeof pendingClarificationRaw === 'object'
         ? {
             questionId: String(pendingClarificationRaw.question_id || ''),
             question: String(pendingClarificationRaw.question || ''),
@@ -1015,7 +1022,7 @@ export function useSimulation(options?: UseSimulationOptions) {
         pendingClarification: mappedPendingClarification && mappedPendingClarification.questionId
           ? mappedPendingClarification
           : null,
-        canAnswerClarification: Boolean(stateResponse.can_answer_clarification),
+        canAnswerClarification: clarificationActive,
       },
     });
     const pendingResearchRaw = stateResponse.pending_research_review;
@@ -1139,6 +1146,34 @@ export function useSimulation(options?: UseSimulationOptions) {
             blockers: Array.isArray(stateResponse.pipeline.blockers)
               ? stateResponse.pipeline.blockers.map((item) => String(item || '').trim()).filter(Boolean)
               : [],
+            actively_blocked: Boolean(stateResponse.pipeline.actively_blocked),
+            blocker_details: Array.isArray(stateResponse.pipeline.blocker_details)
+              ? stateResponse.pipeline.blocker_details
+                  .map((item) => {
+                    if (!item || typeof item !== 'object') return null;
+                    const code = typeof item.code === 'string' ? item.code.trim() : '';
+                    const title = typeof item.title === 'string' ? item.title.trim() : '';
+                    const message = typeof item.message === 'string' ? item.message.trim() : '';
+                    if (!code || !title || !message) return null;
+                    return {
+                      code,
+                      phase_key: typeof item.phase_key === 'string' ? item.phase_key : null,
+                      title,
+                      message,
+                      action: typeof item.action === 'string' ? item.action : null,
+                    };
+                  })
+                  .filter((item): item is NonNullable<SimulationState['pipeline']>['blocker_details'][number] => Boolean(item))
+              : [],
+            blocked_phase: typeof stateResponse.pipeline.blocked_phase === 'string'
+              ? stateResponse.pipeline.blocked_phase
+              : null,
+            warnings: Array.isArray(stateResponse.pipeline.warnings)
+              ? stateResponse.pipeline.warnings.map((item) => String(item || '').trim()).filter(Boolean)
+              : [],
+            fatal_errors: Array.isArray(stateResponse.pipeline.fatal_errors)
+              ? stateResponse.pipeline.fatal_errors.map((item) => String(item || '').trim()).filter(Boolean)
+              : [],
             steps: Array.isArray(stateResponse.pipeline.steps)
               ? stateResponse.pipeline.steps
                   .map((item) => {
@@ -1182,6 +1217,7 @@ export function useSimulation(options?: UseSimulationOptions) {
         schema: stateResponse.schema && typeof stateResponse.schema === 'object'
           ? stateResponse.schema
           : {},
+        reasoningStarted: Boolean(stateResponse.reasoning_started),
       },
     });
     dispatch({
@@ -1481,6 +1517,14 @@ export function useSimulation(options?: UseSimulationOptions) {
             canAnswerClarification: true,
           },
         });
+        dispatch({
+          type: 'SET_RUNTIME_STATE',
+          payload: {
+            pendingInputKind: 'clarification',
+            schema: stateRef.current.schema,
+            reasoningStarted: stateRef.current.reasoningStarted,
+          },
+        });
         dispatch({ type: 'SET_STATUS', payload: 'paused' });
         dispatch({ type: 'SET_STATUS_REASON', payload: 'paused_clarification_needed' });
         dispatch({ type: 'SET_RESUME_META', payload: { canResume: false, resumeReason: event.reason_summary ?? null } });
@@ -1492,6 +1536,14 @@ export function useSimulation(options?: UseSimulationOptions) {
           payload: {
             pendingClarification: null,
             canAnswerClarification: false,
+          },
+        });
+        dispatch({
+          type: 'SET_RUNTIME_STATE',
+          payload: {
+            pendingInputKind: null,
+            schema: stateRef.current.schema,
+            reasoningStarted: stateRef.current.reasoningStarted,
           },
         });
         dispatch({ type: 'SET_STATUS', payload: 'running' });

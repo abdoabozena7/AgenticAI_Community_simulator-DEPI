@@ -11,6 +11,9 @@ from .base import BaseAgent
 class SimulationAgent(BaseAgent):
     name = "simulation_agent"
 
+    def _minimum_visible_turns(self, state: OrchestrationState) -> int:
+        return max(3, min(8, max(1, len(state.personas) // 3)))
+
     async def run(self, state: OrchestrationState) -> OrchestrationState:
         await self.initialize_simulation(state)
         await self.run_deliberation(state)
@@ -53,19 +56,9 @@ class SimulationAgent(BaseAgent):
 
         current_iteration = int(state.deliberation_state.get("iteration") or 0)
         total_iterations = int(state.deliberation_state.get("total_iterations") or 4)
-        if current_iteration == 0:
-            await self.runtime.event_bus.publish(
-                state,
-                "discussion_started",
-                {
-                    "agent": self.name,
-                    "iteration_budget": total_iterations,
-                    "represented_agents": len(state.personas),
-                    "cluster_count": len(state.deliberation_state.get("clusters") or {}),
-                },
-            )
+        initial_turn_count = len(state.dialogue_turns)
 
-        rounds_to_run = min(2, max(1, total_iterations - current_iteration))
+        rounds_to_run = max(1, total_iterations - current_iteration)
         for _ in range(rounds_to_run):
             iteration = int(state.deliberation_state.get("iteration") or 0) + 1
             if iteration > total_iterations:
@@ -116,9 +109,28 @@ class SimulationAgent(BaseAgent):
                 self._apply_turn_effects(state, speaker, target, turn, argument, turn_payload)
                 state.dialogue_turns.append(turn)
                 state.dialogue_turns = state.dialogue_turns[-800:]
+                if not state.deliberation_state.get("discussion_started_emitted"):
+                    state.deliberation_state["discussion_started_emitted"] = True
+                    await self.runtime.event_bus.publish(
+                        state,
+                        "discussion_started",
+                        {
+                            "agent": self.name,
+                            "iteration_budget": total_iterations,
+                            "represented_agents": len(state.personas),
+                            "cluster_count": len(state.deliberation_state.get("clusters") or {}),
+                            "first_step_uid": turn.step_uid,
+                            "message_count": len(state.dialogue_turns),
+                        },
+                    )
                 await self.runtime.event_bus.publish_turn(state, turn)
                 intervention = self._detect_orchestrator_intervention(state, turn, argument)
                 if intervention is not None:
+                    if iteration < min(3, total_iterations):
+                        continue
+                    state.deliberation_state["iteration"] = iteration
+                    state.metrics = self._compute_metrics(state, iteration=iteration)
+                    await self.runtime.repository.persist_metrics(state.simulation_id, dict(state.metrics))
                     await self._pause_for_intervention(state, intervention)
                     await self.runtime.repository.sync_persona_states(
                         simulation_id=state.simulation_id,
@@ -135,14 +147,31 @@ class SimulationAgent(BaseAgent):
                 personas=state.personas,
                 phase=SimulationPhase.AGENT_DELIBERATION.value,
             )
+            await self.runtime.event_bus.publish(
+                state,
+                "discussion_progress",
+                {
+                    "agent": self.name,
+                    "iteration": iteration,
+                    "total_iterations": total_iterations,
+                    "message_count": len(state.dialogue_turns),
+                },
+            )
             if self._neutral_ratio(state) <= 0.3 and iteration >= max(2, total_iterations - 1):
                 break
+        visible_turns_added = len(state.dialogue_turns) - initial_turn_count
+        if visible_turns_added == 0 and state.personas:
+            raise RuntimeError("Simulation deliberation did not produce any dialogue turns")
+        if len(state.dialogue_turns) < self._minimum_visible_turns(state) and len(state.personas) > 1:
+            raise RuntimeError("Simulation deliberation ended before enough visible discussion was produced")
         return state
 
     async def run_convergence(self, state: OrchestrationState) -> OrchestrationState:
         self._ensure_runtime_metadata(state)
         if state.pending_input:
             return state
+        if len(state.dialogue_turns) < self._minimum_visible_turns(state):
+            raise RuntimeError("Cannot run convergence before visible discussion has started")
         iteration = int(state.deliberation_state.get("iteration") or 0)
         if self._neutral_ratio(state) > 0.3:
             leaders = self._select_representatives(state, iteration + 1)
@@ -191,6 +220,8 @@ class SimulationAgent(BaseAgent):
         return state
 
     async def build_summary(self, state: OrchestrationState) -> str:
+        if len(state.dialogue_turns) < self._minimum_visible_turns(state):
+            raise RuntimeError("Cannot build a simulation summary before enough discussion is visible")
         metrics = self._compute_metrics(state, iteration=int(state.deliberation_state.get("iteration") or 0))
         strongest = sorted(state.argument_bank, key=lambda item: float(item.get("strength") or 0.0), reverse=True)[:3]
         top_claims = [str(item.get("claim") or "").strip() for item in strongest if str(item.get("claim") or "").strip()]

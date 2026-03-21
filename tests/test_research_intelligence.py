@@ -77,7 +77,7 @@ def _low_signal_result() -> dict:
 
 
 class ResearchIntelligenceTests(unittest.IsolatedAsyncioTestCase):
-    async def test_search_agent_pauses_for_research_review_when_data_is_thin(self) -> None:
+    async def test_search_agent_auto_estimates_when_data_is_thin_by_default(self) -> None:
         agent = SearchAgent(_runtime())
         state = _state()
         with patch("app.agents.search_agent.search_web", AsyncMock(return_value=_low_signal_result())), patch(
@@ -85,10 +85,11 @@ class ResearchIntelligenceTests(unittest.IsolatedAsyncioTestCase):
             AsyncMock(return_value={"ok": True, "title": "Example", "content": "limited content", "http_status": 200}),
         ):
             await agent.run(state)
-        self.assertTrue(state.pending_input)
-        self.assertEqual(state.pending_input_kind, "research_review")
-        self.assertEqual(state.status_reason, "paused_research_review")
-        self.assertFalse(state.search_completed)
+        self.assertFalse(state.pending_input)
+        self.assertIsNone(state.pending_input_kind)
+        self.assertTrue(state.search_completed)
+        self.assertEqual(state.schema.get("research_estimation_mode"), "ai_estimation")
+        self.assertIn("used_ai_estimation_due_to_weak_search", state.schema.get("research_warnings") or [])
         self.assertIn("research_visible_insights", state.schema)
 
     async def test_search_agent_uses_ai_estimation_when_user_requested_it(self) -> None:
@@ -136,6 +137,20 @@ class ResearchIntelligenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.research.structured_schema.get("estimation_mode"), "ai_estimation")
         self.assertIn("user_sentiment", state.research.structured_schema)
         self.assertIn("behavior_patterns", state.research.structured_schema)
+
+    async def test_search_agent_pauses_only_when_retry_mode_disables_ai_estimation(self) -> None:
+        agent = SearchAgent(_runtime())
+        state = _state()
+        state.user_context["researchEstimationMode"] = "retry"
+        with patch("app.agents.search_agent.search_web", AsyncMock(return_value=_low_signal_result())), patch(
+            "app.agents.search_agent.fetch_page",
+            AsyncMock(return_value={"ok": True, "title": "Example", "content": "limited content", "http_status": 200}),
+        ):
+            await agent.run(state)
+        self.assertTrue(state.pending_input)
+        self.assertEqual(state.pending_input_kind, "research_review")
+        self.assertEqual(state.status_reason, "paused_research_review")
+        self.assertFalse(state.search_completed)
 
     async def test_orchestrator_routes_research_review_answer_to_ai_estimation(self) -> None:
         orchestrator = SimulationOrchestrator.__new__(SimulationOrchestrator)

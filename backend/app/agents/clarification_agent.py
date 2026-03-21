@@ -10,35 +10,37 @@ class ClarificationAgent(BaseAgent):
     name = "clarification_agent"
 
     async def run(self, state: OrchestrationState) -> OrchestrationState:
-        existing_fields = {
-            key
-            for key, value in state.user_context.items()
-            if isinstance(value, list) and value or isinstance(value, str) and value.strip()
-        }
-        existing_fields.update(
-            key
-            for key, value in state.schema.items()
-            if isinstance(value, list) and value or isinstance(value, str) and value.strip()
-        )
-        existing_fields.update(state.clarification_answers.keys())
-
-        candidates = self._question_candidates(state)
+        state.validate_pipeline_ready_for_simulation()
+        pipeline_status = dict(state.schema.get("pipeline_status") or {})
+        active_blockers = [str(item).strip() for item in pipeline_status.get("blockers") or [] if str(item).strip()]
+        candidates = [] if active_blockers else self._question_candidates(state)
         questions: List[ClarificationQuestion] = []
         for question in candidates:
-            if question.field_name in existing_fields:
+            if state.is_field_resolved(question.field_name):
                 continue
             if question.question_id in state.clarification_answers:
                 continue
             questions.append(question)
+            break
 
         state.clarification_questions = questions
         state.pending_input = bool(questions)
         if questions:
             state.status = "paused"
             state.status_reason = "awaiting_clarification"
+            state.pending_input_kind = "clarification"
+            state.pending_resume_phase = state.pending_resume_phase or "simulation_initialization"
             state.schema["clarification_fields"] = [item.field_name for item in questions]
+            state.set_pipeline_step(
+                "ready_for_simulation",
+                "blocked",
+                detail=questions[0].prompt,
+                meta={"blocked_phase": "clarification_questions"},
+            )
         else:
             state.schema["clarification_fields"] = []
+            if state.pending_input_kind == "clarification":
+                state.pending_input_kind = None
         return state
 
     def _question_candidates(self, state: OrchestrationState) -> List[ClarificationQuestion]:
@@ -85,12 +87,24 @@ class ClarificationAgent(BaseAgent):
         ]
         candidates: List[ClarificationQuestion] = []
         for field_name in order:
+            if state.is_field_resolved(field_name):
+                continue
             prompt_en, prompt_ar = prompts[field_name]
             reason = reasons[field_name]
             if field_name == "riskBoundary" and any("risk" in gap.lower() for gap in gaps):
                 reason = gaps[0]
             if field_name == "monetization" and any("monet" in gap.lower() for gap in gaps):
                 reason = next(gap for gap in gaps if "monet" in gap.lower())
+            if field_name == "valueProposition" and not any(token in " ".join(gaps).lower() for token in ["promise", "value", "broad", "position"]):
+                continue
+            if field_name == "targetAudience" and not any(token in " ".join(gaps).lower() for token in ["audience", "segment"]):
+                continue
+            if field_name == "monetization" and not any(token in " ".join(gaps).lower() for token in ["monet", "revenue", "pricing", "price"]):
+                continue
+            if field_name == "deliveryModel" and not any(token in " ".join(gaps).lower() for token in ["delivery", "execution", "channel"]):
+                continue
+            if field_name == "riskBoundary" and not any(token in " ".join(gaps).lower() for token in ["risk", "guard", "boundary"]):
+                continue
             candidates.append(
                 ClarificationQuestion(
                     question_id=f"clarify_{field_name}",
@@ -99,4 +113,4 @@ class ClarificationAgent(BaseAgent):
                     reason=reason,
                 )
             )
-        return candidates[:3]
+        return candidates[:1]

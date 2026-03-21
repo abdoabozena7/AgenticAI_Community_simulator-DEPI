@@ -23,6 +23,16 @@ from .base import BaseAgent
 class SearchAgent(BaseAgent):
     name = "search_agent"
 
+    def _merge_quality_snapshot(self, current: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(current or {})
+        snapshot = dict(incoming or {})
+        merged["usable_sources"] = max(int(merged.get("usable_sources") or 0), int(snapshot.get("usable_sources") or 0))
+        merged["domains"] = max(int(merged.get("domains") or 0), int(snapshot.get("domains") or 0))
+        current_rate = float(merged.get("extraction_success_rate") or 0.0)
+        next_rate = float(snapshot.get("extraction_success_rate") or 0.0)
+        merged["extraction_success_rate"] = round(max(current_rate, next_rate), 3)
+        return merged
+
     async def run(self, state: OrchestrationState) -> OrchestrationState:
         context = state.user_context
         context_type = state.idea_context_type or classify_idea_context(context).value
@@ -106,7 +116,7 @@ class SearchAgent(BaseAgent):
                 },
                 persist_research=True,
             )
-            report.quality = dict(result.get("quality") or report.quality)
+            report.quality = self._merge_quality_snapshot(report.quality, dict(result.get("quality") or {}))
             structured = result.get("structured") or {}
             if isinstance(structured, dict):
                 structured_accumulator = self._merge_structured_schema(structured_accumulator, structured)
@@ -174,7 +184,7 @@ class SearchAgent(BaseAgent):
                 ),
                 http_status=page.get("http_status"),
             )
-            if evidence.title or evidence.content or evidence.snippet:
+            if page.get("ok") and (evidence.content or evidence.snippet):
                 report.evidence.append(evidence)
             await self.runtime.event_bus.publish(
                 state,
@@ -201,9 +211,6 @@ class SearchAgent(BaseAgent):
 
         report.evidence = sorted(report.evidence, key=lambda item: item.relevance_score, reverse=True)[:10]
         structured_accumulator = self._merge_evidence_into_structured(structured_accumulator, report.evidence)
-        for key in ("competition_level", "demand_level", "regulatory_risk", "price_sensitivity"):
-            if not str(structured_accumulator.get(key) or "").strip():
-                structured_accumulator[key] = "medium"
         if not isinstance(structured_accumulator.get("user_sentiment"), dict):
             structured_accumulator["user_sentiment"] = {"positive": [], "negative": [], "neutral": []}
         structured_accumulator["quality"] = dict(report.quality or {})
@@ -215,7 +222,9 @@ class SearchAgent(BaseAgent):
         if not report.gaps:
             report.gaps = [str(item) for item in structured_accumulator.get("gaps") or [] if str(item).strip()] or self._fallback_gaps(state)
 
-        if self._allow_ai_estimation(state) and self._research_is_insufficient(report):
+        initial_research_insufficient = self._research_is_insufficient(report)
+        estimation_mode = None
+        if self._allow_ai_estimation(state) and initial_research_insufficient:
             estimated = await self._estimate_human_signals(state, report)
             structured_accumulator = self._merge_structured_schema(structured_accumulator, estimated)
             structured_accumulator["estimation_mode"] = "ai_estimation"
@@ -230,9 +239,27 @@ class SearchAgent(BaseAgent):
             report.summary = str(structured_accumulator.get("summary") or "").strip() or report.summary
             report.findings = self._structured_findings(structured_accumulator) or report.findings
             report.gaps = [str(item) for item in structured_accumulator.get("gaps") or [] if str(item).strip()] or report.gaps
+            estimation_mode = "ai_estimation"
 
+        research_insufficient = self._research_is_insufficient(report)
+        fatal_search_failure = self._fatal_search_failure(report)
+        research_contract_ready = self._research_contract_satisfied(report)
+        research_warnings: List[str] = []
+        research_blockers: List[str] = []
+        if estimation_mode == "ai_estimation":
+            research_warnings.append("used_ai_estimation_due_to_weak_search")
+        if initial_research_insufficient:
+            research_warnings.append("research_insufficient_for_personas")
+        if fatal_search_failure:
+            research_blockers.append("fatal_search_failure")
+
+        estimation_allowed = self._allow_ai_estimation(state)
         state.research = report
-        state.search_completed = not self._research_is_insufficient(report)
+        state.search_completed = bool(
+            research_contract_ready
+            and not fatal_search_failure
+            and not (research_insufficient and not estimation_allowed)
+        )
         state.schema.update(
             {
                 "idea": context.get("idea"),
@@ -245,6 +272,12 @@ class SearchAgent(BaseAgent):
                 "research_visible_insights": list(report.structured_schema.get("visible_insights") or []),
                 "research_expandable_reasoning": list(report.structured_schema.get("expandable_reasoning") or []),
                 "research_confidence_score": float(report.structured_schema.get("confidence_score") or 0.0),
+                "research_output_ready": state.search_completed,
+                "research_insufficiency_reason": "research_insufficient_for_personas" if initial_research_insufficient else None,
+                "research_estimation_mode": estimation_mode,
+                "research_warnings": research_warnings,
+                "research_blockers": research_blockers,
+                "fatal_search_failure": fatal_search_failure,
             }
         )
         state.set_pipeline_step(
@@ -262,14 +295,19 @@ class SearchAgent(BaseAgent):
             {
                 "agent": self.name,
                 "action": "search_completed",
-                "status": "ok",
+                "status": "failed" if fatal_search_failure else ("warning" if estimation_mode == "ai_estimation" else "ok"),
                 "progress_pct": 100,
-                "meta": {"query_count": len(query_plan), "evidence_count": len(report.evidence)},
+                "meta": {
+                    "query_count": len(query_plan),
+                    "evidence_count": len(report.evidence),
+                    "estimation_mode": estimation_mode,
+                    "research_warnings": research_warnings,
+                },
                 "snippet": report.summary[:320],
             },
             persist_research=True,
         )
-        if self._research_is_insufficient(report) and not self._allow_ai_estimation(state):
+        if fatal_search_failure or (research_insufficient and not estimation_allowed):
             await self._pause_for_research_review(state, report)
         return state
 
@@ -486,7 +524,43 @@ class SearchAgent(BaseAgent):
             or state.schema.get("research_estimation_mode")
             or ""
         ).strip().lower()
-        return value in {"ai", "ai_estimation", "use_ai_estimation", "estimated"}
+        if not value:
+            return True
+        if value in {"retry", "retry_search", "strict_web_only", "web_only", "manual_only"}:
+            return False
+        return value in {"ai", "ai_estimation", "use_ai_estimation", "estimated", "auto", "auto_ai"}
+
+    def _research_contract_satisfied(self, report: ResearchReport) -> bool:
+        structured = report.structured_schema if isinstance(report.structured_schema, dict) else {}
+        if not str(structured.get("summary") or "").strip():
+            return False
+        required_scalars = ("competition_level", "demand_level", "price_sensitivity")
+        if any(not str(structured.get(key) or "").strip() for key in required_scalars):
+            return False
+        sentiment = structured.get("user_sentiment") if isinstance(structured.get("user_sentiment"), dict) else {}
+        sentiment_count = sum(
+            len([str(item).strip() for item in sentiment.get(key, []) if str(item).strip()])
+            for key in ("positive", "negative", "neutral")
+        )
+        signal_count = sum(
+            len([str(item).strip() for item in structured.get(key) or [] if str(item).strip()])
+            for key in ("signals", "complaints", "behaviors", "behavior_patterns", "gaps_in_market")
+        )
+        return sentiment_count >= 1 and signal_count >= 3
+
+    def _fatal_search_failure(self, report: ResearchReport) -> bool:
+        structured = report.structured_schema if isinstance(report.structured_schema, dict) else {}
+        summary = str(structured.get("summary") or report.summary or "").strip()
+        sentiment = structured.get("user_sentiment") if isinstance(structured.get("user_sentiment"), dict) else {}
+        sentiment_count = sum(
+            len([str(item).strip() for item in sentiment.get(key, []) if str(item).strip()])
+            for key in ("positive", "negative", "neutral")
+        )
+        signal_count = sum(
+            len([str(item).strip() for item in structured.get(key) or [] if str(item).strip()])
+            for key in ("signals", "complaints", "behaviors", "behavior_patterns", "gaps_in_market")
+        )
+        return not report.evidence and not summary and sentiment_count == 0 and signal_count == 0
 
     def _research_is_insufficient(self, report: ResearchReport) -> bool:
         structured = report.structured_schema if isinstance(report.structured_schema, dict) else {}
@@ -553,7 +627,31 @@ class SearchAgent(BaseAgent):
             temperature=0.2,
             fallback_json=fallback,
         )
-        payload["confidence_score"] = min(0.64, max(float(payload.get("confidence_score") or 0.0), 0.38))
+        payload["market_presence"] = str(payload.get("market_presence") or fallback["market_presence"] or "emerging").strip()
+        payload["competition_level"] = str(payload.get("competition_level") or fallback["competition_level"] or "medium").strip() or "medium"
+        payload["demand_level"] = str(payload.get("demand_level") or fallback["demand_level"] or "medium").strip() or "medium"
+        payload["price_sensitivity"] = str(payload.get("price_sensitivity") or fallback["price_sensitivity"] or "medium").strip() or "medium"
+        payload["summary"] = str(payload.get("summary") or fallback["summary"] or "فيه اهتمام مبدئي لكن الإشارات المباشرة قليلة، فتم استكمال الصورة بتقدير منطقي من السياق.").strip()
+        for key, default_values in {
+            "signals": ["فيه اهتمام مبدئي لكن القرار حساس للسعر."],
+            "complaints": ["الناس محتاجة عرض أوضح قبل الالتزام."],
+            "behaviors": ["الناس بتقارن قبل ما تشتري."],
+            "behavior_patterns": ["التجربة الصغيرة أسهل من الالتزام الكبير."],
+            "gaps_in_market": ["فيه فرصة لعرض أوضح وأسهل في التجربة."],
+            "gaps": ["ما زلنا نحتاج إشارات مباشرة أكثر من السوق."],
+            "visible_insights": ["المعطيات الحية قليلة، فتم استكمالها بتقدير منخفض الثقة."],
+            "expandable_reasoning": ["تم الاعتماد على الفكرة والسوق المحلي والإشارات الضعيفة المتاحة لبناء صورة أولية قابلة للاستخدام downstream."],
+        }.items():
+            values = payload.get(key)
+            cleaned = [str(item).strip() for item in values] if isinstance(values, list) else []
+            payload[key] = cleaned or list(default_values)
+        sentiment = payload.get("user_sentiment") if isinstance(payload.get("user_sentiment"), dict) else {}
+        payload["user_sentiment"] = {
+            "positive": [str(item).strip() for item in sentiment.get("positive", []) if str(item).strip()] or ["فيه فضول مبدئي لو العرض كان واضح."],
+            "negative": [str(item).strip() for item in sentiment.get("negative", []) if str(item).strip()] or ["السعر أو الالتزام الكبير ممكن يبطّأ القرار."],
+            "neutral": [str(item).strip() for item in sentiment.get("neutral", []) if str(item).strip()] or ["الناس غالبًا هتحتاج تجربة بسيطة الأول."],
+        }
+        payload["confidence_score"] = min(0.64, max(float(payload.get("confidence_score") or 0.0), 0.42))
         return payload
 
     async def _pause_for_research_review(self, state: OrchestrationState, report: ResearchReport) -> None:

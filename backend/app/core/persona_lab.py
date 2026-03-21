@@ -204,7 +204,8 @@ def _normalize_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     source_mode = str(payload.get("source_mode") or "").strip().lower()
     if source_mode not in LAB_SOURCE_MODES:
         raise ValueError("persona_source_mode_invalid")
-    desired_count = _clamp_int(payload.get("desired_count"), minimum=10, maximum=50, fallback=30)
+    minimum_persona_threshold = _clamp_int(payload.get("minimum_persona_threshold"), minimum=5, maximum=50, fallback=15)
+    desired_count = _clamp_int(payload.get("desired_count"), minimum=minimum_persona_threshold, maximum=50, fallback=30)
     generation_depth = str(payload.get("generation_depth") or "standard").strip().lower()
     if generation_depth not in {"standard", "deep"}:
         generation_depth = "standard"
@@ -222,7 +223,7 @@ def _normalize_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "source_mode": source_mode,
         "desired_count": desired_count,
-        "minimum_persona_threshold": _clamp_int(payload.get("minimum_persona_threshold"), minimum=5, maximum=50, fallback=15),
+        "minimum_persona_threshold": minimum_persona_threshold,
         "target_audience_family": audience_family,
         "place": place,
         "saved_set_key": saved_set_key,

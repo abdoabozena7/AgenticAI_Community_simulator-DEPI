@@ -223,6 +223,17 @@ export interface SimulationStateResponse {
   pipeline?: {
     ready_for_simulation?: boolean;
     blockers?: string[];
+    actively_blocked?: boolean;
+    blocker_details?: Array<{
+      code?: string;
+      phase_key?: string | null;
+      title?: string;
+      message?: string;
+      action?: string | null;
+    }>;
+    blocked_phase?: string | null;
+    warnings?: string[];
+    fatal_errors?: string[];
     steps?: Array<{
       key?: string;
       label?: {
@@ -247,6 +258,7 @@ export interface SimulationStateResponse {
   event_seq?: number;
   pause_available?: boolean;
   summary_ready?: boolean;
+  reasoning_started?: boolean;
   summary_at?: string;
   can_resume?: boolean;
   resume_reason?: string | null;

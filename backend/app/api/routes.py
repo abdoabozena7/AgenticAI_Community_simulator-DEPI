@@ -361,11 +361,17 @@ async def answer_clarifications(payload: Dict[str, Any], authorization: str = He
     state = await _get_orchestrator().answer_clarifications(simulation_id, answers)
     if state is None:
         raise HTTPException(status_code=404, detail="Simulation not found")
+    public = state.to_public_state()
     return {
         "simulation_id": simulation_id,
-        "status": state.status,
-        "status_reason": state.status_reason,
-        "pending_clarification": [item.to_dict() for item in state.pending_questions()],
+        "status": public.get("status"),
+        "status_reason": public.get("status_reason"),
+        "pending_clarification": public.get("pending_clarification"),
+        "can_answer_clarification": public.get("can_answer_clarification"),
+        "pending_input_kind": public.get("pending_input_kind"),
+        "persona_source": public.get("persona_source"),
+        "pipeline": public.get("pipeline"),
+        "schema": public.get("schema"),
     }
 
 

@@ -32,6 +32,7 @@ class EventBus:
         if persist_research:
             message["type"] = "research_update"
             await self._repository.persist_research_event(state.simulation_id, event.seq, payload)
+        await self._repository.save_state(state)
         await self._broadcaster(message)
         return message
 
@@ -59,6 +60,7 @@ class EventBus:
             },
         )
         await self._repository.persist_dialogue_turn(state.simulation_id, turn, event.seq)
+        await self._repository.save_state(state)
         message = event.to_dict(state.simulation_id)
         await self._broadcaster(message)
         return message

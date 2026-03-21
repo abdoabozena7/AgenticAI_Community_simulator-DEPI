@@ -51,12 +51,21 @@ class SimulationOrchestrator:
         self._tasks: Dict[str, asyncio.Task[None]] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
 
+    def _ensure_runtime_collections(self) -> None:
+        if not hasattr(self, "_states") or self._states is None:
+            self._states = {}
+        if not hasattr(self, "_tasks") or self._tasks is None:
+            self._tasks = {}
+        if not hasattr(self, "_locks") or self._locks is None:
+            self._locks = {}
+
     async def start_simulation(
         self,
         *,
         user_context: Dict[str, Any],
         user_id: Optional[int],
     ) -> OrchestrationState:
+        self._ensure_runtime_collections()
         simulation_id = str(uuid.uuid4())
         state = OrchestrationState(
             simulation_id=simulation_id,
@@ -69,6 +78,7 @@ class SimulationOrchestrator:
         return state
 
     async def get_state(self, simulation_id: str) -> Optional[OrchestrationState]:
+        self._ensure_runtime_collections()
         state = self._states.get(simulation_id)
         if state is not None:
             return state
@@ -78,6 +88,7 @@ class SimulationOrchestrator:
         return state
 
     async def pause_simulation(self, simulation_id: str, reason: Optional[str] = None) -> Optional[OrchestrationState]:
+        self._ensure_runtime_collections()
         state = await self.get_state(simulation_id)
         if state is None:
             return None
@@ -86,7 +97,6 @@ class SimulationOrchestrator:
             task.cancel()
         state.status = SimulationStatus.PAUSED.value
         state.status_reason = str(reason or "paused_manual")
-        state.pending_input = False
         await self.repository.save_state(state)
         await self.event_bus.publish(
             state,
@@ -96,12 +106,20 @@ class SimulationOrchestrator:
         return state
 
     async def resume_simulation(self, simulation_id: str) -> Optional[OrchestrationState]:
+        self._ensure_runtime_collections()
         state = await self.get_state(simulation_id)
         if state is None:
             return None
-        if state.pending_questions():
+        state.reconcile_runtime_contracts()
+        if state.pending_input and state.pending_input_kind:
             state.status = SimulationStatus.PAUSED.value
-            state.status_reason = "awaiting_clarification"
+            state.status_reason = {
+                "clarification": "awaiting_clarification",
+                "research_review": "paused_research_review",
+                "orchestrator_intervention": "paused_coach_intervention",
+                "orchestrator_apply_suggestions": "paused_coach_intervention",
+                "execution_followup": "paused_manual",
+            }.get(str(state.pending_input_kind), "paused_manual")
             await self.repository.save_state(state)
             return state
         state.status = SimulationStatus.RUNNING.value
@@ -168,6 +186,7 @@ class SimulationOrchestrator:
             await self.repository.save_state(state)
             return state
         questions_by_id = {question.question_id: question for question in state.clarification_questions}
+        resolved_question_ids: List[str] = []
         for answer in answers:
             question_id = str(answer.get("question_id") or answer.get("questionId") or "").strip()
             text = str(answer.get("answer") or answer.get("text") or "").strip()
@@ -179,20 +198,47 @@ class SimulationOrchestrator:
             state.clarification_answers[question_id] = text
             state.user_context[question.field_name] = text
             state.schema[question.field_name] = text
+            resolved_question_ids.append(question_id)
         if not state.pending_questions():
             state.pending_input = False
-            blockers = state.validate_pipeline_ready_for_simulation()
-            if blockers:
-                state.status = SimulationStatus.ERROR.value
-                state.status_reason = "error"
-                state.error = f"Simulation blocked until pipeline completes: {', '.join(blockers)}"
-                await self.repository.save_state(state)
-            else:
+            if state.pending_input_kind == "clarification":
+                state.pending_input_kind = None
+                state.pending_resume_phase = None
+                if getattr(self, "event_bus", None) is not None and getattr(self, "clarification_agent", None) is not None:
+                    for question_id in resolved_question_ids:
+                        await self.event_bus.publish(
+                            state,
+                            "clarification_resolved",
+                            {
+                                "agent": self.clarification_agent.name,
+                                "question_id": question_id,
+                                "answer_source": "custom",
+                            },
+                        )
+            snapshot = state.pipeline_status_snapshot()
+            blockers = list(snapshot.get("blockers") or [])
+            if not blockers:
                 state.status = SimulationStatus.RUNNING.value
                 state.status_reason = "running"
                 state.current_phase = SimulationPhase.SIMULATION_INITIALIZATION
                 await self.repository.save_state(state)
                 self._schedule(simulation_id, state.current_phase)
+            else:
+                blocked_phase_key = str(snapshot.get("blocked_phase") or "").strip()
+                blocked_phase = (
+                    SimulationPhase(blocked_phase_key)
+                    if blocked_phase_key in {item.value for item in SimulationPhase}
+                    else None
+                )
+                if blocked_phase and phase_position(blocked_phase) >= phase_position(SimulationPhase.INTERNET_RESEARCH):
+                    state.continue_from_phase(blocked_phase, reason="clarification_resolved_resume")
+                    await self.repository.save_state(state)
+                    self._schedule(simulation_id, state.current_phase, force=True)
+                else:
+                    state.status = SimulationStatus.ERROR.value
+                    state.status_reason = "pipeline_blocked"
+                    state.error = f"Simulation blocked until pipeline completes: {', '.join(blockers)}"
+                    await self.repository.save_state(state)
         else:
             await self.repository.save_state(state)
         return state
@@ -202,6 +248,7 @@ class SimulationOrchestrator:
         simulation_id: str,
         updates: Dict[str, Any],
     ) -> Optional[Tuple[OrchestrationState, ChangeImpact, SimulationPhase]]:
+        self._ensure_runtime_collections()
         state = await self.get_state(simulation_id)
         if state is None:
             return None
@@ -212,7 +259,12 @@ class SimulationOrchestrator:
         changed_fields = sorted(key for key in normalized.keys() if normalized.get(key) != state.user_context.get(key))
         state.user_context = normalized
         state.last_change_impact = impact.value
-        if phase_position(state.current_phase) >= phase_position(SimulationPhase.SIMULATION_INITIALIZATION):
+        can_resume_inside_deliberation = (
+            impact == ChangeImpact.SMALL
+            and rollback_phase == SimulationPhase.AGENT_DELIBERATION
+            and phase_position(state.current_phase) >= phase_position(SimulationPhase.SIMULATION_INITIALIZATION)
+        )
+        if can_resume_inside_deliberation:
             state.deliberation_state.setdefault("pending_context_updates", [])
             state.deliberation_state["pending_context_updates"].append(
                 {
@@ -256,10 +308,12 @@ class SimulationOrchestrator:
         }
 
     def is_running(self, simulation_id: str) -> bool:
+        self._ensure_runtime_collections()
         task = self._tasks.get(simulation_id)
         return bool(task and not task.done())
 
     def _schedule(self, simulation_id: str, start_phase: SimulationPhase, force: bool = False) -> None:
+        self._ensure_runtime_collections()
         task = self._tasks.get(simulation_id)
         if task and not task.done() and not force:
             return
@@ -273,7 +327,8 @@ class SimulationOrchestrator:
                 return
             state.current_phase = start_phase
             state.status = SimulationStatus.RUNNING.value
-            state.status_reason = "running"
+            if not str(state.status_reason or "").strip() or state.status_reason in {"paused_manual", "awaiting_clarification"}:
+                state.status_reason = "running"
             state.error = None
             await self.repository.save_state(state)
 
@@ -331,6 +386,7 @@ class SimulationOrchestrator:
                 )
 
     async def _run_phase(self, state: OrchestrationState, phase: SimulationPhase) -> bool:
+        state.refresh_persona_source_resolution()
         if phase == SimulationPhase.IDEA_INTAKE:
             return await self._run_idea_intake(state)
         if phase == SimulationPhase.CONTEXT_CLASSIFICATION:
@@ -357,12 +413,19 @@ class SimulationOrchestrator:
         if phase == SimulationPhase.CLARIFICATION_QUESTIONS:
             await self.clarification_agent.run(state)
             if state.pending_input:
+                question = state.active_pending_clarification()
                 await self.event_bus.publish(
                     state,
-                    "clarification_requested",
+                    "clarification_request",
                     {
                         "agent": self.clarification_agent.name,
-                        "questions": [item.to_dict() for item in state.pending_questions()],
+                        "question_id": question.question_id if question else None,
+                        "question": question.prompt if question else "",
+                        "options": [{"id": option or f"opt_{index + 1}", "label": option} for index, option in enumerate(question.options)] if question else [],
+                        "reason_tag": question.field_name if question else None,
+                        "reason_summary": question.reason if question else None,
+                        "created_at": state.updated_at,
+                        "required": True,
                     },
                 )
                 return True
@@ -375,7 +438,19 @@ class SimulationOrchestrator:
         if phase == SimulationPhase.SIMULATION_INITIALIZATION:
             blockers = state.validate_pipeline_ready_for_simulation()
             if blockers:
-                raise RuntimeError(f"Simulation blocked until pipeline completes: {', '.join(blockers)}")
+                state.status = SimulationStatus.ERROR.value
+                state.status_reason = "pipeline_blocked"
+                state.error = f"Simulation blocked until pipeline completes: {', '.join(blockers)}"
+                await self.event_bus.publish(
+                    state,
+                    "pipeline_blocked",
+                    {
+                        "agent": "orchestrator",
+                        "blockers": blockers,
+                        "pipeline": state.schema.get("pipeline_status") or {},
+                    },
+                )
+                return True
             await self.simulation_agent.initialize_simulation(state)
             await self.event_bus.publish(
                 state,
@@ -446,17 +521,14 @@ class SimulationOrchestrator:
             detail="Determining whether the idea is location-based, general, or hybrid.",
         )
         context_type = classify_idea_context(state.user_context)
-        persona_source_mode, auto_selected = resolve_persona_source_mode(
-            state.user_context,
-            context_type=context_type,
-        )
+        state.idea_context_type = context_type.value
+        persona_source_mode, auto_selected = state.resolve_persona_source_contract()
         location_label = context_location_label(state.user_context)
         notice: Optional[str] = None
-        if not location_label:
+        if persona_source_mode == resolve_persona_source_mode(state.user_context, context_type=context_type)[0] and not location_label:
             notice = (
                 "This idea looks general, so the system will use default audience personas unless you choose to generate custom personas."
             )
-        state.idea_context_type = context_type.value
         state.persona_source_mode = persona_source_mode
         state.persona_source_auto_selected = auto_selected
         state.persona_source_notice = notice
@@ -492,11 +564,14 @@ class SimulationOrchestrator:
         updated: Dict[str, Any],
         current_phase: SimulationPhase,
     ) -> Tuple[ChangeImpact, SimulationPhase]:
-        major_fields = {"idea", "category", "country", "city", "location"}
+        major_fields = {"idea", "category", "country", "city", "location", "place_name"}
         medium_fields = {"targetAudience", "valueProposition", "monetization", "deliveryModel", "riskBoundary"}
+        persona_fields = {"personaSourceMode", "personaSetKey", "personaSetLabel"}
         changed = {key for key in updated.keys() if updated.get(key) != previous.get(key)}
         if changed & major_fields:
             return ChangeImpact.MAJOR, SimulationPhase.CONTEXT_CLASSIFICATION
+        if changed & persona_fields:
+            return ChangeImpact.MAJOR, SimulationPhase.PERSONA_GENERATION
         if changed & medium_fields:
             return ChangeImpact.MAJOR, SimulationPhase.INTERNET_RESEARCH
         if phase_position(current_phase) >= phase_position(SimulationPhase.AGENT_DELIBERATION):

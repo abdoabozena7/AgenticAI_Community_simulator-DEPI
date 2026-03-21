@@ -86,6 +86,106 @@ PIPELINE_STEP_LABELS: Dict[str, Dict[str, str]] = {
 }
 
 
+PIPELINE_BLOCKER_META: Dict[str, Dict[str, str]] = {
+    "search_did_not_run": {
+        "phase": SimulationPhase.INTERNET_RESEARCH.value,
+        "title": "Search did not run",
+        "message": "Internet research must complete before personas can be generated.",
+        "action": "Run the mandatory search step first.",
+    },
+    "research_insufficient_for_personas": {
+        "phase": SimulationPhase.INTERNET_RESEARCH.value,
+        "title": "Research is still too weak",
+        "message": "The search finished, but the research output is still too weak for safe downstream persona generation.",
+        "action": "Retry search or switch to AI estimation so structured research becomes usable.",
+    },
+    "fatal_search_failure": {
+        "phase": SimulationPhase.INTERNET_RESEARCH.value,
+        "title": "Research failed completely",
+        "message": "The system could not build any usable research state from search or estimation.",
+        "action": "Retry the search with a clearer idea or a stronger location signal.",
+    },
+    "persona_generation_not_finished": {
+        "phase": SimulationPhase.PERSONA_GENERATION.value,
+        "title": "Persona generation not finished",
+        "message": "The system still needs to finish building personas before the simulation can start.",
+        "action": "Wait for persona generation or rerun it if the upstream context changed.",
+    },
+    "persona_persistence_not_finished": {
+        "phase": SimulationPhase.PERSONA_PERSISTENCE.value,
+        "title": "Persona persistence not finished",
+        "message": "Generated personas were not persisted yet, so the reusable dataset contract is incomplete.",
+        "action": "Persist the persona set before starting the simulation.",
+    },
+    "persona_source_unresolved": {
+        "phase": SimulationPhase.PERSONA_GENERATION.value,
+        "title": "Persona source is unresolved",
+        "message": "The pipeline still does not know which persona source should govern the run.",
+        "action": "Resolve the persona source automatically from the generated personas or pick one explicit source.",
+    },
+    "persona_validation_failed": {
+        "phase": SimulationPhase.PERSONA_GENERATION.value,
+        "title": "Persona validation failed",
+        "message": "The generated persona set has fatal validation issues and cannot be used yet.",
+        "action": "Fix the fatal persona validation errors before continuing.",
+    },
+    "persona_count_zero": {
+        "phase": SimulationPhase.PERSONA_GENERATION.value,
+        "title": "No personas were generated",
+        "message": "Persona generation produced zero usable personas.",
+        "action": "Rerun persona generation from a usable research state.",
+    },
+    "persona_count_below_simulation_minimum": {
+        "phase": SimulationPhase.PERSONA_GENERATION.value,
+        "title": "Persona count is below the simulation minimum",
+        "message": "The persona set was saved, but the count is still below the minimum threshold for simulation.",
+        "action": "Generate more personas or lower the configured threshold if policy allows it.",
+    },
+    "diversity_score_below_threshold": {
+        "phase": SimulationPhase.PERSONA_GENERATION.value,
+        "title": "Persona diversity is too low",
+        "message": "The persona set does not have enough diversity to support a healthy simulation discussion yet.",
+        "action": "Regenerate personas with broader signals or a wider audience mix.",
+    },
+    "schema_incomplete": {
+        "phase": SimulationPhase.PERSONA_GENERATION.value,
+        "title": "Persona schema is incomplete",
+        "message": "Some generated personas are missing required fields.",
+        "action": "Regenerate personas until the schema is complete.",
+    },
+    "source_attribution_missing": {
+        "phase": SimulationPhase.PERSONA_GENERATION.value,
+        "title": "Persona attribution is missing",
+        "message": "At least one persona is missing source attribution.",
+        "action": "Regenerate personas with traceable evidence links.",
+    },
+    "persona_signal_trace_invalid": {
+        "phase": SimulationPhase.PERSONA_GENERATION.value,
+        "title": "Persona evidence trace is invalid",
+        "message": "At least one persona cannot be traced back to approved signals.",
+        "action": "Regenerate personas from the structured research signals.",
+    },
+    "duplicate_display_name": {
+        "phase": SimulationPhase.PERSONA_GENERATION.value,
+        "title": "Duplicate personas were detected",
+        "message": "The persona set still contains duplicate display names.",
+        "action": "Regenerate personas and remove duplicates before simulation.",
+    },
+    "duplicate_persona_id": {
+        "phase": SimulationPhase.PERSONA_GENERATION.value,
+        "title": "Duplicate persona IDs were detected",
+        "message": "The persona set still contains duplicate IDs.",
+        "action": "Regenerate personas and ensure unique IDs before simulation.",
+    },
+    "clarification_pending": {
+        "phase": SimulationPhase.CLARIFICATION_QUESTIONS.value,
+        "title": "Clarification is still required",
+        "message": "A required clarification is still waiting for an answer before the simulation can continue.",
+        "action": "Answer the active clarification question to continue the pipeline.",
+    },
+}
+
+
 PERSONA_SOURCE_OPTIONS: List[Dict[str, str]] = [
     {"mode": PersonaSourceMode.DEFAULT_AUDIENCE_ONLY.value, "label": "Default audience personas only"},
     {"mode": PersonaSourceMode.SAVED_PLACE_PERSONAS.value, "label": "Saved place personas"},
@@ -124,6 +224,29 @@ def _normalize_persona_source_mode(value: Any) -> Optional[str]:
 
 def normalize_context(context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     payload = dict(context or {})
+    preflight_answers = payload.get("preflight_answers")
+    if isinstance(preflight_answers, dict):
+        alias_map = {
+            "value_promise": "valueProposition",
+            "value_proposition": "valueProposition",
+            "target_audience": "targetAudience",
+            "audience": "targetAudience",
+            "monetization": "monetization",
+            "pricing": "monetization",
+            "delivery_model": "deliveryModel",
+            "delivery": "deliveryModel",
+            "risk_boundary": "riskBoundary",
+            "risk_limit": "riskBoundary",
+            "persona_source_mode": "personaSourceMode",
+            "context_scope": "contextScope",
+        }
+        for source_key, target_key in alias_map.items():
+            if payload.get(target_key) not in (None, "", []):
+                continue
+            value = preflight_answers.get(source_key)
+            if value in (None, "", []):
+                continue
+            payload[target_key] = value
     try:
         agent_count = int(payload.get("agentCount") or payload.get("agent_count") or 24)
     except (TypeError, ValueError):
@@ -251,7 +374,7 @@ def resolve_persona_source_mode(
     if explicit:
         return explicit, False
     if context_location_label(context):
-        return PersonaSourceMode.GENERATE_NEW_FROM_PLACE.value, True
+        return PersonaSourceMode.GENERATE_NEW_FROM_SEARCH.value, True
     if context_type == IdeaContextType.GENERAL_NON_LOCATION:
         return PersonaSourceMode.DEFAULT_AUDIENCE_ONLY.value, True
     return PersonaSourceMode.GENERATE_NEW_FROM_SEARCH.value, True
@@ -660,6 +783,67 @@ class OrchestrationState:
     persona_persistence_completed: bool = False
     simulation_ready: bool = False
 
+    def _research_contract_ready(self) -> bool:
+        if bool(self.schema.get("fatal_search_failure")):
+            return False
+        if bool(self.schema.get("research_output_ready")):
+            return True
+        if self.search_completed and (self.persona_generation_completed or self.persona_persistence_completed or self.personas):
+            return True
+        structured = self.research.structured_schema if self.research and isinstance(self.research.structured_schema, dict) else {}
+        if not str(structured.get("summary") or "").strip():
+            return False
+        if any(not str(structured.get(key) or "").strip() for key in ("competition_level", "demand_level", "price_sensitivity")):
+            return False
+        sentiment = structured.get("user_sentiment") if isinstance(structured.get("user_sentiment"), dict) else {}
+        sentiment_count = sum(
+            len([str(item).strip() for item in sentiment.get(key) or [] if str(item).strip()])
+            for key in ("positive", "negative", "neutral")
+        )
+        signal_count = sum(
+            len([str(item).strip() for item in structured.get(key) or [] if str(item).strip()])
+            for key in ("signals", "complaints", "behaviors", "behavior_patterns", "gaps_in_market")
+        )
+        return sentiment_count >= 1 and signal_count >= 3
+
+    def _persona_generation_ready(self) -> bool:
+        validation = self._validation_snapshot()
+        actual_count = max(len(self.personas), int(validation.get("actual_count") or 0))
+        return bool(self.persona_generation_completed and actual_count > 0)
+
+    def _persona_persistence_ready(self) -> bool:
+        return bool(self.persona_persistence_completed and (self.persona_set or self.personas))
+
+    def pending_questions_snapshot(self) -> List[ClarificationQuestion]:
+        answered = set(self.clarification_answers.keys())
+        return [
+            question
+            for question in self.clarification_questions
+            if question.question_id not in answered and not self.is_field_resolved(question.field_name)
+        ]
+
+    def active_pending_clarification(self) -> Optional[ClarificationQuestion]:
+        if not self.pending_input or self.pending_input_kind != "clarification":
+            return None
+        questions = self.pending_questions_snapshot()
+        return questions[0] if questions else None
+
+    def reconcile_runtime_contracts(self) -> None:
+        self.search_completed = self._research_contract_ready()
+        validation = self._validation_snapshot()
+        actual_count = max(len(self.personas), int(validation.get("actual_count") or 0))
+        if actual_count <= 0:
+            self.persona_generation_completed = False
+        if not self.personas and actual_count <= 0:
+            self.persona_generation_completed = False
+        if not self.persona_set and not self.personas:
+            self.persona_persistence_completed = False
+        self.refresh_persona_source_resolution()
+        self.prune_stale_clarifications()
+        if self.pending_input_kind != "clarification" and not self.pending_input:
+            self.clarification_questions = []
+            self.clarification_answers = {}
+
     def phase_progress_pct(self) -> float:
         base = phase_position(self.current_phase)
         completed = len(self.completed_phases)
@@ -724,33 +908,222 @@ class OrchestrationState:
         self.simulation_ready = False
         self.updated_at = now_ms()
 
-    def pipeline_blockers(self) -> List[str]:
-        blockers: List[str] = []
-        if not self.search_completed:
-            blockers.append("search_did_not_run")
-        if not self.persona_generation_completed:
-            blockers.append("persona_generation_not_finished")
-        if not self.persona_persistence_completed:
-            blockers.append("persona_persistence_not_finished")
-        if not self.persona_source_mode:
-            blockers.append("persona_source_unresolved")
-        if self.persona_validation_errors:
-            blockers.append("persona_validation_failed")
+    def _validation_snapshot(self) -> Dict[str, Any]:
         validation = (self.persona_generation_debug or {}).get("validation") if isinstance(self.persona_generation_debug, dict) else {}
-        if isinstance(validation, dict):
-            if int(validation.get("actual_count") or 0) <= 0:
+        if not isinstance(validation, dict):
+            validation = {}
+        return {
+            "fatal_errors": [str(item).strip() for item in validation.get("fatal_errors") or [] if str(item).strip()],
+            "simulation_blockers": [str(item).strip() for item in validation.get("simulation_blockers") or [] if str(item).strip()],
+            "warnings": [str(item).strip() for item in validation.get("warnings") or [] if str(item).strip()],
+            "actual_count": int(validation.get("actual_count") or 0),
+            "raw": validation,
+        }
+
+    def resolve_persona_source_contract(self) -> tuple[Optional[str], bool]:
+        requested_mode = _normalize_persona_source_mode(self.user_context.get("personaSourceMode"))
+        selected_set_key = str(self.user_context.get("personaSetKey") or "").strip()
+        if requested_mode == PersonaSourceMode.SAVED_PLACE_PERSONAS.value or selected_set_key:
+            return PersonaSourceMode.SAVED_PLACE_PERSONAS.value, bool(not requested_mode)
+
+        if self.persona_generation_completed and self.personas:
+            source_kinds = {
+                str((persona.source_attribution or {}).get("kind") or "").strip()
+                for persona in self.personas
+                if isinstance(persona.source_attribution, dict)
+            }
+            source_kinds.discard("")
+            if requested_mode == PersonaSourceMode.DEFAULT_AUDIENCE_ONLY.value:
+                return PersonaSourceMode.DEFAULT_AUDIENCE_ONLY.value, False
+            if source_kinds and source_kinds <= {"audience_fallback"}:
+                return PersonaSourceMode.DEFAULT_AUDIENCE_ONLY.value, True
+            if self._research_contract_ready():
+                return PersonaSourceMode.GENERATE_NEW_FROM_SEARCH.value, True
+
+        if requested_mode:
+            return requested_mode, False
+
+        if context_location_label(self.user_context):
+            return PersonaSourceMode.GENERATE_NEW_FROM_SEARCH.value, True
+        if (self.idea_context_type or "") == IdeaContextType.GENERAL_NON_LOCATION.value:
+            return PersonaSourceMode.DEFAULT_AUDIENCE_ONLY.value, True
+        if self._research_contract_ready():
+            return PersonaSourceMode.GENERATE_NEW_FROM_SEARCH.value, True
+        return None, False
+
+    def refresh_persona_source_resolution(self) -> Optional[str]:
+        mode, auto_selected = self.resolve_persona_source_contract()
+        self.persona_source_mode = mode
+        self.persona_source_auto_selected = auto_selected if mode else False
+        self.user_context["personaSourceMode"] = mode or ""
+        self.schema["persona_source"] = mode or ""
+        self.schema["persona_source_auto_selected"] = self.persona_source_auto_selected
+        return mode
+
+    def is_field_resolved(self, field_name: str) -> bool:
+        direct_value = self.user_context.get(field_name)
+        if isinstance(direct_value, str) and direct_value.strip():
+            return True
+        if isinstance(direct_value, list) and any(str(item).strip() for item in direct_value):
+            return True
+        schema_value = self.schema.get(field_name)
+        if isinstance(schema_value, str) and schema_value.strip():
+            return True
+        if isinstance(schema_value, list) and any(str(item).strip() for item in schema_value):
+            return True
+
+        aliases = {
+            "targetAudience": "targetAudience",
+            "target_audience": "targetAudience",
+            "valueProposition": "valueProposition",
+            "monetization": "monetization",
+            "deliveryModel": "deliveryModel",
+            "riskBoundary": "riskBoundary",
+            "personaSourceMode": "personaSourceMode",
+        }
+        key = aliases.get(field_name, field_name)
+        if key == "targetAudience":
+            audience = self.user_context.get("targetAudience") or self.schema.get("targetAudience") or []
+            return isinstance(audience, list) and any(str(item).strip() for item in audience)
+        if key == "personaSourceMode":
+            return bool(self.refresh_persona_source_resolution())
+        return False
+
+    def prune_stale_clarifications(self) -> None:
+        filtered = []
+        answered = {}
+        for question in self.clarification_questions:
+            if self.is_field_resolved(question.field_name):
+                continue
+            filtered.append(question)
+            if question.question_id in self.clarification_answers:
+                answered[question.question_id] = self.clarification_answers[question.question_id]
+        self.clarification_questions = filtered
+        self.clarification_answers = answered
+        if not self.clarification_questions and self.pending_input_kind == "clarification":
+            self.pending_input = False
+            self.pending_input_kind = None
+            self.pending_resume_phase = None
+
+    def pipeline_status_snapshot(self) -> Dict[str, Any]:
+        validation = self._validation_snapshot()
+        actual_count = max(len(self.personas), int(validation.get("actual_count") or 0))
+        persona_source_mode, persona_source_auto_selected = self.resolve_persona_source_contract()
+        pending_questions = self.pending_questions_snapshot()
+        blockers: List[str] = []
+        research_warnings = [
+            str(item).strip()
+            for item in self.schema.get("research_warnings") or []
+            if str(item).strip()
+        ]
+        research_blockers = [
+            str(item).strip()
+            for item in self.schema.get("research_blockers") or []
+            if str(item).strip()
+        ]
+        warnings = list(dict.fromkeys(validation["warnings"] + research_warnings))
+        fatal_errors = list(dict.fromkeys(validation["fatal_errors"]))
+        search_ready = self._research_contract_ready()
+        persona_generation_ready = self._persona_generation_ready()
+        persona_persistence_ready = self._persona_persistence_ready()
+
+        if self.pending_input_kind == "research_review":
+            blockers.append("research_insufficient_for_personas")
+        elif not search_ready:
+            if research_blockers:
+                blockers.extend(research_blockers)
+            elif self.research is not None and isinstance(self.research.structured_schema, dict):
+                blockers.append("research_insufficient_for_personas")
+            else:
+                blockers.append("search_did_not_run")
+        elif not persona_generation_ready:
+            blockers.append("persona_generation_not_finished")
+            if actual_count <= 0:
                 blockers.append("persona_count_zero")
-            for item in validation.get("simulation_blockers") or []:
-                text = str(item).strip()
-                if text:
-                    blockers.append(text)
-        return blockers
+        else:
+            if not persona_source_mode:
+                blockers.append("persona_source_unresolved")
+            if fatal_errors:
+                blockers.extend(fatal_errors)
+                blockers.append("persona_validation_failed")
+            blockers.extend(validation["simulation_blockers"])
+            if self.pending_input_kind == "clarification" and pending_questions:
+                blockers.append("clarification_pending")
+            elif not blockers and not persona_persistence_ready:
+                blockers.append("persona_persistence_not_finished")
+
+        unique_blockers = list(dict.fromkeys([item for item in blockers if item]))
+        blocker_details: List[Dict[str, Any]] = []
+        blocked_phase = None
+        for code in unique_blockers:
+            meta = PIPELINE_BLOCKER_META.get(code) or {}
+            phase_key = str(meta.get("phase") or (
+                SimulationPhase.INTERNET_RESEARCH.value
+                if code.startswith("search") or code.startswith("research")
+                else SimulationPhase.PERSONA_GENERATION.value
+            ))
+            blocked_phase = blocked_phase or phase_key
+            blocker_details.append(
+                {
+                    "code": code,
+                    "phase_key": phase_key,
+                    "title": str(meta.get("title") or code.replace("_", " ")).strip(),
+                    "message": str(meta.get("message") or code.replace("_", " ")).strip(),
+                    "action": str(meta.get("action") or "").strip() or None,
+                }
+            )
+        actively_blocked = bool(unique_blockers) and (
+            (
+                self.status == SimulationStatus.ERROR.value
+                and str(self.status_reason or "").strip() == "pipeline_blocked"
+            )
+            or phase_position(self.current_phase) >= phase_position(SimulationPhase.SIMULATION_INITIALIZATION)
+        )
+        return {
+            "ready_for_simulation": len(unique_blockers) == 0,
+            "blockers": unique_blockers,
+            "blocker_details": blocker_details,
+            "blocked_phase": blocked_phase,
+            "actively_blocked": actively_blocked,
+            "warnings": warnings,
+            "fatal_errors": fatal_errors,
+            "validation": validation["raw"],
+            "persona_source_mode": persona_source_mode,
+            "persona_source_auto_selected": persona_source_auto_selected,
+        }
+
+    def pipeline_blockers(self) -> List[str]:
+        return list(self.pipeline_status_snapshot().get("blockers") or [])
 
     def validate_pipeline_ready_for_simulation(self) -> List[str]:
-        blockers = self.pipeline_blockers()
-        self.simulation_ready = len(blockers) == 0
+        self.reconcile_runtime_contracts()
+        snapshot = self.pipeline_status_snapshot()
+        blockers = list(snapshot.get("blockers") or [])
+        self.simulation_ready = bool(snapshot.get("ready_for_simulation"))
+        self.persona_source_mode = snapshot.get("persona_source_mode")
+        self.persona_source_auto_selected = bool(snapshot.get("persona_source_auto_selected"))
+        self.schema["pipeline_status"] = snapshot
         if self.simulation_ready:
             self.set_pipeline_step("ready_for_simulation", "completed", detail="Pipeline validated.")
+        else:
+            blocked_detail = " | ".join(
+                str(item.get("message") or "").strip()
+                for item in snapshot.get("blocker_details") or []
+                if isinstance(item, dict) and str(item.get("message") or "").strip()
+            )[:320]
+            self.set_pipeline_step(
+                "ready_for_simulation",
+                "blocked" if snapshot.get("actively_blocked") else "pending",
+                detail=(
+                    (blocked_detail or "The pipeline is blocked until required upstream state is resolved.")
+                    if snapshot.get("actively_blocked")
+                    else "Upstream stages are still running; simulation readiness will unlock automatically."
+                ),
+                meta={
+                    "blocked_phase": snapshot.get("blocked_phase"),
+                    "actively_blocked": bool(snapshot.get("actively_blocked")),
+                },
+            )
         return blockers
 
     def rollback_to(self, phase: SimulationPhase, reason: str) -> None:
@@ -761,6 +1134,8 @@ class OrchestrationState:
         self.status = SimulationStatus.RUNNING.value
         self.status_reason = "rollback"
         self.pending_input = False
+        self.pending_input_kind = None
+        self.pending_resume_phase = None
         self.summary = ""
         self.summary_ready = False
         self.error = None
@@ -823,6 +1198,15 @@ class OrchestrationState:
         if keep <= phase_position(SimulationPhase.PERSONA_PERSISTENCE):
             self.persona_persistence_completed = False
             self.persona_set = None
+        if keep <= phase_position(SimulationPhase.CLARIFICATION_QUESTIONS):
+            self.clarification_questions = []
+            self.clarification_answers = {}
+        if keep <= phase_position(SimulationPhase.AGENT_DELIBERATION):
+            self.dialogue_turns = []
+            self.argument_bank = []
+            self.critical_insights = []
+            self.deliberation_state = {}
+            self.metrics = {}
         self.updated_at = now_ms()
 
     def next_phase(self) -> Optional[SimulationPhase]:
@@ -845,20 +1229,21 @@ class OrchestrationState:
         return event
 
     def pending_questions(self) -> List[ClarificationQuestion]:
-        answered = set(self.clarification_answers.keys())
-        return [question for question in self.clarification_questions if question.question_id not in answered]
+        self.prune_stale_clarifications()
+        return self.pending_questions_snapshot()
 
     def persona_source_options(self) -> List[Dict[str, Any]]:
+        resolved_mode, auto_selected = self.resolve_persona_source_contract()
         location_present = bool(context_location_label(self.user_context))
         options: List[Dict[str, Any]] = []
         for item in PERSONA_SOURCE_OPTIONS:
-            mode = item["mode"]
-            if mode == PersonaSourceMode.GENERATE_NEW_FROM_PLACE.value and not location_present:
+            option_mode = item["mode"]
+            if option_mode == PersonaSourceMode.GENERATE_NEW_FROM_PLACE.value and not location_present:
                 continue
             options.append(
                 {
                     **item,
-                    "recommended": mode == self.persona_source_mode and self.persona_source_auto_selected,
+                    "recommended": option_mode == resolved_mode and auto_selected,
                 }
             )
         if not location_present:
@@ -867,7 +1252,7 @@ class OrchestrationState:
                 {
                     "mode": "default_generated_audience",
                     "label": "Continue with default generated audience personas",
-                    "recommended": self.persona_source_mode == PersonaSourceMode.DEFAULT_AUDIENCE_ONLY.value,
+                    "recommended": resolved_mode == PersonaSourceMode.DEFAULT_AUDIENCE_ONLY.value,
                 }
             )
         return options
@@ -918,7 +1303,8 @@ class OrchestrationState:
         }
 
     def to_public_state(self) -> Dict[str, Any]:
-        blockers = self.validate_pipeline_ready_for_simulation()
+        pipeline_status = self.pipeline_status_snapshot()
+        pending_question = self.active_pending_clarification()
         return {
             "simulation_id": self.simulation_id,
             "status": self.status,
@@ -938,9 +1324,24 @@ class OrchestrationState:
             "metrics": dict(self.metrics),
             "summary": self.summary,
             "summary_ready": self.summary_ready,
+            "reasoning_started": bool(self.dialogue_turns),
             "event_seq": self.event_seq,
             "can_resume": self.status in {SimulationStatus.PAUSED.value, SimulationStatus.ERROR.value},
-            "pending_clarification": [item.to_dict() for item in self.pending_questions()],
+            "pending_clarification": (
+                {
+                    "question_id": pending_question.question_id,
+                    "question": pending_question.prompt,
+                    "options": [{"id": option or f"opt_{index + 1}", "label": option} for index, option in enumerate(pending_question.options)],
+                    "reason_tag": pending_question.field_name,
+                    "reason_summary": pending_question.reason,
+                    "supporting_snippets": [pending_question.reason] if pending_question.reason else [],
+                    "created_at": self.updated_at,
+                    "required": True,
+                }
+                if pending_question is not None
+                else None
+            ),
+            "can_answer_clarification": pending_question is not None,
             "pending_input": self.pending_input,
             "pending_input_kind": self.pending_input_kind,
             "rollback_target": self.rollback_target,
@@ -951,17 +1352,22 @@ class OrchestrationState:
             "persona_generation": dict(self.persona_generation_debug or {}),
             "persona_validation_errors": list(self.persona_validation_errors),
             "persona_source": {
-                "mode": self.persona_source_mode,
-                "resolved": bool(self.persona_source_mode),
-                "auto_selected": self.persona_source_auto_selected,
+                "mode": pipeline_status.get("persona_source_mode"),
+                "resolved": bool(pipeline_status.get("persona_source_mode")),
+                "auto_selected": bool(pipeline_status.get("persona_source_auto_selected")),
                 "notice": self.persona_source_notice,
                 "selected_set_key": str(self.user_context.get("personaSetKey") or "").strip() or None,
                 "selected_set_label": str(self.user_context.get("personaSetLabel") or "").strip() or None,
                 "options": self.persona_source_options(),
             },
             "pipeline": {
-                "ready_for_simulation": self.simulation_ready,
-                "blockers": blockers,
+                "ready_for_simulation": bool(pipeline_status.get("ready_for_simulation")),
+                "blockers": list(pipeline_status.get("blockers") or []),
+                "blocker_details": list(pipeline_status.get("blocker_details") or []),
+                "blocked_phase": pipeline_status.get("blocked_phase"),
+                "actively_blocked": bool(pipeline_status.get("actively_blocked")),
+                "warnings": list(pipeline_status.get("warnings") or []),
+                "fatal_errors": list(pipeline_status.get("fatal_errors") or []),
                 "steps": [
                     {
                         "key": key,
@@ -1131,4 +1537,5 @@ def hydrate_state(raw: Dict[str, Any]) -> OrchestrationState:
                 "status": "pending",
             },
         )
+    state.reconcile_runtime_contracts()
     return state

@@ -505,6 +505,7 @@ async def _generate_persona_snapshot(state: Dict[str, Any]) -> Tuple[Dict[str, A
     orchestration_state = _workflow_persona_state(state)
     try:
         await agent.run(orchestration_state)
+        orchestration_state = await agent.persist(orchestration_state)
     except Exception as exc:
         raise _WorkflowPersonaError(str(exc), orchestration_state) from exc
 
@@ -555,43 +556,7 @@ async def _generate_persona_snapshot(state: Dict[str, Any]) -> Tuple[Dict[str, A
         "personas": [persona.to_dict() for persona in orchestration_state.personas],
     }
 
-    await db_core.upsert_persona_library_record(
-        user_id=state.get("user_id"),
-        place_key=place_key,
-        place_label=library_label,
-        scope="shared",
-        source_policy=orchestration_state.persona_source_mode,
-        audience_filters=audience_filters,
-        source_summary=str(report.get("source_summary") or ""),
-        evidence_summary=evidence_summary,
-        generation_config=dict(snapshot.get("generation_config") or {}),
-        quality_score=float(report.get("quality_score") or 0.0),
-        confidence_score=float(report.get("confidence_score") or 0.0),
-        quality_meta=dict(report.get("quality_meta") or {}),
-        validation_meta=validation,
-        reusable_dataset_ref=fingerprint,
-        context_type=orchestration_state.idea_context_type,
-        shared_asset=True,
-        payload=snapshot,
-    )
-    record = await db_core.fetch_persona_library_record(
-        user_id=state.get("user_id"),
-        place_key=place_key,
-        audience_filters=audience_filters,
-        source_mode=orchestration_state.persona_source_mode,
-    )
-    snapshot["persona_set"] = {
-        "id": (record or {}).get("id"),
-        "set_key": (record or {}).get("set_key"),
-        "place_key": (record or {}).get("place_key") or place_key,
-        "place_label": (record or {}).get("place_label") or library_label,
-        "created_at": (record or {}).get("created_at"),
-        "updated_at": (record or {}).get("updated_at"),
-        "persona_count": (record or {}).get("persona_count") or len(orchestration_state.personas),
-        "quality_score": (record or {}).get("quality_score") or float(report.get("quality_score") or 0.0),
-        "confidence_score": (record or {}).get("confidence_score") or float(report.get("confidence_score") or 0.0),
-        "reusable_dataset_ref": (record or {}).get("reusable_dataset_ref") or fingerprint,
-    }
+    snapshot["persona_set"] = dict(orchestration_state.persona_set or {})
     snapshot["developer_visibility"]["persistence_status"] = "completed"
     snapshot["persistence_status"] = "completed"
     return snapshot, orchestration_state

@@ -116,6 +116,17 @@ export interface SimulationPersonaSource {
 export interface SimulationPipeline {
   ready_for_simulation: boolean;
   blockers: string[];
+  actively_blocked?: boolean;
+  blocker_details?: Array<{
+    code: string;
+    phase_key?: string | null;
+    title: string;
+    message: string;
+    action?: string | null;
+  }>;
+  blocked_phase?: string | null;
+  warnings?: string[];
+  fatal_errors?: string[];
   steps: SimulationPipelineStep[];
 }
 

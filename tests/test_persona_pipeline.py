@@ -269,7 +269,7 @@ class PersonaPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context["location"], "الهرم")
         self.assertEqual(context_location_label(context), "الهرم")
         mode, auto_selected = resolve_persona_source_mode(context, context_type=IdeaContextType.GENERAL_NON_LOCATION)
-        self.assertEqual(mode, PersonaSourceMode.GENERATE_NEW_FROM_PLACE.value)
+        self.assertEqual(mode, PersonaSourceMode.GENERATE_NEW_FROM_SEARCH.value)
         self.assertTrue(auto_selected)
 
 

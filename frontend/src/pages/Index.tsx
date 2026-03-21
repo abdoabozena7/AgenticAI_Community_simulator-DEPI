@@ -4633,7 +4633,7 @@ If rejection is about competition or location, suggest searching for a better lo
     handleSendMessage(value);
   }, [handleSendMessage]);
 
-  const reasoningPanelAvailable = reasoningActive || simulation.reasoningFeed.length > 1;
+  const reasoningPanelAvailable = simulation.reasoningStarted || reasoningActive || simulation.reasoningFeed.length > 0;
   const reasoningPanelLockedReason = settings.language === 'ar'
     ? 'سيتاح تبويب النقاش بعد بدء reasoning وانتهاء مرحلة البحث.'
     : 'Reasoning opens after the search stage completes and agent debate starts.';
@@ -4673,15 +4673,15 @@ If rejection is about competition or location, suggest searching for a better lo
     if (
       simulation.status !== 'running'
       || !simulationId
-      || !reasoningActive
-      || simulation.reasoningFeed.length < 2
+      || (!simulation.reasoningStarted && !reasoningActive)
+      || simulation.reasoningFeed.length < 1
     ) {
       return;
     }
     if (debateInviteShownForSimulationRef.current === simulationId) return;
     debateInviteShownForSimulationRef.current = simulationId;
     setDebateInviteVisible(true);
-  }, [reasoningActive, simulation.reasoningFeed.length, simulation.simulationId, simulation.status]);
+  }, [reasoningActive, simulation.reasoningFeed.length, simulation.reasoningStarted, simulation.simulationId, simulation.status]);
 
   useEffect(() => {
     if (activePanel !== 'reasoning' || reasoningPanelAvailable) return;
@@ -5129,6 +5129,7 @@ If rejection is about competition or location, suggest searching for a better lo
     reasoningPanelAvailable,
     currentPhaseKey: simulation.currentPhaseKey,
     pipeline: simulation.pipeline,
+    personaSource: simulation.personaSource,
   }), [
     activePanel,
     isClarificationPause,
@@ -5146,6 +5147,7 @@ If rejection is about competition or location, suggest searching for a better lo
     simulation.pendingClarification,
     simulation.pendingInputKind,
     simulation.pendingResearchReview,
+    simulation.personaSource,
     simulation.pipeline,
     simulation.reasoningFeed,
     simulation.researchSources,
@@ -5173,7 +5175,7 @@ If rejection is about competition or location, suggest searching for a better lo
     onSearchUseLlm: handleSearchUseLlm,
     simulationStatus: simulation.status,
     simulationError: simulation.error,
-    reasoningActive,
+    reasoningActive: simulation.reasoningStarted || reasoningActive,
     isSummarizing,
     searchPanelModel,
     quickReplies: quickReplies || undefined,
@@ -5181,6 +5183,7 @@ If rejection is about competition or location, suggest searching for a better lo
     primaryControl,
     pendingClarification: simulation.pendingClarification,
     canAnswerClarification: simulation.canAnswerClarification,
+    pendingInputKind: simulation.pendingInputKind,
     clarificationBusy,
     onSubmitClarification: handleSubmitClarification,
     pendingPreflightQuestion,

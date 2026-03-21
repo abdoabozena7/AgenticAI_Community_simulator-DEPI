@@ -64,7 +64,7 @@ const EMPTY_COPY = {
 
 const pipelineStatusToStepState = (status: string): TopBarStep['state'] => {
   if (status === 'completed') return 'completed';
-  if (status === 'running') return 'current';
+  if (status === 'running' || status === 'blocked') return 'current';
   return 'upcoming';
 };
 
@@ -84,6 +84,9 @@ const currentPipelineStep = (pipeline?: SimulationPipeline | null) =>
   || pipeline?.steps.find((step) => step.status === 'pending')
   || [...(pipeline?.steps || [])].reverse().find((step) => step.status === 'completed')
   || null;
+
+const hasActivePipelineBlocker = (pipeline?: SimulationPipeline | null) =>
+  Boolean(pipeline?.actively_blocked && pipeline?.blockers?.length);
 
 const getStatusCopy = ({
   language,
@@ -106,11 +109,12 @@ const getStatusCopy = ({
       tone: 'error' as const,
     };
   }
-  if (pipeline?.blockers?.length) {
+  if (hasActivePipelineBlocker(pipeline)) {
+    const primaryBlocker = pipeline.blocker_details?.[0];
     return {
       label: language === 'ar'
-        ? `المحاكاة محجوبة: ${pipeline.blockers.join('، ')}`
-        : `Simulation blocked: ${pipeline.blockers.join(', ')}`,
+        ? (primaryBlocker?.message || `المحاكاة محجوبة: ${pipeline.blockers.join('، ')}`)
+        : (primaryBlocker?.message || `Simulation blocked: ${pipeline.blockers.join(', ')}`),
       tone: 'warning' as const,
     };
   }

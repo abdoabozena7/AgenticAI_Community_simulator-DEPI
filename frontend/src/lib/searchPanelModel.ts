@@ -6,6 +6,7 @@ import type {
   ReasoningMessage,
   SimulationChatEvent,
   SimulationPipeline,
+  SimulationPersonaSource,
 } from '@/types/simulation';
 
 export type SearchLiveEvent = {
@@ -163,6 +164,19 @@ const PHASE_LABELS: Record<string, { ar: string; en: string }> = {
   summary: { ar: 'الملخص النهائي', en: 'Final summary' },
 };
 
+const PHASE_ORDER = [
+  'idea_intake',
+  'context_classification',
+  'internet_research',
+  'persona_generation',
+  'persona_persistence',
+  'clarification_questions',
+  'simulation_initialization',
+  'agent_deliberation',
+  'convergence',
+  'summary',
+] as const;
+
 const FALLBACK_FAVICON = (domain: string) =>
   `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=64`;
 
@@ -191,6 +205,12 @@ const titleForPhase = (language: Language, phaseKey?: string | null) => {
   const key = trimText(phaseKey).toLowerCase();
   const label = PHASE_LABELS[key];
   return label ? label[language] : (language === 'ar' ? 'خطوات التنفيذ' : 'Execution activity');
+};
+
+const phaseIndex = (phaseKey?: string | null) => {
+  const key = trimText(phaseKey).toLowerCase();
+  const index = PHASE_ORDER.indexOf(key as (typeof PHASE_ORDER)[number]);
+  return index >= 0 ? index : -1;
 };
 
 const buildPipelineSteps = (
@@ -472,6 +492,92 @@ const buildExecutionNotes = (language: Language, schema: Record<string, unknown>
   return items;
 };
 
+const buildAutomationNotes = (
+  language: Language,
+  schema: Record<string, unknown>,
+  personaSource: SimulationPersonaSource | null | undefined,
+): SearchPanelItem[] => {
+  const items: SearchPanelItem[] = [];
+  if (String(schema.research_estimation_mode || '').trim().toLowerCase() === 'ai_estimation') {
+    items.push({
+      kind: 'note',
+      id: 'research-estimation',
+      title: language === 'ar' ? 'البحث الحقيقي كان ضعيف فكمّلنا بتقدير ذكي منخفض الثقة' : 'Live search was weak, so the system used low-confidence AI estimation',
+      badgeLabel: language === 'ar' ? 'تقدير بحثي' : 'Estimated research',
+      content: language === 'ar'
+        ? 'النظام ما وقفش المسار؛ كوّن structured research usable مع توضيح إن الثقة أقل من البحث القوي.'
+        : 'The pipeline continued with a downstream-usable structured research state, marked as lower confidence.',
+      tone: 'warning',
+      bullets: Array.isArray(schema.research_visible_insights)
+        ? schema.research_visible_insights.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 2)
+        : undefined,
+    });
+  }
+  if (personaSource?.auto_selected && personaSource.mode) {
+    items.push({
+      kind: 'note',
+      id: 'persona-source-auto-selected',
+      title: language === 'ar' ? 'تم اختيار مصدر الشخصيات تلقائيًا' : 'Persona source was auto-selected',
+      badgeLabel: language === 'ar' ? 'اختيار تلقائي' : 'Auto-selected',
+      content: language === 'ar'
+        ? `تم اعتماد المصدر الحالي تلقائيًا: ${personaSource.mode}.`
+        : `The current persona source was resolved automatically: ${personaSource.mode}.`,
+      tone: 'success',
+    });
+  }
+  return items;
+};
+
+const buildPipelineBlockerNote = (
+  language: Language,
+  pipeline: SimulationPipeline | null | undefined,
+): SearchPanelItem[] => {
+  const details = Array.isArray(pipeline?.blocker_details) ? pipeline?.blocker_details : [];
+  if (!details.length) return [];
+  const primary = details[0];
+  const bullets = details.slice(0, 3).map((item) => {
+    const action = String(item.action || '').trim();
+    return action ? `${item.message} ${action}` : item.message;
+  });
+  return [{
+    kind: 'note',
+    id: 'pipeline-blocker',
+    title: language === 'ar' ? 'سبب توقف الخط الحالي' : 'Why the pipeline stopped',
+    badgeLabel: language === 'ar' ? 'تعطّل' : 'Blocked',
+    content: primary?.title || (language === 'ar' ? 'فيه خطوة مانعة المحاكاة من الاستمرار.' : 'A blocker is preventing the simulation from continuing.'),
+    tone: 'warning',
+    bullets,
+    cta: primary?.action || undefined,
+  }];
+};
+
+const hasActivePipelineBlocker = ({
+  pipeline,
+  currentPhaseKey,
+  pipelineSteps,
+  pendingInputKind,
+  isRunStarting,
+  isRunActive,
+  searchState,
+}: {
+  pipeline: SimulationPipeline | null | undefined;
+  currentPhaseKey?: string | null;
+  pipelineSteps: SearchPanelPipelineStep[];
+  pendingInputKind?: string | null;
+  isRunStarting: boolean;
+  isRunActive: boolean;
+  searchState: SearchState;
+}): boolean => {
+  if (!pipeline?.blockers?.length || !pipeline.actively_blocked) return false;
+  if (pendingInputKind) return false;
+  if (searchState.status === 'searching' || isRunStarting || isRunActive) return false;
+  if (pipelineSteps.some((step) => step.status === 'running')) return false;
+  const currentIndex = phaseIndex(currentPhaseKey);
+  const blockedIndex = phaseIndex(pipeline.blocked_phase);
+  if (currentIndex >= 0 && blockedIndex >= 0 && currentIndex < blockedIndex) return false;
+  return true;
+};
+
 const getStageCopy = (language: Language, stage: Exclude<SearchPanelStage, 'hidden'>, hasItems: boolean) => {
   const copy = {
     ready: {
@@ -535,6 +641,7 @@ export const buildSearchPanelModel = ({
   simulationActuallyStarted,
   currentPhaseKey,
   pipeline,
+  personaSource,
 }: {
   language: Language;
   activePanel: 'chat' | 'reasoning' | 'config';
@@ -556,11 +663,21 @@ export const buildSearchPanelModel = ({
   reasoningPanelAvailable: boolean;
   currentPhaseKey?: string | null;
   pipeline?: SimulationPipeline | null;
+  personaSource?: SimulationPersonaSource | null;
 }): SearchPanelModel => {
   void activePanel;
 
   const safeSchema = schema && typeof schema === 'object' ? schema : {};
   const pipelineSteps = buildPipelineSteps(language, pipeline, currentPhaseKey);
+  const activePipelineBlocker = hasActivePipelineBlocker({
+    pipeline,
+    currentPhaseKey,
+    pipelineSteps,
+    pendingInputKind,
+    isRunStarting,
+    isRunActive,
+    searchState,
+  });
   const liveItems = buildLiveItems(language, liveEvents);
   const resultItems = buildResultItems(
     language,
@@ -573,11 +690,13 @@ export const buildSearchPanelModel = ({
     summary,
   );
   const noteItems: SearchPanelItem[] = [
+    ...(activePipelineBlocker ? buildPipelineBlockerNote(language, pipeline) : []),
     ...buildResearchReviewNote(language, pendingResearchReview),
     ...buildClarificationNote(language, pendingClarification),
     ...buildCoachNote(language, coachIntervention),
     ...buildImprovementNote(language, safeSchema),
     ...buildExecutionNotes(language, safeSchema),
+    ...buildAutomationNotes(language, safeSchema, personaSource),
     ...buildReasoningNote(language, reasoningFeed || []),
     ...buildChatEventNote(language, chatEvents || []),
   ];
@@ -616,7 +735,7 @@ export const buildSearchPanelModel = ({
     stage = 'review';
   } else if (searchState.status === 'searching' || isRunStarting || isRunActive || pipelineSteps.some((item) => item.status === 'running')) {
     stage = 'running';
-  } else if (searchState.status === 'timeout' || searchState.status === 'error' || pipelineSteps.some((item) => item.status === 'blocked')) {
+  } else if (searchState.status === 'timeout' || searchState.status === 'error' || activePipelineBlocker) {
     stage = 'failed';
   } else if (simulationActuallyStarted || summaryItems.length || noteItems.length || liveItems.length || resultItems.length) {
     stage = (summaryItems.length || noteItems.length || liveItems.length || resultItems.length) ? 'completed_with_content' : 'completed_empty';

@@ -130,6 +130,7 @@ class PersonaAgent(BaseAgent):
     async def run(self, state: OrchestrationState) -> OrchestrationState:
         if not state.search_completed or state.research is None:
             raise RuntimeError("Persona generation requires completed search results")
+        state.refresh_persona_source_resolution()
         if not state.persona_source_mode:
             raise RuntimeError("Persona source is unresolved")
 
@@ -193,7 +194,7 @@ class PersonaAgent(BaseAgent):
             target_count=requested_count,
             strict_target=self._has_enough_data(state),
         )
-        state.persona_validation_errors = list(validation.get("simulation_blockers") or [])
+        state.persona_validation_errors = list(validation.get("fatal_errors") or [])
         report["validation"] = validation
         report["social_sentiment"] = signal_plan.get("social_sentiment") or {}
         report["evidence_signals"] = signal_plan.get("evidence_signals") or []
@@ -221,6 +222,8 @@ class PersonaAgent(BaseAgent):
             raise RuntimeError(f"Persona validation failed: {', '.join(validation.get('fatal_errors') or [])}")
 
         state.personas = personas
+        state.refresh_persona_source_resolution()
+        report["source_mode"] = state.persona_source_mode
         state.persona_generation_completed = True
         state.set_pipeline_step("generating_personas", "completed", detail=report.get("message") or f"Generated {len(personas)} personas.")
         validation_action = "persona_validation_passed"
@@ -250,6 +253,7 @@ class PersonaAgent(BaseAgent):
         return state
 
     async def persist(self, state: OrchestrationState) -> OrchestrationState:
+        state.refresh_persona_source_resolution()
         if not state.persona_source_mode:
             raise RuntimeError("Persona source is unresolved")
         if not state.persona_generation_completed or not state.personas:
@@ -390,6 +394,7 @@ class PersonaAgent(BaseAgent):
             state.simulation_id,
             [persona.to_agent_row() for persona in state.personas],
         )
+        state.refresh_persona_source_resolution()
         state.persona_persistence_completed = True
         blockers = state.validate_pipeline_ready_for_simulation()
         state.set_pipeline_step(
@@ -910,10 +915,10 @@ class PersonaAgent(BaseAgent):
         if len(personas) < minimum_persona_threshold:
             simulation_blockers.append("persona_count_below_simulation_minimum")
         if diversity_score < diversity_threshold:
-            simulation_blockers.append("diversity_score_below_threshold")
+            warnings.append("diversity_score_below_threshold")
         allow_lower_target = bool(state.schema.get("allow_lower_persona_target"))
         if strict_target and len(personas) < self.TARGET_MIN_PERSONAS and not (allow_lower_target and target_count < self.TARGET_MIN_PERSONAS):
-            simulation_blockers.append("persona_count_below_required_minimum")
+            warnings.append("persona_count_below_required_minimum")
         if len(signal_plan.get("evidence_signals") or []) < self.TARGET_MIN_PERSONAS and not strict_target:
             warnings.append("insufficient_data_for_full_diversity")
 
