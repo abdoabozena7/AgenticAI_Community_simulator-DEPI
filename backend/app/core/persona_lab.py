@@ -182,6 +182,11 @@ def _base_job_state(job_id: str, user_id: Optional[int], config: Dict[str, Any])
             "final_persona_count": 0,
             "persistence_status": "pending",
         },
+        "validation": {
+            "fatal_errors": [],
+            "simulation_blockers": [],
+            "warnings": [],
+        },
         "validation_errors": [],
         "created_at": _now_ms(),
         "updated_at": _now_ms(),
@@ -567,11 +572,22 @@ class _PersonaLabEventBus:
             _set_stage(self.job_state, "fitting_personas", "completed", detail="Persona fitting completed with simulation blockers.")
             if self.job_state["stages"][5]["status"] == "pending":
                 _set_stage(self.job_state, "removing_duplicates", "completed", detail="Duplicate filtering completed during fitting.")
+            self.job_state["validation"] = {
+                "fatal_errors": [],
+                "simulation_blockers": list(meta.get("simulation_blockers") or []),
+                "warnings": [],
+            }
             self.job_state["validation_errors"] = list(meta.get("simulation_blockers") or [])
             self.job_state["developer"]["final_persona_count"] = int(meta.get("final_persona_count") or self.job_state["partial_results"].get("current_persona_count") or 0)
             _set_stage(self.job_state, "validating", "completed", detail=str(payload.get("snippet") or "").strip() or None)
         elif action == "persona_validation_failed":
-            self.job_state["validation_errors"] = list(meta.get("errors") or []) or [str(payload.get("snippet") or "persona_validation_failed").strip()]
+            fatal_errors = list(meta.get("fatal_errors") or meta.get("errors") or []) or [str(payload.get("snippet") or "persona_validation_failed").strip()]
+            self.job_state["validation"] = {
+                "fatal_errors": fatal_errors,
+                "simulation_blockers": list(meta.get("simulation_blockers") or []),
+                "warnings": list(meta.get("warnings") or []),
+            }
+            self.job_state["validation_errors"] = fatal_errors
             _set_stage(self.job_state, "validating", "running", detail="Validating schema completeness, uniqueness, diversity, and attribution.")
             _set_stage(self.job_state, "validating", "blocked", detail=str(payload.get("snippet") or "").strip() or None)
         elif action == "persona_persistence_started":
@@ -685,7 +701,12 @@ async def _complete_saved_reuse(job_state: Dict[str, Any]) -> None:
     job_state["developer"]["final_persona_count"] = int(record.get("persona_count") or len(personas))
     job_state["developer"]["persistence_status"] = "completed"
     job_state["final_saved_set_id"] = record.get("id")
-    job_state["validation_errors"] = list(validation_meta.get("simulation_blockers") or [])
+    job_state["validation"] = {
+        "fatal_errors": list(validation_meta.get("fatal_errors") or []),
+        "simulation_blockers": list(validation_meta.get("simulation_blockers") or []),
+        "warnings": list(validation_meta.get("warnings") or []),
+    }
+    job_state["validation_errors"] = list(dict.fromkeys(job_state["validation"]["fatal_errors"] + job_state["validation"]["simulation_blockers"]))
     await _persist_job_state(job_state)
 
 
@@ -718,7 +739,13 @@ async def _run_generation_job(job_state: Dict[str, Any]) -> None:
     job_state["partial_results"]["saved_set_key"] = orchestration_state.persona_set.get("set_key") if orchestration_state.persona_set else None
     job_state["developer"]["final_persona_count"] = len(personas)
     job_state["developer"]["persistence_status"] = "completed" if orchestration_state.persona_persistence_completed else "failed"
-    job_state["validation_errors"] = list(orchestration_state.persona_validation_errors or [])
+    validation = dict((orchestration_state.persona_generation_debug or {}).get("validation") or {})
+    job_state["validation"] = {
+        "fatal_errors": list(validation.get("fatal_errors") or []),
+        "simulation_blockers": list(validation.get("simulation_blockers") or []),
+        "warnings": list(validation.get("warnings") or []),
+    }
+    job_state["validation_errors"] = list(dict.fromkeys(job_state["validation"]["fatal_errors"] + job_state["validation"]["simulation_blockers"]))
     job_state["final_saved_set_id"] = orchestration_state.persona_set.get("id") if orchestration_state.persona_set else None
     await _persist_job_state(job_state)
 
@@ -731,7 +758,12 @@ async def _run_job(job_id: str) -> None:
         await _run_generation_job(state)
     except Exception as exc:
         state["status"] = "failed"
-        state["validation_errors"] = [str(exc).strip() or "Persona Lab generation failed."]
+        state["validation"] = {
+            "fatal_errors": [str(exc).strip() or "Persona Lab generation failed."],
+            "simulation_blockers": [],
+            "warnings": [],
+        }
+        state["validation_errors"] = list(state["validation"]["fatal_errors"])
         _set_stage(state, state.get("current_stage") or "preparing_request", "blocked", detail=state["validation_errors"][0])
         await _persist_job_state(state)
 

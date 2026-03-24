@@ -44,12 +44,7 @@ export function useGuidedWorkflow(options?: { suppressAutoRestore?: boolean }) {
     setLoading(true);
     setError(null);
     try {
-      let workflowId: string | null = null;
-      if (typeof window !== 'undefined') {
-        workflowId = window.localStorage.getItem(ACTIVE_WORKFLOW_KEY);
-      }
       const state = await apiService.startGuidedWorkflow({
-        workflow_id: workflowId || undefined,
         language: payload.language,
         draft_context: payload.draftContext,
       });

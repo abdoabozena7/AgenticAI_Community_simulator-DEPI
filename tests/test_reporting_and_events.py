@@ -61,6 +61,10 @@ class ReportingAndEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_call.kwargs["step_uid"], "turn-1")
         self.assertEqual(state.schema.get("event_log_status"), "active")
         self.assertEqual(state.schema.get("event_log_count"), 2)
+        broadcast_payload = broadcaster.await_args_list[-1].args[0]
+        self.assertEqual(broadcast_payload["type"], "reasoning_step")
+        self.assertEqual(broadcast_payload["agent_label"], "Agent 1")
+        self.assertEqual(broadcast_payload["opinion"], "reject")
 
     async def test_report_agent_builds_structured_report_and_updates_schema(self) -> None:
         runtime = SimpleNamespace(

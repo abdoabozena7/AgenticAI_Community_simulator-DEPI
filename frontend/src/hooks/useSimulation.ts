@@ -344,7 +344,9 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
         ...state,
         pendingInputKind: action.payload.pendingInputKind,
         schema: action.payload.schema,
-        reasoningStarted: action.payload.reasoningStarted || state.reasoningStarted,
+        reasoningStarted: typeof action.payload.reasoningStarted === 'boolean'
+          ? action.payload.reasoningStarted
+          : state.reasoningStarted,
       };
 
     case 'SET_POLICY':
@@ -361,13 +363,22 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
       }
       return {
         ...state,
+        status: 'idle',
         simulationId: action.payload,
         lastEventSeq: 0,
         currentPhaseKey: null,
         phaseProgressPct: 0,
+        agents: new Map(),
+        metrics: initialMetrics,
+        reasoningFeed: [],
+        reasoningDebug: [],
+        chatEvents: [],
+        researchSources: [],
         statusReason: null,
         summary: null,
         reasoningStarted: false,
+        canResume: false,
+        resumeReason: null,
         pendingClarification: null,
         canAnswerClarification: false,
         pendingResearchReview: null,
@@ -537,7 +548,7 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
       return {
         ...state,
         reasoningFeed: action.payload,
-        reasoningStarted: action.payload.length > 0 || state.reasoningStarted,
+        reasoningStarted: action.payload.length > 0,
       };
     }
 
@@ -901,15 +912,15 @@ export function useSimulation(options?: UseSimulationOptions) {
         },
       });
     }
-    if (stateResponse.reasoning && stateResponse.reasoning.length > 0) {
+    if (Array.isArray(stateResponse.reasoning)) {
       const reasoningMessages = buildReasoningMessages(stateResponse.reasoning);
-      const shouldMerge = options?.appendReasoning || mappedStatus === 'running';
+      const shouldMerge = (options?.appendReasoning || mappedStatus === 'running') && reasoningMessages.length > 0;
       const nextReasoning = shouldMerge
         ? mergeReasoning(stateRef.current.reasoningFeed, reasoningMessages)
         : reasoningMessages;
       dispatch({ type: 'SET_REASONING', payload: nextReasoning });
     }
-    if (stateResponse.chat_events && stateResponse.chat_events.length > 0) {
+    if (Array.isArray(stateResponse.chat_events)) {
       const mappedChatEvents = stateResponse.chat_events
         .map((item, index) => ({
           eventSeq: item.event_seq ?? (index + 1),
@@ -928,7 +939,7 @@ export function useSimulation(options?: UseSimulationOptions) {
         dispatch({ type: 'SET_LAST_EVENT_SEQ', payload: maxChatSeq });
       }
     }
-    if (stateResponse.research_sources && stateResponse.research_sources.length > 0) {
+    if (Array.isArray(stateResponse.research_sources)) {
       const mappedResearch = stateResponse.research_sources.map((entry, index) => ({
         eventSeq: entry.event_seq,
         cycleId: entry.cycle_id ?? null,

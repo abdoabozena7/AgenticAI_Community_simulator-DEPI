@@ -71,5 +71,16 @@ class EventBus:
         await self._event_logger.log_dialogue_turn(state=state, event=event, turn=turn)
         await self._repository.save_state(state)
         message = event.to_dict(state.simulation_id)
+        message["type"] = "reasoning_step"
+        message["agent_short_id"] = turn.agent_id[:4]
+        message["agent_label"] = turn.agent_name
+        message["reply_to_short_id"] = turn.reply_to_agent_id[:4] if turn.reply_to_agent_id else None
+        message["opinion"] = turn.stance_after
+        message["opinion_source"] = "llm"
+        message["stance_confidence"] = turn.confidence
+        message["reasoning_length"] = "short"
+        message["relevance_score"] = turn.influence_delta
+        message["policy_guard"] = False
+        message["stance_locked"] = False
         await self._broadcaster(message)
         return message

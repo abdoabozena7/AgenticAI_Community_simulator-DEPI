@@ -188,6 +188,9 @@ class SimulationRepository:
     async def fetch_research_events(self, simulation_id: str) -> List[Dict[str, Any]]:
         return await db_core.fetch_research_events(simulation_id)
 
+    async def fetch_chat_events(self, simulation_id: str) -> List[Dict[str, Any]]:
+        return await db_core.fetch_chat_events(simulation_id)
+
     async def fetch_event_log(
         self,
         simulation_id: str,

@@ -16,10 +16,12 @@ from app.agents.search_agent import SearchAgent  # noqa: E402
 from app.agents.simulation_agent import SimulationAgent  # noqa: E402
 from app.models.orchestration import (  # noqa: E402
     ChangeImpact,
+    DialogueTurn,
     EvidenceItem,
     OrchestrationState,
     PersonaProfile,
     SimulationPhase,
+    normalize_context,
 )
 from app.orchestrator import SimulationOrchestrator  # noqa: E402
 
@@ -447,6 +449,84 @@ class PipelineStabilizationTests(unittest.IsolatedAsyncioTestCase):
         await simulation_agent.initialize_simulation(updated_state)
         await simulation_agent.run_deliberation(updated_state)
         self.assertGreater(len(updated_state.dialogue_turns), 0)
+
+    def test_rollback_clears_stale_research_runtime_schema_state(self) -> None:
+        state = _state()
+        state.schema.update(
+            {
+                "search_finished": True,
+                "research_output_ready": True,
+                "research_warnings": ["used_ai_estimation_due_to_weak_search"],
+                "research_blockers": ["research_insufficient_for_personas"],
+                "fatal_search_failure": True,
+                "research_usable": True,
+                "pipeline_status": {"blockers": ["research_insufficient_for_personas"]},
+            }
+        )
+
+        state.rollback_to(SimulationPhase.INTERNET_RESEARCH, reason="test_reset")
+
+        self.assertNotIn("research_output_ready", state.schema)
+        self.assertNotIn("research_warnings", state.schema)
+        self.assertNotIn("research_blockers", state.schema)
+        self.assertNotIn("fatal_search_failure", state.schema)
+        self.assertNotIn("research_usable", state.schema)
+        self.assertNotIn("pipeline_status", state.schema)
+
+    async def test_small_deliberation_context_update_preserves_existing_reasoning(self) -> None:
+        state = _state()
+        state.search_completed = True
+        state.persona_generation_completed = True
+        state.persona_persistence_completed = True
+        state.personas = [_persona(index) for index in range(20)]
+        state.persona_generation_debug = {
+            "validation": {"fatal_errors": [], "simulation_blockers": [], "warnings": [], "actual_count": 20}
+        }
+        state.user_context = normalize_context(state.user_context)
+        state.current_phase = SimulationPhase.AGENT_DELIBERATION
+        state.dialogue_turns = [
+            DialogueTurn(
+                step_uid="turn-1",
+                iteration=1,
+                phase=SimulationPhase.AGENT_DELIBERATION.value,
+                agent_id="persona-1",
+                agent_name="Persona 1",
+                reply_to_agent_id=None,
+                reply_to_agent_name=None,
+                message="Initial reasoning turn",
+                stance_before="neutral",
+                stance_after="accept",
+                confidence=0.62,
+                influence_delta=0.12,
+            )
+        ]
+        state.deliberation_state = {"iteration": 1, "total_iterations": 4, "pending_context_updates": []}
+        state.metrics = {"iteration": 1, "total_iterations": 4}
+        state.refresh_persona_source_resolution()
+
+        orchestrator = SimulationOrchestrator.__new__(SimulationOrchestrator)
+        orchestrator.get_state = AsyncMock(return_value=state)
+        orchestrator.repository = SimpleNamespace(save_state=AsyncMock())
+        orchestrator.event_bus = SimpleNamespace(publish=AsyncMock())
+        orchestrator._tasks = {}
+        orchestrator._locks = {}
+        scheduled: list[tuple[str, SimulationPhase, bool]] = []
+        orchestrator._schedule = lambda simulation_id, phase, force=False: scheduled.append((simulation_id, phase, force))
+
+        result = await orchestrator.apply_context_update(
+            state.simulation_id,
+            {"goals": ["Need a sharper value proposition"]},
+        )
+
+        assert result is not None
+        updated_state, impact, rollback_phase = result
+        self.assertEqual(impact, ChangeImpact.SMALL)
+        self.assertEqual(rollback_phase, SimulationPhase.AGENT_DELIBERATION)
+        self.assertEqual(len(updated_state.dialogue_turns), 1)
+        self.assertEqual(updated_state.dialogue_turns[0].step_uid, "turn-1")
+        self.assertEqual(updated_state.deliberation_state.get("iteration"), 1)
+        self.assertEqual(len(updated_state.deliberation_state.get("pending_context_updates") or []), 1)
+        self.assertTrue(scheduled and scheduled[0][1] == SimulationPhase.AGENT_DELIBERATION and scheduled[0][2] is True)
 
     def test_scenario_e_warning_only_persona_validation_still_allows_simulation(self) -> None:
         state = _state()

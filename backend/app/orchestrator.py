@@ -171,7 +171,7 @@ class SimulationOrchestrator:
             await self.simulation_agent.handle_insight_response(state, answers)
             if not state.pending_input:
                 resume_phase = SimulationPhase(str(state.pending_resume_phase or SimulationPhase.AGENT_DELIBERATION.value))
-                state.continue_from_phase(resume_phase, reason="insight_followup_resolved")
+                state.resume_from_phase_in_place(resume_phase, reason="insight_followup_resolved")
                 await self.repository.save_state(state)
                 self._schedule(simulation_id, state.current_phase, force=True)
             else:
@@ -181,7 +181,7 @@ class SimulationOrchestrator:
             await self.simulation_agent.handle_orchestrator_intervention_response(state, answers)
             if not state.pending_input:
                 resume_phase = SimulationPhase(str(state.pending_resume_phase or SimulationPhase.AGENT_DELIBERATION.value))
-                state.continue_from_phase(resume_phase, reason=str(state.status_reason or "coach_intervention_resolved"))
+                state.resume_from_phase_in_place(resume_phase, reason=str(state.status_reason or "coach_intervention_resolved"))
                 await self.repository.save_state(state)
                 self._schedule(simulation_id, state.current_phase, force=True)
             else:
@@ -282,7 +282,7 @@ class SimulationOrchestrator:
                     "timestamp": state.updated_at,
                 }
             )
-            state.continue_from_phase(SimulationPhase.AGENT_DELIBERATION, reason=f"context_update:{impact.value}")
+            state.resume_from_phase_in_place(SimulationPhase.AGENT_DELIBERATION, reason=f"context_update:{impact.value}")
             rollback_phase = SimulationPhase.AGENT_DELIBERATION
         else:
             state.rollback_to(rollback_phase, reason=f"context_update:{impact.value}")

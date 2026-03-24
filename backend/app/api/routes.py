@@ -402,6 +402,7 @@ async def get_state(simulation_id: str, authorization: str = Header(None)) -> Di
         raise HTTPException(status_code=404, detail="Simulation not found")
     payload = state.to_public_state()
     payload["research_sources"] = await _get_orchestrator().repository.fetch_research_events(simulation_id)
+    payload["chat_events"] = await _get_orchestrator().repository.fetch_chat_events(simulation_id)
     return payload
 
 

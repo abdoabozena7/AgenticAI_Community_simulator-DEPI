@@ -12,6 +12,7 @@ from ..models.orchestration import (
     OrchestrationState,
     PersonaProfile,
     PersonaSourceMode,
+    apply_persona_dynamic_defaults,
     context_location_label,
 )
 from .base import BaseAgent
@@ -201,6 +202,7 @@ class PersonaAgent(BaseAgent):
             requested_count=requested_count,
             place_label=place_label or "global",
         )
+        personas = [apply_persona_dynamic_defaults(persona) for persona in personas]
 
         validation = self._validate_personas(
             personas=personas,
@@ -209,7 +211,7 @@ class PersonaAgent(BaseAgent):
             target_count=requested_count,
             strict_target=self._has_enough_data(state),
         )
-        state.persona_validation_errors = list(validation.get("fatal_errors") or [])
+        state.persona_validation_errors = list(dict.fromkeys((validation.get("fatal_errors") or []) + (validation.get("simulation_blockers") or [])))
         report["validation"] = validation
         report["social_sentiment"] = signal_plan.get("social_sentiment") or {}
         report["evidence_signals"] = signal_plan.get("evidence_signals") or []
@@ -232,6 +234,12 @@ class PersonaAgent(BaseAgent):
         state.schema["persona_count_actual"] = len(personas)
         state.schema["persona_source"] = state.persona_source_mode
         state.schema["minimum_persona_threshold"] = self._minimum_persona_threshold(state)
+
+        state.schema["persona_validation"] = {
+            "fatal_errors": list(validation.get("fatal_errors") or []),
+            "simulation_blockers": list(validation.get("simulation_blockers") or []),
+            "warnings": list(validation.get("warnings") or []),
+        }
 
         if validation.get("fatal_errors"):
             await self._publish_persona_event(
@@ -1858,7 +1866,7 @@ class PersonaAgent(BaseAgent):
             if not isinstance(item, dict):
                 continue
             personas.append(
-                PersonaProfile(
+                apply_persona_dynamic_defaults(PersonaProfile(
                     persona_id=str(item.get("persona_id") or item.get("id") or uuid.uuid4()),
                     name=str(item.get("display_name") or item.get("name") or ""),
                     source_mode=str(item.get("source_mode") or ""),
@@ -1895,7 +1903,7 @@ class PersonaAgent(BaseAgent):
                     traits=dict(item.get("traits") or {}),
                     biases=[str(value) for value in item.get("biases") or [] if str(value).strip()],
                     opinion_score=float(item.get("opinion_score") or 0.0),
-                )
+                ))
             )
         return personas
 

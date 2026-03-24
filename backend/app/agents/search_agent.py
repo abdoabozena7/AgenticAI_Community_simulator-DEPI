@@ -348,6 +348,7 @@ class SearchAgent(BaseAgent):
                 "research_expandable_reasoning": list(report.structured_schema.get("expandable_reasoning") or []),
                 "research_confidence_score": float(report.structured_schema.get("confidence_score") or 0.0),
                 "research_output_ready": state.search_completed,
+                "research_usable": state.search_completed,
                 "search_finished": bool(search_finished),
                 "research_ready": bool(research_ready),
                 "research_estimated": bool(research_estimated),
@@ -376,15 +377,26 @@ class SearchAgent(BaseAgent):
             {
                 "agent": self.name,
                 "action": "search_completed",
-                "status": "failed" if fatal_search_failure else ("warning" if estimation_mode == "ai_estimation" else "ok"),
+                "status": (
+                    "failed"
+                    if fatal_search_failure
+                    else "warning"
+                    if (not state.search_completed or estimation_mode == "ai_estimation")
+                    else "ok"
+                ),
                 "progress_pct": 100,
                 "meta": {
                     "query_count": len(query_plan),
                     "evidence_count": len(report.evidence),
                     "estimation_mode": estimation_mode,
                     "research_warnings": research_warnings,
+                    "research_usable": state.search_completed,
                 },
-                "snippet": report.summary[:320],
+                "snippet": (
+                    report.summary[:320]
+                    if state.search_completed
+                    else "Search finished, but the research output is still not usable for downstream personas."
+                ),
             },
             persist_research=True,
         )

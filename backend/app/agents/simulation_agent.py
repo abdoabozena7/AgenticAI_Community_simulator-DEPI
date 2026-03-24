@@ -1886,6 +1886,8 @@ class SimulationAgent(BaseAgent):
 
     async def _pause_for_intervention(self, state: OrchestrationState, intervention: Dict[str, Any]) -> None:
         record = dict(intervention)
+        record["intervention_id"] = str(record.get("intervention_id") or f"coach-{uuid.uuid4().hex[:10]}")
+        record["created_at"] = int(record.get("created_at") or state.updated_at)
         record["resolved"] = False
         record["dismissed"] = False
         state.critical_insights.append(record)
@@ -1993,6 +1995,8 @@ class SimulationAgent(BaseAgent):
             latest["dismissed"] = True
             latest["resolved"] = True
             latest["user_answer"] = answer_text
+            latest["resolution"] = "skipped"
+            latest["resolved_at"] = state.updated_at
             memory_provider = getattr(self.runtime, "memory_provider", None)
             if memory_provider is not None:
                 await memory_provider.ingest_orchestrator_intervention(state=state, insight=latest)
@@ -2008,6 +2012,8 @@ class SimulationAgent(BaseAgent):
             latest["applied"] = True
             latest["resolved"] = True
             latest["apply_answer"] = answer_text
+            latest["resolution"] = "applied"
+            latest["resolved_at"] = state.updated_at
             memory_provider = getattr(self.runtime, "memory_provider", None)
             if memory_provider is not None:
                 await memory_provider.ingest_orchestrator_intervention(state=state, insight=latest)
@@ -2021,6 +2027,8 @@ class SimulationAgent(BaseAgent):
         latest["applied"] = False
         latest["resolved"] = True
         latest["apply_answer"] = answer_text
+        latest["resolution"] = "not_applied"
+        latest["resolved_at"] = state.updated_at
         memory_provider = getattr(self.runtime, "memory_provider", None)
         if memory_provider is not None:
             await memory_provider.ingest_orchestrator_intervention(state=state, insight=latest)

@@ -85,6 +85,19 @@ PIPELINE_STEP_LABELS: Dict[str, Dict[str, str]] = {
     "ready_for_simulation": {"en": "ready for simulation", "ar": "جاهز للمحاكاة"},
 }
 
+RESEARCH_RUNTIME_SCHEMA_KEYS = (
+    "research_output_ready",
+    "research_warnings",
+    "research_blockers",
+    "fatal_search_failure",
+    "research_usable",
+    "research_insufficiency_reason",
+)
+
+PIPELINE_RUNTIME_SCHEMA_KEYS = (
+    "pipeline_status",
+)
+
 
 PIPELINE_BLOCKER_META: Dict[str, Dict[str, str]] = {
     "search_did_not_run": {
@@ -658,6 +671,29 @@ class PersonaProfile:
         }
 
 
+def apply_persona_dynamic_defaults(persona: PersonaProfile) -> PersonaProfile:
+    basis = " ".join(
+        part
+        for part in [
+            str(persona.target_audience_cluster or "").strip(),
+            str(persona.persona_id or persona.name or "persona").strip(),
+        ]
+        if part
+    ).lower()
+    slug = "-".join(part for part in basis.replace("/", " ").replace("_", " ").split() if part) or "persona"
+    if not str(persona.segment_id or "").strip():
+        persona.segment_id = slug[:64]
+    if not str(persona.price_sensitivity_bucket or "").strip():
+        persona.price_sensitivity_bucket = "medium"
+    if not str(persona.decision_style or "").strip():
+        persona.decision_style = "comparison-led"
+    if not str(persona.purchase_trigger or "").strip():
+        persona.purchase_trigger = "clear value"
+    if not str(persona.rejection_trigger or "").strip():
+        persona.rejection_trigger = "weak differentiation"
+    return persona
+
+
 @dataclass
 class ClarificationQuestion:
     question_id: str
@@ -816,10 +852,6 @@ class OrchestrationState:
     simulation_ready: bool = False
 
     def _research_contract_ready(self) -> bool:
-        if bool(self.schema.get("fatal_search_failure")):
-            return False
-        if bool(self.schema.get("research_output_ready")):
-            return True
         if self.search_completed and (self.persona_generation_completed or self.persona_persistence_completed or self.personas):
             return True
         structured = self.research.structured_schema if self.research and isinstance(self.research.structured_schema, dict) else {}
@@ -837,6 +869,46 @@ class OrchestrationState:
             for key in ("signals", "complaints", "behaviors", "behavior_patterns", "gaps_in_market")
         )
         return sentiment_count >= 1 and signal_count >= 3
+
+    def _research_runtime_status(self) -> Dict[str, Any]:
+        search_finished = bool(self.schema.get("search_finished"))
+        estimated = bool(self.schema.get("research_estimated"))
+        usable = self._research_contract_ready()
+        structured = self.research.structured_schema if self.research and isinstance(getattr(self.research, "structured_schema", None), dict) else {}
+        summary = str(getattr(self.research, "summary", "") or "").strip()
+        findings = list(getattr(self.research, "findings", []) or [])
+        evidence = list(getattr(self.research, "evidence", []) or [])
+        has_live_report = bool(
+            self.research
+            and (
+                summary
+                or findings
+                or evidence
+                or any(str(value).strip() for value in structured.values() if value is not None)
+            )
+        )
+        insufficient = has_live_report and not usable
+        fatal = search_finished and not has_live_report
+        warnings: List[str] = []
+        blockers: List[str] = []
+        if estimated:
+            warnings.append("used_ai_estimation_due_to_weak_search")
+        if str(self.schema.get("research_insufficiency_reason") or "").strip():
+            warnings.append("research_insufficient_for_personas")
+        if fatal:
+            blockers.append("fatal_search_failure")
+        elif insufficient:
+            blockers.append("research_insufficient_for_personas")
+        return {
+            "search_finished": search_finished,
+            "estimated": estimated,
+            "usable": usable,
+            "has_live_report": has_live_report,
+            "insufficient": insufficient,
+            "fatal": fatal,
+            "warnings": warnings,
+            "blockers": blockers,
+        }
 
     def _persona_generation_ready(self) -> bool:
         validation = self._validation_snapshot()
@@ -875,6 +947,7 @@ class OrchestrationState:
         if self.pending_input_kind != "clarification" and not self.pending_input:
             self.clarification_questions = []
             self.clarification_answers = {}
+        self.schema["research_usable"] = self.search_completed
 
     def phase_progress_pct(self) -> float:
         base = phase_position(self.current_phase)
@@ -951,6 +1024,13 @@ class OrchestrationState:
             "actual_count": int(validation.get("actual_count") or 0),
             "raw": validation,
         }
+
+    def clear_runtime_schema_state(self, *, include_research: bool = False) -> None:
+        keys = list(PIPELINE_RUNTIME_SCHEMA_KEYS)
+        if include_research:
+            keys.extend(RESEARCH_RUNTIME_SCHEMA_KEYS)
+        for key in keys:
+            self.schema.pop(key, None)
 
     def resolve_persona_source_contract(self) -> tuple[Optional[str], bool]:
         requested_mode = _normalize_persona_source_mode(self.user_context.get("personaSourceMode"))
@@ -1043,19 +1123,12 @@ class OrchestrationState:
         persona_source_mode, persona_source_auto_selected = self.resolve_persona_source_contract()
         pending_questions = self.pending_questions_snapshot()
         blockers: List[str] = []
-        research_warnings = [
-            str(item).strip()
-            for item in self.schema.get("research_warnings") or []
-            if str(item).strip()
-        ]
-        research_blockers = [
-            str(item).strip()
-            for item in self.schema.get("research_blockers") or []
-            if str(item).strip()
-        ]
+        research_status = self._research_runtime_status()
+        research_warnings = list(research_status["warnings"])
+        research_blockers = list(research_status["blockers"])
         warnings = list(dict.fromkeys(validation["warnings"] + research_warnings))
         fatal_errors = list(dict.fromkeys(validation["fatal_errors"]))
-        search_ready = self._research_contract_ready()
+        search_ready = bool(research_status["usable"])
         persona_generation_ready = self._persona_generation_ready()
         persona_persistence_ready = self._persona_persistence_ready()
 
@@ -1064,7 +1137,7 @@ class OrchestrationState:
         elif not search_ready:
             if research_blockers:
                 blockers.extend(research_blockers)
-            elif self.research is not None and isinstance(self.research.structured_schema, dict):
+            elif research_status["has_live_report"]:
                 blockers.append("research_insufficient_for_personas")
             else:
                 blockers.append("search_did_not_run")
@@ -1175,6 +1248,7 @@ class OrchestrationState:
         self.phase_details.setdefault(phase.value, {})
         self.phase_details[phase.value]["rollback_reason"] = reason
         self.reset_pipeline_from(pipeline_reset_step_for_phase(phase))
+        self.clear_runtime_schema_state(include_research=keep <= phase_position(SimulationPhase.INTERNET_RESEARCH))
         if keep <= phase_position(SimulationPhase.CONTEXT_CLASSIFICATION):
             self.idea_context_type = None
             self.persona_source_mode = None
@@ -1219,6 +1293,7 @@ class OrchestrationState:
         self.phase_details.setdefault(phase.value, {})
         self.phase_details[phase.value]["continue_reason"] = reason
         self.reset_pipeline_from(pipeline_reset_step_for_phase(phase))
+        self.clear_runtime_schema_state(include_research=keep <= phase_position(SimulationPhase.INTERNET_RESEARCH))
         if keep <= phase_position(SimulationPhase.INTERNET_RESEARCH):
             self.research = None
             self.search_completed = False
@@ -1239,6 +1314,29 @@ class OrchestrationState:
             self.critical_insights = []
             self.deliberation_state = {}
             self.metrics = {}
+        self.updated_at = now_ms()
+
+    def resume_from_phase_in_place(self, phase: SimulationPhase, reason: str) -> None:
+        keep = phase_position(phase)
+        self.completed_phases = [item for item in self.completed_phases if phase_position(item) < keep]
+        self.current_phase = phase
+        self.rollback_target = phase.value
+        self.status = SimulationStatus.RUNNING.value
+        self.status_reason = reason
+        self.pending_input = False
+        self.pending_input_kind = None
+        self.pending_resume_phase = None
+        self.summary = ""
+        self.summary_ready = False
+        self.error = None
+        self.simulation_ready = False
+        self.phase_details.setdefault(phase.value, {})
+        self.phase_details[phase.value]["continue_reason"] = reason
+        self.reset_pipeline_from(pipeline_reset_step_for_phase(phase))
+        self.clear_runtime_schema_state(include_research=False)
+        if keep <= phase_position(SimulationPhase.CLARIFICATION_QUESTIONS):
+            self.clarification_questions = []
+            self.clarification_answers = {}
         self.updated_at = now_ms()
 
     def next_phase(self) -> Optional[SimulationPhase]:
@@ -1337,6 +1435,60 @@ class OrchestrationState:
     def to_public_state(self) -> Dict[str, Any]:
         pipeline_status = self.pipeline_status_snapshot()
         pending_question = self.active_pending_clarification()
+        coach_entries = [
+            item
+            for item in self.critical_insights
+            if isinstance(item, dict) and str(item.get("kind") or "").strip() == "orchestrator_intervention"
+        ]
+        active_coach = next((item for item in reversed(coach_entries) if not bool(item.get("resolved"))), None)
+
+        def build_coach_payload(item: Dict[str, Any], *, index: int) -> Dict[str, Any]:
+            suggestions = []
+            for suggestion_index, suggestion in enumerate(item.get("suggestions") or [], start=1):
+                text = str(suggestion or "").strip()
+                if not text:
+                    continue
+                suggestions.append(
+                    {
+                        "suggestion_id": f"{str(item.get('tag') or 'coach').strip() or 'coach'}-{suggestion_index}",
+                        "kind": "context_patch",
+                        "title": text[:80],
+                        "one_liner": text,
+                        "rationale": str(item.get("message") or item.get("user_message") or "").strip(),
+                        "cta_label": "Apply and rerun",
+                        "evidence_ref_ids": [],
+                        "context_patch": {},
+                        "rerun_from_stage": "agent_deliberation",
+                        "estimated_eta_delta_seconds": 0,
+                    }
+                )
+            return {
+                "intervention_id": str(item.get("intervention_id") or f"coach-{index + 1}").strip(),
+                "simulation_id": self.simulation_id,
+                "blocker_tag": str(item.get("tag") or "").strip(),
+                "blocker_summary": str(item.get("user_message") or item.get("message") or "").strip(),
+                "severity": "high" if float(item.get("severity") or 0.0) >= 0.85 else "medium",
+                "should_pause": not bool(item.get("resolved")),
+                "ui_state": (
+                    "options_ready"
+                    if self.pending_input_kind == "orchestrator_apply_suggestions" and not bool(item.get("resolved"))
+                    else "diagnosed"
+                    if self.pending_input_kind == "orchestrator_intervention" and not bool(item.get("resolved"))
+                    else "resolved"
+                ),
+                "guide_message": str(item.get("message") or item.get("user_message") or "").strip() or None,
+                "phase_key": SimulationPhase.AGENT_DELIBERATION.value,
+                "suggestions": suggestions,
+                "created_at": int(item.get("created_at") or self.updated_at),
+                "resolved_at": int(item.get("resolved_at") or 0) or None,
+                "resolution": str(item.get("resolution") or "").strip() or None,
+                "history": (
+                    [{"type": "suggestions_ready", "label": "Suggestions ready"}]
+                    if suggestions
+                    else [{"type": "detected", "label": "Issue detected"}]
+                ),
+            }
+
         return {
             "simulation_id": self.simulation_id,
             "status": self.status,
@@ -1366,6 +1518,7 @@ class OrchestrationState:
             "search_finished": bool(self.schema.get("search_finished")),
             "research_ready": bool(self.schema.get("research_ready")),
             "research_estimated": bool(self.schema.get("research_estimated")),
+            "research_usable": bool(self._research_contract_ready()),
             "search_provider_health": list(self.schema.get("search_provider_health") or []),
             "search_provider_attempts": list(self.schema.get("search_provider_attempts") or []),
             "memory_status": self.schema.get("memory_status"),
@@ -1389,11 +1542,49 @@ class OrchestrationState:
                 else None
             ),
             "can_answer_clarification": pending_question is not None,
+            "pending_research_review": (
+                {
+                    "cycle_id": str(self.rollback_target or SimulationPhase.INTERNET_RESEARCH.value),
+                    "query_plan": [str(item.query or "").strip() for item in (self.research.query_plan if self.research else []) if str(item.query or "").strip()],
+                    "candidate_urls": [
+                        {
+                            "id": f"candidate_{index + 1}",
+                            "url": evidence.url,
+                            "domain": evidence.domain,
+                            "title": evidence.title,
+                            "snippet": evidence.snippet,
+                        }
+                        for index, evidence in enumerate((self.research.evidence if self.research else [])[:6])
+                        if str(evidence.url or "").strip()
+                    ],
+                    "quality_snapshot": dict((self.research.quality if self.research else {}) or {}),
+                    "gap_summary": " | ".join((self.research.gaps if self.research else [])[:3]) if self.research else None,
+                    "suggested_queries": [
+                        str(item.get("text") if isinstance(item, dict) else item).strip()
+                        for item in (self.schema.get("search_query_variants") or [])
+                        if str(item.get("text") if isinstance(item, dict) else item).strip()
+                    ],
+                    "required": True,
+                }
+                if self.pending_input_kind == "research_review"
+                else None
+            ),
             "pending_input": self.pending_input,
             "pending_input_kind": self.pending_input_kind,
             "rollback_target": self.rollback_target,
             "last_change_impact": self.last_change_impact,
             "error": self.error,
+            "coach_intervention": build_coach_payload(active_coach, index=len(coach_entries) - 1) if active_coach is not None else None,
+            "coach_history": [
+                {
+                    "intervention_id": str(item.get("intervention_id") or f"coach-{index + 1}").strip(),
+                    "blocker_tag": str(item.get("tag") or "").strip(),
+                    "blocker_summary": str(item.get("user_message") or item.get("message") or "").strip(),
+                    "resolution": str(item.get("resolution") or "").strip() or None,
+                    "resolved_at": int(item.get("resolved_at") or 0) or None,
+                }
+                for index, item in enumerate(coach_entries)
+            ],
             "idea_context_type": self.idea_context_type,
             "persona_set": dict(self.persona_set or {}),
             "persona_generation": dict(self.persona_generation_debug or {}),
@@ -1503,7 +1694,7 @@ def hydrate_state(raw: Dict[str, Any]) -> OrchestrationState:
         simulation_ready=bool(raw.get("simulation_ready")),
     )
     state.personas = [
-        PersonaProfile(
+        apply_persona_dynamic_defaults(PersonaProfile(
             persona_id=str(item.get("persona_id") or item.get("agent_id") or ""),
             name=str(item.get("display_name") or item.get("name") or ""),
             source_mode=str(item.get("source_mode") or ""),
@@ -1540,7 +1731,7 @@ def hydrate_state(raw: Dict[str, Any]) -> OrchestrationState:
             traits=dict(item.get("traits") or {}),
             biases=[str(value) for value in item.get("biases") or [] if str(value).strip()],
             opinion_score=float(item.get("opinion_score") or 0.0),
-        )
+        ))
         for item in raw.get("personas") or []
         if isinstance(item, dict)
     ]
