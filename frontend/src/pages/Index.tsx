@@ -10,6 +10,7 @@ import {
   MATURITY_LEVELS,
 } from '@/components/TopBar';
 import { ChatPanel } from '@/components/ChatPanel';
+import { GuidedSimulationPanel } from '@/components/GuidedSimulationPanel';
 import { ConfigPanel, SocietyControls } from '@/components/ConfigPanel';
 import { MetricsPanel } from '@/components/MetricsPanel';
 import { SearchPanel } from '@/components/SearchPanel';
@@ -378,6 +379,7 @@ const Index = () => {
   const [isConfigSearching, setIsConfigSearching] = useState(false);
   const [isChatThinking, setIsChatThinking] = useState(false);
   const [llmBusy, setLlmBusy] = useState(false);
+  const [guidedPanelVisible, setGuidedPanelVisible] = useState(false);
   const [llmRetryMessage, setLlmRetryMessage] = useState<string | null>(null);
   const [pendingResearchReview, setPendingResearchReview] = useState(false);
   const [reportBusy, setReportBusy] = useState(false);
@@ -3942,6 +3944,7 @@ Required sections:
       notifyActionBlocked();
       return;
     }
+    setGuidedPanelVisible(true);
     const activeInput = inputOverride ?? userInput;
     const ideaText = activeInput.idea.trim();
     const currentLocationState = resolveLocationState(activeInput);
@@ -5274,6 +5277,11 @@ If rejection is about competition or location, suggest searching for a better lo
     settings,
   };
 
+  const showGuidedWorkflowPanel =
+    activePanel === 'chat'
+    && (guidedPanelVisible || Boolean(guidedWorkflowState))
+    && !simulation.simulationId;
+
   const showSearchSidePanel = searchPanelModel.visible;
   const sidePanelMode = showSearchSidePanel ? 'search' : 'simulation';
 
@@ -5330,6 +5338,39 @@ If rejection is about competition or location, suggest searching for a better lo
           />
         ) : activePanel === 'reasoning' ? (
           <ChatPanel {...sharedChatPanelProps} viewMode="reasoning" showSearchLivePanel={false} />
+        ) : showGuidedWorkflowPanel ? (
+          <GuidedSimulationPanel
+            workflow={guidedWorkflowState}
+            loading={guidedWorkflowLoading}
+            simulationStatus={simulation.status}
+            coachIntervention={simulation.coachIntervention}
+            coachBusy={coachBusy}
+            debateReady={Boolean(guidedWorkflowState?.simulation?.debate_session?.watch_ready || debateInviteVisible)}
+            reasoningCount={simulation.reasoningFeed.length}
+            language={settings.language}
+            draftInput={guidedDraftInput}
+            onDraftChange={handleGuidedDraftChange}
+            onChooseScope={handleGuidedChooseScope}
+            onSubmitSchema={handleGuidedSubmitSchema}
+            onSubmitClarifications={handleGuidedSubmitClarifications}
+            onApproveReview={handleGuidedApproveReview}
+            onPauseWorkflow={handleGuidedPauseWorkflow}
+            onResumeWorkflow={handleGuidedResumeWorkflow}
+            onSubmitCorrection={(text) => { void handleGuidedCorrection(text); }}
+            onStartSimulation={() => { void handleGuidedStartSimulation(); }}
+            onOpenReasoning={() => {
+              setDebateInviteVisible(false);
+              handleManualPanelSwitch('reasoning');
+            }}
+            onOpenCoachEvidence={handleOpenCoachEvidence}
+            onOpenConfig={() => handleManualPanelSwitch('config')}
+            onApplyCorrectionToSimulation={() => { void handleApplyGuidedCorrectionToSimulation(); }}
+            onCoachApplySuggestion={(suggestionId) => { void handleCoachApplySuggestion(suggestionId); }}
+            onCoachRequestMoreIdeas={() => { void handleCoachRequestMoreIdeas(); }}
+            onCoachContinueWithoutChange={() => { void handleCoachContinueWithoutChange(); }}
+            onCoachCustomFix={(text) => { void handleCoachCustomFix(text); }}
+            onCoachConfirmRerun={() => { void handleCoachConfirmRerun(); }}
+          />
         ) : (
           <ChatPanel {...sharedChatPanelProps} viewMode="chat" showSearchLivePanel={!showSearchSidePanel} />
         )}

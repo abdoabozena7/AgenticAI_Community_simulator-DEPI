@@ -158,6 +158,7 @@ def _normalize_draft_context(draft: Optional[Dict[str, Any]], language: str) -> 
     context_scope = _normalize_scope(draft.get("contextScope") or draft.get("context_scope"))
     target_audience = _normalize_string_list(draft.get("targetAudience") or draft.get("target_audience"))
     goals = _normalize_string_list(draft.get("goals"))
+    persona_source_mode = str(draft.get("personaSourceMode") or draft.get("persona_source_mode") or "").strip()
     place_name = str(
         draft.get("placeName")
         or draft.get("place_name")
@@ -176,6 +177,7 @@ def _normalize_draft_context(draft: Optional[Dict[str, Any]], language: str) -> 
         "ideaMaturity": str(draft.get("ideaMaturity") or draft.get("idea_maturity") or "concept").strip() or "concept",
         "goals": goals,
         "contextScope": context_scope,
+        "personaSourceMode": persona_source_mode,
         "language": language,
     }
 
@@ -485,6 +487,9 @@ def _workflow_persona_state(state: Dict[str, Any]) -> OrchestrationState:
     user_context = _workflow_user_context(state)
     context_type = classify_idea_context(user_context)
     persona_source_mode, auto_selected = resolve_persona_source_mode(user_context, context_type=context_type)
+    if persona_source_mode:
+        state.setdefault("draft_context", {})["personaSourceMode"] = persona_source_mode
+        user_context["personaSourceMode"] = persona_source_mode
     orchestration_state = OrchestrationState(
         simulation_id=str(uuid.uuid4()),
         user_id=state.get("user_id"),
