@@ -99,7 +99,7 @@ export function HeroSection({ onGetStarted }: HeroSectionProps) {
         />
       </div>
 
-      <div className="relative z-10 mx-auto max-w-5xl text-center">
+      <div className="relative z-10 mx-auto mt-10 max-w-5xl text-center md:mt-14">
         {/* Badge */}
         <div
           ref={badgeRef}
@@ -112,7 +112,7 @@ export function HeroSection({ onGetStarted }: HeroSectionProps) {
           ref={titleRef}
           className={`${isRTL ? 'hero-title-ar' : 'font-display'} font-semibold text-foreground ${
             isRTL
-              ? 'text-5xl md:text-7xl lg:text-[5.5rem] leading-[1.42] tracking-normal mb-8'
+              ? 'text-5xl md:text-7xl lg:text-[5.5rem] leading-[1.42] tracking-normal mb-6'
               : 'text-5xl md:text-7xl lg:text-[7.5rem] leading-[1.06] tracking-[-0.04em] mb-6'
           }`}
           style={{ perspective: '1000px' }}

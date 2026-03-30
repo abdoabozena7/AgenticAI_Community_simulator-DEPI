@@ -62,8 +62,9 @@ export function Navbar({ onLogin, onRegister }: NavbarProps) {
     ...smoothTiming,
   } as const;
   const centerStyle = {
-    gap: `${lerp(10, 6).toFixed(1)}px`,
-    paddingInline: `${lerp(16, 8).toFixed(1)}px`,
+    gap: `${lerp(28, 18).toFixed(1)}px`,
+    paddingInline: `${lerp(28, 16).toFixed(1)}px`,
+    marginInline: 'auto',
     ...smoothTiming,
   } as const;
   const actionGroupStyle = {
@@ -79,11 +80,12 @@ export function Navbar({ onLogin, onRegister }: NavbarProps) {
   const mutedTone = `rgba(255,255,255,${lerp(0.75, 0.78).toFixed(3)})`;
   const dividerTone = `rgba(255,255,255,${lerp(0.15, 0.2).toFixed(3)})`;
   const linkBaseStyle = {
-    paddingInline: `${lerp(20, 16).toFixed(1)}px`,
+    paddingInline: `${lerp(28, 20).toFixed(1)}px`,
     paddingBlock: '8px',
-    fontSize: `${lerp(15, 14).toFixed(2)}px`,
+    fontSize: `${lerp(17, 15).toFixed(2)}px`,
     lineHeight: `${lerp(28, 24).toFixed(1)}px`,
-    color: `rgba(255,255,255,${lerp(0.75, 0.82).toFixed(3)})`,
+    color: `rgba(255,255,255,${lerp(0.88, 0.94).toFixed(3)})`,
+    fontWeight: 600,
     ...smoothTiming,
   } as const;
   const buttonTextStyle = {
@@ -110,7 +112,7 @@ export function Navbar({ onLogin, onRegister }: NavbarProps) {
           style={{ opacity: compactGlowOpacity, ...smoothTiming }}
         />
 
-        <div className={`flex items-center gap-3 z-20 shrink-0 ${isRTL ? 'order-3' : 'order-1'}`}>
+        <div className={`flex items-center gap-3 z-20 shrink-0 ${isRTL ? 'order-3 flex-row-reverse' : 'order-1'}`}>
           <div className="w-10 h-10 rounded-xl bg-foreground flex items-center justify-center">
             <span className="text-background font-bold text-sm leading-none">AS</span>
           </div>
@@ -137,7 +139,7 @@ export function Navbar({ onLogin, onRegister }: NavbarProps) {
           ))}
         </div>
 
-        <div className={`z-10 shrink-0 flex items-center transition-[gap,margin] duration-700 ${isRTL ? 'order-1 flex-row-reverse' : 'order-3'}`} style={actionGroupStyle}>
+        <div className={`z-10 shrink-0 flex items-center transition-[gap,margin] duration-700 ${isRTL ? 'order-1' : 'order-3'}`} style={actionGroupStyle}>
           <div className={`flex items-center ${isRTL ? 'flex-row-reverse' : ''}`} style={actionClusterStyle}>
             <Button
               onClick={onRegister}
