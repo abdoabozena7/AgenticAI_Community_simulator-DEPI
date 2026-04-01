@@ -179,10 +179,11 @@ export function LandingSimulationNetwork({ isInView = false }: LandingSimulation
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enablePan = false;
+    controls.enableRotate = false;
+    controls.enableZoom = false;
     controls.minDistance = 5;
     controls.maxDistance = 20;
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.06;
+    controls.enableDamping = false;
 
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
     const greenLight = new THREE.PointLight(0x22c55e, 1, 100);
@@ -747,5 +748,4 @@ export function LandingSimulationNetwork({ isInView = false }: LandingSimulation
     </div>
   );
 }
-
 

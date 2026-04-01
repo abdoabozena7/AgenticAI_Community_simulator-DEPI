@@ -11,73 +11,137 @@ interface PricingSectionProps {
   onGetStarted: () => void;
 }
 
-const plans = [
-  {
-    name: 'Starter',
-    price: '$0',
-    period: '/month',
-    description: 'Perfect for trying out the platform',
-    icon: Zap,
-    features: [
-      '3 simulations per day',
-      '50 AI agents per simulation',
-      'Basic analytics',
-      'Email support',
-      'Community access',
-    ],
-    cta: 'Start Free',
-    popular: false,
-    gradient: 'from-cyan-500/20 to-cyan-500/5',
-    iconColor: 'text-cyan-400',
-    borderColor: 'border-cyan-500/20 hover:border-cyan-500/40',
-  },
-  {
-    name: 'Pro',
-    price: '$29',
-    period: '/month',
-    description: 'For serious entrepreneurs and teams',
-    icon: Sparkles,
-    features: [
-      'Unlimited simulations',
-      '500 AI agents per simulation',
-      'Advanced analytics & reports',
-      'Priority support',
-      'API access',
-      'Custom agent personas',
-    ],
-    cta: 'Start 7-Day Trial',
-    popular: true,
-    gradient: 'from-magenta-500/20 via-purple-500/20 to-magenta-500/5',
-    iconColor: 'text-magenta-400',
-    borderColor: 'border-magenta-500/40',
-  },
-  {
-    name: 'Enterprise',
-    price: 'Custom',
-    period: '',
-    description: 'For large organizations',
-    icon: Crown,
-    features: [
-      'Everything in Pro',
-      'Unlimited agents',
-      'White-label solution',
-      'Dedicated account manager',
-      'Custom integrations',
-      'SLA guarantee',
-      'On-premise deployment',
-    ],
-    cta: 'Contact Sales',
-    popular: false,
-    gradient: 'from-yellow-500/20 to-yellow-500/5',
-    iconColor: 'text-yellow-400',
-    borderColor: 'border-yellow-500/20 hover:border-yellow-500/40',
-  },
-];
-
 export function PricingSection({ onGetStarted }: PricingSectionProps) {
-  const { t } = useLanguage();
+  const { t, language } = useLanguage();
   const sectionRef = useRef<HTMLDivElement>(null);
   const cardsRef = useRef<HTMLDivElement>(null);
+
+  const plans =
+    language === 'ar'
+      ? [
+          {
+            name: 'Starter',
+            price: '$0',
+            period: '/month',
+            description: 'مثالي لتجربة المنصة لأول مرة',
+            icon: Zap,
+            features: [
+              '3 محاكاة يوميًا',
+              '50 وكيل ذكاء اصطناعي لكل محاكاة',
+              'تحليلات أساسية',
+              'دعم عبر البريد الإلكتروني',
+              'وصول مجتمعي',
+            ],
+            cta: 'ابدأ مجانًا',
+            popular: false,
+            gradient: 'from-cyan-500/20 to-cyan-500/5',
+            iconColor: 'text-cyan-400',
+            borderColor: 'border-cyan-500/20 hover:border-cyan-500/40',
+          },
+          {
+            name: 'Pro',
+            price: '$29',
+            period: '/month',
+            description: 'لرواد الأعمال والفرق الجادة',
+            icon: Sparkles,
+            features: [
+              'محاكاة غير محدودة',
+              '500 وكيل ذكاء اصطناعي لكل محاكاة',
+              'تحليلات وتقارير متقدمة',
+              'دعم ذو أولوية',
+              'وصول API',
+              'شخصيات وكلاء مخصصة',
+            ],
+            cta: 'ابدأ تجربة 7 أيام',
+            popular: true,
+            gradient: 'from-magenta-500/20 via-purple-500/20 to-magenta-500/5',
+            iconColor: 'text-magenta-400',
+            borderColor: 'border-magenta-500/40',
+          },
+          {
+            name: 'Enterprise',
+            price: 'مخصص',
+            period: '',
+            description: 'للشركات والمؤسسات الكبيرة',
+            icon: Crown,
+            features: [
+              'كل ما في Pro',
+              'وكلاء غير محدودين',
+              'حل White-label',
+              'مدير حساب مخصص',
+              'تكاملات مخصصة',
+              'ضمان SLA',
+              'نشر داخلي On-premise',
+            ],
+            cta: 'تواصل مع المبيعات',
+            popular: false,
+            gradient: 'from-yellow-500/20 to-yellow-500/5',
+            iconColor: 'text-yellow-400',
+            borderColor: 'border-yellow-500/20 hover:border-yellow-500/40',
+          },
+        ]
+      : [
+          {
+            name: 'Starter',
+            price: '$0',
+            period: '/month',
+            description: 'Perfect for trying out the platform',
+            icon: Zap,
+            features: [
+              '3 simulations per day',
+              '50 AI agents per simulation',
+              'Basic analytics',
+              'Email support',
+              'Community access',
+            ],
+            cta: 'Start Free',
+            popular: false,
+            gradient: 'from-cyan-500/20 to-cyan-500/5',
+            iconColor: 'text-cyan-400',
+            borderColor: 'border-cyan-500/20 hover:border-cyan-500/40',
+          },
+          {
+            name: 'Pro',
+            price: '$29',
+            period: '/month',
+            description: 'For serious entrepreneurs and teams',
+            icon: Sparkles,
+            features: [
+              'Unlimited simulations',
+              '500 AI agents per simulation',
+              'Advanced analytics & reports',
+              'Priority support',
+              'API access',
+              'Custom agent personas',
+            ],
+            cta: 'Start 7-Day Trial',
+            popular: true,
+            gradient: 'from-magenta-500/20 via-purple-500/20 to-magenta-500/5',
+            iconColor: 'text-magenta-400',
+            borderColor: 'border-magenta-500/40',
+          },
+          {
+            name: 'Enterprise',
+            price: 'Custom',
+            period: '',
+            description: 'For large organizations',
+            icon: Crown,
+            features: [
+              'Everything in Pro',
+              'Unlimited agents',
+              'White-label solution',
+              'Dedicated account manager',
+              'Custom integrations',
+              'SLA guarantee',
+              'On-premise deployment',
+            ],
+            cta: 'Contact Sales',
+            popular: false,
+            gradient: 'from-yellow-500/20 to-yellow-500/5',
+            iconColor: 'text-yellow-400',
+            borderColor: 'border-yellow-500/20 hover:border-yellow-500/40',
+          },
+        ];
 
   useEffect(() => {
     const ctx = gsap.context(() => {
@@ -153,7 +217,7 @@ export function PricingSection({ onGetStarted }: PricingSectionProps) {
                 <div className="absolute -top-4 left-1/2 -translate-x-1/2">
                   <div className="flex items-center gap-1.5 px-4 py-1.5 rounded-full bg-gradient-to-r from-magenta-500 to-purple-500 text-white text-sm font-medium shadow-lg shadow-magenta-500/25">
                     <Sparkles className="w-3.5 h-3.5" />
-                    Most Popular
+                    {language === 'ar' ? 'الأكثر شيوعًا' : 'Most Popular'}
                   </div>
                 </div>
               )}
@@ -204,7 +268,9 @@ export function PricingSection({ onGetStarted }: PricingSectionProps) {
         </div>
 
         <p className="text-center text-sm text-muted-foreground mt-8">
-          All plans include a 7-day free trial. No credit card required.
+          {language === 'ar'
+            ? 'جميع الخطط تتضمن تجربة مجانية لمدة 7 أيام. لا حاجة لبطاقة ائتمان.'
+            : 'All plans include a 7-day free trial. No credit card required.'}
         </p>
       </div>
     </section>
