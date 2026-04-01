@@ -25,6 +25,7 @@ import { apiService, AUTH_CHANGED_EVENT, getAuthToken } from "@/services/api";
 import { ThemeProvider } from "@/contexts/ThemeContext";
 import { LanguageProvider } from "@/contexts/LanguageContext";
 import { PageTransition } from "@/components/PageTransition";
+import { isLandingOnlyMode } from "@/lib/runtime";
 
 const queryClient = new QueryClient();
 const routerBasename = (import.meta.env.BASE_URL || "/").replace(/\/$/, "") || "/";
@@ -147,6 +148,14 @@ const AppShell = () => {
       // ignore
     }
   }, []);
+
+  if (isLandingOnlyMode) {
+    return (
+      <Routes>
+        <Route path="*" element={<MarketingLandingPage />} />
+      </Routes>
+    );
+  }
 
   return (
     <Routes>

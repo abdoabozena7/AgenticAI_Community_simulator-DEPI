@@ -16,6 +16,7 @@ import { CTASection } from '@/components/landing/CTASection';
 import { FooterSection } from '@/components/landing/FooterSection';
 import { AuthModal } from '@/components/landing/AuthModal';
 import { LandingVisualBackground } from '@/components/landing/LandingVisualBackground';
+import { isLandingOnlyMode } from '@/lib/runtime';
 
 gsap.registerPlugin(ScrollTrigger);
 
@@ -26,6 +27,9 @@ const MarketingLandingPage = () => {
   const navigate = useNavigate();
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'register'>('register');
+  const scrollToPricing = () => {
+    document.getElementById('pricing')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
 
   const shellVars = useMemo<CSSProperties>(
     () =>
@@ -88,6 +92,7 @@ const MarketingLandingPage = () => {
   }, []);
 
   useEffect(() => {
+    if (isLandingOnlyMode) return;
     const params = new URLSearchParams(location.search);
     const auth = params.get('auth');
     if (auth === 'login' || auth === 'register') {
@@ -98,11 +103,19 @@ const MarketingLandingPage = () => {
   }, [location.pathname, location.search, navigate]);
 
   const handleOpenAuth = (mode: 'login' | 'register') => {
+    if (isLandingOnlyMode) {
+      scrollToPricing();
+      return;
+    }
     setAuthMode(mode);
     setIsAuthOpen(true);
   };
 
   const handleGetStarted = () => {
+    if (isLandingOnlyMode) {
+      scrollToPricing();
+      return;
+    }
     try {
       localStorage.setItem('postLoginRedirect', '/dashboard');
     } catch {
@@ -150,11 +163,13 @@ const MarketingLandingPage = () => {
 
         <FooterSection />
 
-        <AuthModal
-          isOpen={isAuthOpen}
-          onClose={() => setIsAuthOpen(false)}
-          initialMode={authMode}
-        />
+        {!isLandingOnlyMode && (
+          <AuthModal
+            isOpen={isAuthOpen}
+            onClose={() => setIsAuthOpen(false)}
+            initialMode={authMode}
+          />
+        )}
       </div>
     </div>
   );
