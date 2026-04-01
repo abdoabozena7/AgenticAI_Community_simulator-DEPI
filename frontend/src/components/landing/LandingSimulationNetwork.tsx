@@ -136,8 +136,24 @@ interface LandingSimulationNetworkProps {
 export function LandingSimulationNetwork({ isInView = false }: LandingSimulationNetworkProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const popupContainerRef = useRef<HTMLDivElement>(null);
+  const sectionActiveRef = useRef(isInView);
+  const startSimulationRef = useRef<(() => void) | null>(null);
+  const stopSimulationRef = useRef<(() => void) | null>(null);
+  const startRandomPopupsRef = useRef<(() => void) | null>(null);
+  const stopRandomPopupsRef = useRef<(() => void) | null>(null);
 
   const [statsText, setStatsText] = useState('25 Nodes - 0 Connections');
+
+  useEffect(() => {
+    sectionActiveRef.current = isInView;
+    if (isInView) {
+      startSimulationRef.current?.();
+      startRandomPopupsRef.current?.();
+      return;
+    }
+    stopSimulationRef.current?.();
+    stopRandomPopupsRef.current?.();
+  }, [isInView]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -157,8 +173,8 @@ export function LandingSimulationNetwork({ isInView = false }: LandingSimulation
     const camera = new THREE.PerspectiveCamera(CONFIG.cameraFOV, 1, 0.1, 1000);
     camera.position.set(...CONFIG.cameraPosition);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     renderer.setClearColor(currentTheme.background, 1);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(renderer.domElement);
@@ -566,6 +582,7 @@ export function LandingSimulationNetwork({ isInView = false }: LandingSimulation
       refreshRandomPopups();
       popupIntervalId = window.setInterval(refreshRandomPopups, POPUP_CONFIG.interval);
     };
+    startRandomPopupsRef.current = startRandomPopups;
 
     const stopRandomPopups = () => {
       if (popupIntervalId) {
@@ -574,6 +591,7 @@ export function LandingSimulationNetwork({ isInView = false }: LandingSimulation
       }
       popupPool.forEach(p => hidePopup(p));
     };
+    stopRandomPopupsRef.current = stopRandomPopups;
 
     const simulateStep = () => {
       const neutralAgents = agents.filter(a => a.status === 'neutral');
@@ -607,6 +625,7 @@ export function LandingSimulationNetwork({ isInView = false }: LandingSimulation
       isRunning = true;
       simulationIntervalId = window.setInterval(simulateStep, CONFIG.simulationInterval);
     };
+    startSimulationRef.current = startSimulation;
 
     const stopSimulation = () => {
       isRunning = false;
@@ -615,6 +634,7 @@ export function LandingSimulationNetwork({ isInView = false }: LandingSimulation
         simulationIntervalId = 0;
       }
     };
+    stopSimulationRef.current = stopSimulation;
 
     const applyTheme = (mode: ThemeMode) => {
       const values = THEMES[mode];
@@ -669,11 +689,18 @@ export function LandingSimulationNetwork({ isInView = false }: LandingSimulation
     const onVisibilityChange = () => {
       if (document.hidden && isRunning) {
         stopSimulation();
+        stopRandomPopups();
+        return;
+      }
+      if (!document.hidden && sectionActiveRef.current) {
+        startSimulation();
+        startRandomPopups();
       }
     };
 
     const animate = () => {
       rafId = window.requestAnimationFrame(animate);
+      if (document.hidden || !sectionActiveRef.current) return;
       const time = performance.now() * 0.001;
 
       networkGroup.rotation.y = time * CONFIG.rotationSpeed;
@@ -700,11 +727,21 @@ export function LandingSimulationNetwork({ isInView = false }: LandingSimulation
 
     resetSimulation(false);
     applyTheme('dark');
-    startSimulation();
+    if (sectionActiveRef.current) {
+      startSimulation();
+      startRandomPopups();
+    } else {
+      stopSimulation();
+      stopRandomPopups();
+    }
     animate();
 
     return () => {
       mounted = false;
+      startSimulationRef.current = null;
+      stopSimulationRef.current = null;
+      startRandomPopupsRef.current = null;
+      stopRandomPopupsRef.current = null;
 
       stopSimulation();
       stopRandomPopups();
@@ -748,4 +785,3 @@ export function LandingSimulationNetwork({ isInView = false }: LandingSimulation
     </div>
   );
 }
-

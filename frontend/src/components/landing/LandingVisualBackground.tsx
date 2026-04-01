@@ -8,17 +8,17 @@ export function LandingVisualBackground() {
       <div className="absolute inset-0">
         <LiquidEther
           colors={['#5227FF', '#FF9FFC', '#B19EEF']}
-          mouseForce={24}
-          cursorSize={118}
+          mouseForce={14}
+          cursorSize={92}
           isViscous
           viscous={34}
-          iterationsViscous={34}
-          iterationsPoisson={34}
-          resolution={0.6}
+          iterationsViscous={20}
+          iterationsPoisson={20}
+          resolution={0.35}
           isBounce={false}
           autoDemo
-          autoSpeed={0.58}
-          autoIntensity={2.8}
+          autoSpeed={0.42}
+          autoIntensity={1.4}
           takeoverDuration={0.25}
           autoResumeDelay={3000}
           autoRampDuration={0.6}
