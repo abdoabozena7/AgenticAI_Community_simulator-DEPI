@@ -27,6 +27,7 @@ import { LanguageProvider } from "@/contexts/LanguageContext";
 import { PageTransition } from "@/components/PageTransition";
 
 const queryClient = new QueryClient();
+const routerBasename = (import.meta.env.BASE_URL || "/").replace(/\/$/, "") || "/";
 
 const applyLanguageSettings = (language?: string | null) => {
   if (typeof document === 'undefined') return;
@@ -122,7 +123,7 @@ const App = () => (
           <Toaster />
           <Sonner />
           <ErrorBoundary>
-            <BrowserRouter>
+            <BrowserRouter basename={routerBasename}>
               <PageTransition>
                 <AppShell />
               </PageTransition>
