@@ -15,7 +15,6 @@ import { PricingSection } from '@/components/landing/PricingSection';
 import { CTASection } from '@/components/landing/CTASection';
 import { FooterSection } from '@/components/landing/FooterSection';
 import { AuthModal } from '@/components/landing/AuthModal';
-import { LandingVisualBackground } from '@/components/landing/LandingVisualBackground';
 import { isLandingOnlyMode } from '@/lib/runtime';
 
 gsap.registerPlugin(ScrollTrigger);
@@ -126,19 +125,9 @@ const MarketingLandingPage = () => {
 
   return (
     <div
-      className={`architect-shell relative min-h-screen overflow-hidden bg-background text-foreground transition-colors duration-300 ${isRTL ? 'rtl' : 'ltr'}`}
+      className={`architect-shell ${theme === 'dark' ? 'architect-shell-dark' : 'architect-shell-light'} relative min-h-screen overflow-hidden bg-background text-foreground transition-colors duration-300 ${isRTL ? 'rtl' : 'ltr'}`}
       style={shellVars}
     >
-      <LandingVisualBackground />
-      <div
-        aria-hidden
-        className={`pointer-events-none fixed inset-0 z-[1] ${
-          theme === 'dark'
-            ? 'bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.04),transparent_32%),linear-gradient(180deg,rgba(5,5,5,0.72),rgba(8,8,8,0.92))]'
-            : 'bg-[radial-gradient(circle_at_top,rgba(16,12,61,0.04),transparent_32%),linear-gradient(180deg,rgba(247,249,251,0.68),rgba(236,238,240,0.9))]'
-        }`}
-      />
-
       <div className="relative z-10">
         <Navbar
           onLogin={() => handleOpenAuth('login')}

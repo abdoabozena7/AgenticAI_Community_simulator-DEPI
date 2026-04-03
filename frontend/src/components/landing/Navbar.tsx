@@ -54,10 +54,19 @@ export function Navbar({ onLogin, onRegister }: NavbarProps) {
     paddingInline: `${lerp(40, 16).toFixed(1)}px`,
     paddingBlock: `${lerp(12, 8).toFixed(1)}px`,
     borderRadius: `${lerp(0, 999).toFixed(1)}px`,
-    borderColor: `rgba(255,255,255,${lerp(0, 0.2).toFixed(3)})`,
-    backgroundColor: `rgba(14,14,24,${lerp(0, 0.72).toFixed(3)})`,
+    borderColor:
+      theme === 'dark'
+        ? `rgba(255,255,255,${lerp(0, 0.2).toFixed(3)})`
+        : `rgba(15,23,42,${lerp(0.08, 0.14).toFixed(3)})`,
+    backgroundColor:
+      theme === 'dark'
+        ? `rgba(14,14,24,${lerp(0, 0.72).toFixed(3)})`
+        : `rgba(255,255,255,${lerp(0.82, 0.94).toFixed(3)})`,
     backdropFilter: `blur(${lerp(0, 20).toFixed(1)}px)`,
-    boxShadow: `0 ${lerp(0, 14).toFixed(1)}px ${lerp(0, 38).toFixed(1)}px -20px rgba(0,0,0,${lerp(0, 0.52).toFixed(3)})`,
+    boxShadow:
+      theme === 'dark'
+        ? `0 ${lerp(0, 14).toFixed(1)}px ${lerp(0, 38).toFixed(1)}px -20px rgba(0,0,0,${lerp(0, 0.52).toFixed(3)})`
+        : `0 ${lerp(10, 18).toFixed(1)}px ${lerp(26, 40).toFixed(1)}px -24px rgba(15,23,42,${lerp(0.12, 0.18).toFixed(3)})`,
     transform: `scale(${lerp(1, 0.985).toFixed(4)})`,
     ...smoothTiming,
   } as const;
@@ -76,15 +85,27 @@ export function Navbar({ onLogin, onRegister }: NavbarProps) {
     gap: `${lerp(10, 8).toFixed(1)}px`,
     ...smoothTiming,
   } as const;
-  const iconButtonTone = `rgba(255,255,255,${lerp(0.7, 0.78).toFixed(3)})`;
-  const mutedTone = `rgba(255,255,255,${lerp(0.75, 0.78).toFixed(3)})`;
-  const dividerTone = `rgba(255,255,255,${lerp(0.15, 0.2).toFixed(3)})`;
+  const iconButtonTone =
+    theme === 'dark'
+      ? `rgba(255,255,255,${lerp(0.7, 0.78).toFixed(3)})`
+      : `rgba(15,23,42,${lerp(0.64, 0.78).toFixed(3)})`;
+  const mutedTone =
+    theme === 'dark'
+      ? `rgba(255,255,255,${lerp(0.75, 0.78).toFixed(3)})`
+      : `rgba(15,23,42,${lerp(0.72, 0.82).toFixed(3)})`;
+  const dividerTone =
+    theme === 'dark'
+      ? `rgba(255,255,255,${lerp(0.15, 0.2).toFixed(3)})`
+      : `rgba(15,23,42,${lerp(0.08, 0.12).toFixed(3)})`;
   const linkBaseStyle = {
     paddingInline: `${lerp(28, 20).toFixed(1)}px`,
     paddingBlock: '8px',
     fontSize: `${lerp(17, 15).toFixed(2)}px`,
     lineHeight: `${lerp(28, 24).toFixed(1)}px`,
-    color: `rgba(255,255,255,${lerp(0.88, 0.94).toFixed(3)})`,
+    color:
+      theme === 'dark'
+        ? `rgba(255,255,255,${lerp(0.88, 0.94).toFixed(3)})`
+        : `rgba(15,23,42,${lerp(0.82, 0.92).toFixed(3)})`,
     fontWeight: 600,
     ...smoothTiming,
   } as const;
@@ -131,7 +152,9 @@ export function Navbar({ onLogin, onRegister }: NavbarProps) {
             <a
               key={link.key}
               href={link.href}
-              className="relative z-10 inline-flex items-center rounded-full font-medium transition-[padding,color,background-color,font-size,line-height,transform] duration-500 hover:bg-white/10 hover:text-white"
+              className={`relative z-10 inline-flex items-center rounded-full font-medium transition-[padding,color,background-color,font-size,line-height,transform] duration-500 ${
+                theme === 'dark' ? 'hover:bg-white/10 hover:text-white' : 'hover:bg-black/5 hover:text-black'
+              }`}
               style={linkBaseStyle}
             >
               {t(link.key)}
@@ -146,7 +169,9 @@ export function Navbar({ onLogin, onRegister }: NavbarProps) {
           <div className={`flex items-center ${isRTL ? 'flex-row-reverse' : ''}`} style={actionClusterStyle}>
             <Button
               onClick={onRegister}
-              className="relative z-10 rounded-full bg-white text-black transition-[padding,height,background-color,font-size,line-height,transform,box-shadow] duration-500 hover:bg-white/90"
+              className={`relative z-10 rounded-full transition-[padding,height,background-color,font-size,line-height,transform,box-shadow] duration-500 ${
+                theme === 'dark' ? 'bg-white text-black hover:bg-white/90' : 'bg-black text-white hover:bg-black/90'
+              }`}
               style={buttonTextStyle}
             >
               {t('nav.startFree')}
@@ -154,7 +179,9 @@ export function Navbar({ onLogin, onRegister }: NavbarProps) {
             <Button
               variant="ghost"
               onClick={onLogin}
-              className="relative z-10 rounded-full transition-[padding,height,color,background-color,font-size,line-height] duration-500 hover:bg-white/10 hover:text-white"
+              className={`relative z-10 rounded-full transition-[padding,height,color,background-color,font-size,line-height] duration-500 ${
+                theme === 'dark' ? 'hover:bg-white/10 hover:text-white' : 'hover:bg-black/5 hover:text-black'
+              }`}
               style={{ color: mutedTone, ...buttonTextStyle }}
             >
               {t('nav.signIn')}
@@ -168,7 +195,9 @@ export function Navbar({ onLogin, onRegister }: NavbarProps) {
               variant="ghost"
               size="icon"
               onClick={toggleTheme}
-              className="relative z-10 h-10 w-10 rounded-full hover:bg-white/10 hover:text-white"
+              className={`relative z-10 h-10 w-10 rounded-full ${
+                theme === 'dark' ? 'hover:bg-white/10 hover:text-white' : 'hover:bg-black/5 hover:text-black'
+              }`}
               style={{ color: iconButtonTone, ...smoothTiming }}
             >
               {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
@@ -178,7 +207,9 @@ export function Navbar({ onLogin, onRegister }: NavbarProps) {
               variant="ghost"
               size="icon"
               onClick={toggleLanguage}
-              className="relative z-10 h-10 w-10 rounded-full hover:bg-white/10 hover:text-white"
+              className={`relative z-10 h-10 w-10 rounded-full ${
+                theme === 'dark' ? 'hover:bg-white/10 hover:text-white' : 'hover:bg-black/5 hover:text-black'
+              }`}
               style={{ color: iconButtonTone, ...smoothTiming }}
             >
               <Languages className="w-4 h-4" />
