@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { ArrowRight, Eye, Pause, Play, ShieldCheck, Sparkles } from 'lucide-react';
+import { ArrowRight, Clock3, Eye, Pause, Play, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -14,8 +14,6 @@ import {
   ChatActionRow,
   ChatBubble,
   ChatShell,
-  ChatTopProgress,
-  type ChatProgressStep,
 } from '@/components/simulation/ChatPrimitives';
 
 export const GUIDED_SIMULATION_PANEL_CUSTOM_X_PX = 0;
@@ -84,6 +82,145 @@ const formatEta = (seconds?: number, language: 'ar' | 'en' = 'en') => {
 const stageLabel = (stage: string, language: 'ar' | 'en') =>
   STAGE_LABELS[stage]?.[language] || stage.replace(/_/g, ' ');
 
+const visibleStageOrder = (contextScope: GuidedWorkflowDraftContext['contextScope']) =>
+  DEFAULT_STAGE_ORDER.filter((stage) => stage !== 'location_research' || contextScope === 'specific_place');
+
+type GuidedProgressStep = {
+  key: string;
+  label: string;
+  state: 'completed' | 'current' | 'upcoming';
+};
+
+const buildGuidedProgressSteps = (
+  currentStage: string,
+  contextScope: GuidedWorkflowDraftContext['contextScope'],
+  language: 'ar' | 'en',
+): GuidedProgressStep[] => {
+  const steps = [
+    {
+      key: 'context',
+      label: language === 'ar' ? 'السياق' : 'Context',
+      stages: ['context_scope'],
+    },
+    {
+      key: 'schema',
+      label: language === 'ar' ? 'البيانات' : 'Schema',
+      stages: ['schema_intake', 'clarification'],
+    },
+    {
+      key: 'research',
+      label: language === 'ar' ? 'البحث' : 'Research',
+      stages: contextScope === 'specific_place'
+        ? ['idea_research', 'location_research']
+        : ['idea_research'],
+    },
+    {
+      key: 'personas',
+      label: language === 'ar' ? 'الشخصيات' : 'Personas',
+      stages: ['persona_synthesis'],
+    },
+    {
+      key: 'review',
+      label: language === 'ar' ? 'المراجعة' : 'Review',
+      stages: ['review'],
+    },
+    {
+      key: 'start',
+      label: language === 'ar' ? 'البدء' : 'Start',
+      stages: ['ready_to_start'],
+    },
+  ];
+  const currentIndex = steps.findIndex((step) => step.stages.includes(currentStage));
+  return steps.map((step, index) => ({
+    key: step.key,
+    label: step.label,
+    state:
+      index < currentIndex
+        ? 'completed'
+        : index === currentIndex
+          ? 'current'
+          : 'upcoming',
+  }));
+};
+
+const runningStageCopy = (
+  stage: string,
+  language: 'ar' | 'en',
+  placeLabel?: string,
+) => {
+  if (stage === 'idea_research') {
+    return {
+      title: language === 'ar' ? 'جارٍ بحث الفكرة' : 'Researching the idea',
+      detail: language === 'ar'
+        ? 'نجمع إشارات السوق والمستخدمين قبل بناء الشخصيات.'
+        : 'Collecting market and audience signals before persona generation.',
+    };
+  }
+  if (stage === 'location_research') {
+    return {
+      title: language === 'ar' ? 'جارٍ بحث المكان' : 'Researching the place',
+      detail: language === 'ar'
+        ? `نجمع إشارات محلية مرتبطة بـ ${placeLabel || 'المكان المحدد'}.`
+        : `Collecting local signals for ${placeLabel || 'the selected place'}.`,
+    };
+  }
+  return {
+    title: language === 'ar' ? 'جارٍ توليد الشخصيات' : 'Generating personas',
+    detail: language === 'ar'
+      ? 'نحوّل البحث إلى شخصيات قابلة للمحاكاة ونراجع جودتها.'
+      : 'Turning research into simulation-ready personas and validating coverage.',
+  };
+};
+
+const statusLabel = (status: string, language: 'ar' | 'en') => {
+  const value = status.toLowerCase();
+  if (value === 'paused' || value === 'awaiting_input' || value === 'blocked') {
+    return language === 'ar' ? 'متوقف مؤقتًا' : 'Waiting on input';
+  }
+  if (value === 'in_progress' || value === 'running') {
+    return language === 'ar' ? 'يعمل الآن' : 'Running';
+  }
+  if (value === 'completed' || value === 'ready') {
+    return language === 'ar' ? 'جاهز' : 'Ready';
+  }
+  return language === 'ar' ? 'قيد المتابعة' : 'In progress';
+};
+
+const parseTimestamp = (value?: number | string | null) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+};
+
+const formatRelativeTime = (value?: number | string | null, language: 'ar' | 'en' = 'en') => {
+  const timestamp = parseTimestamp(value);
+  if (!timestamp) return null;
+  const diffMs = Math.max(0, Date.now() - timestamp);
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 1) return language === 'ar' ? 'الآن' : 'just now';
+  if (minutes < 60) return language === 'ar' ? `${minutes} د` : `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return language === 'ar' ? `${hours} س` : `${hours} hours ago`;
+  const days = Math.floor(hours / 24);
+  return language === 'ar' ? `${days} يوم` : `${days} days ago`;
+};
+
+const usesFastGeneratedPersonas = (workflow: GuidedWorkflowState | null) => {
+  const haystack = [
+    workflow?.persona_snapshot?.source,
+    workflow?.persona_snapshot?.source_policy,
+    workflow?.persona_library?.source,
+  ]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .join(' ')
+    .toLowerCase();
+
+  return haystack.includes('fallback') || haystack.includes('fast');
+};
+
 function ToggleChip({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
   return (
     <button type="button" onClick={onClick} className={cn('guided-chat-toggle-chip', active && 'is-selected')}>
@@ -97,15 +234,17 @@ function GuideBubble({
   kicker,
   tone = 'default',
   wide = false,
+  className,
 }: {
   children: ReactNode;
   kicker?: string | null;
   tone?: 'default' | 'interactive' | 'success' | 'warning' | 'muted';
   wide?: boolean;
+  className?: string;
 }) {
   return (
     <ChatBubble
-      className={cn('guided-chat-message', wide && 'guided-chat-message-wide')}
+      className={cn('guided-chat-message', wide && 'guided-chat-message-wide', className)}
       tone={tone}
       bubbleClassName="guided-chat-bubble"
       kicker={kicker === undefined ? null : kicker}
@@ -171,22 +310,6 @@ export function GuidedSimulationPanel({
   const coachEvidenceMessageIds = (coachIntervention?.agentCitations || [])
     .map((item) => item.messageId)
     .filter(Boolean) as string[];
-
-  const progressSteps = useMemo<ChatProgressStep[]>(() => {
-    const byStage = new Map(stageHistory.map((item) => [item.stage, item.status]));
-    return DEFAULT_STAGE_ORDER.filter(
-      (stage) => stage !== 'location_research' || draftInput.contextScope === 'specific_place',
-    ).map((stage) => ({
-      key: stage,
-      label: stageLabel(stage, language),
-      state:
-        byStage.get(stage) === 'completed' || byStage.get(stage) === 'ready'
-          ? 'completed'
-          : currentStage === stage
-            ? 'current'
-            : 'upcoming',
-    }));
-  }, [currentStage, draftInput.contextScope, language, stageHistory]);
 
   const schemaSteps = useMemo(() => {
     const steps: Array<{
@@ -364,15 +487,6 @@ export function GuidedSimulationPanel({
     activeClarificationQuestions[
       Math.min(clarificationStepIndex, Math.max(activeClarificationQuestions.length - 1, 0))
     ];
-
-  useEffect(() => {
-    setSchemaStepIndex(0);
-  }, [currentStage, workflow?.required_fields?.join('|'), draftInput.contextScope]);
-
-  useEffect(() => {
-    setClarificationStepIndex(0);
-  }, [currentStage, activeClarificationQuestions.length]);
-
   const submitClarifications = () => {
     const answers = activeClarificationQuestions
       .map((question) => ({
@@ -385,6 +499,158 @@ export function GuidedSimulationPanel({
       onSubmitClarifications(answers);
     }
   };
+  const visibleStages = useMemo(
+    () => visibleStageOrder(draftInput.contextScope),
+    [draftInput.contextScope],
+  );
+  const progressSteps = useMemo(
+    () => buildGuidedProgressSteps(currentStage, draftInput.contextScope, language),
+    [currentStage, draftInput.contextScope, language],
+  );
+  const currentStageIndex = visibleStages.indexOf(currentStage);
+  const nextStage = currentStageIndex >= 0 ? visibleStages[currentStageIndex + 1] || null : null;
+  const currentProgressIndex = Math.max(
+    0,
+    progressSteps.findIndex((step) => step.state === 'current'),
+  );
+  const currentStatusText = statusLabel(workflow?.status || workflow?.current_stage_status || '', language);
+  const stageStatusText =
+    workflow?.current_stage_status && workflow.current_stage_status !== workflow?.status
+      ? statusLabel(workflow.current_stage_status, language)
+      : null;
+  const updatedAtLabel = formatRelativeTime(
+    workflow?.updated_at || workflow?.verification?.checked_at || workflow?.created_at,
+    language,
+  );
+  const usingFastPersonas = usesFastGeneratedPersonas(workflow);
+  const blockingReason = useMemo(() => {
+    if (workflow?.pause_reason) return workflow.pause_reason;
+    if (currentStage === 'context_scope') {
+      return language === 'ar'
+        ? 'اختر نطاق السياق للمتابعة.'
+        : 'Choose the context scope to continue.';
+    }
+    if (currentStage === 'schema_intake') {
+      if (activeSchemaStep?.hint) return activeSchemaStep.hint;
+      if (workflow?.required_fields?.length) {
+        return language === 'ar'
+          ? `نحتاج الآن: ${workflow.required_fields.join(', ')}`
+          : `Still needed: ${workflow.required_fields.join(', ')}`;
+      }
+      return language === 'ar' ? 'أرسل الحقول المتبقية للمتابعة.' : 'Submit the remaining fields to continue.';
+    }
+    if (currentStage === 'clarification' && activeClarificationQuestion) {
+      return activeClarificationQuestion.reason || activeClarificationQuestion.prompt;
+    }
+    if (currentStage === 'review' && workflow?.review && workflow.review.ready_to_start === false) {
+      return language === 'ar'
+        ? 'راجع الملخص ثم وافق عليه قبل بدء المحاكاة.'
+        : 'Review the summary and approve it before starting the simulation.';
+    }
+    return null;
+  }, [
+    activeClarificationQuestion,
+    activeSchemaStep?.hint,
+    currentStage,
+    language,
+    workflow?.pause_reason,
+    workflow?.required_fields,
+    workflow?.review,
+  ]);
+  const primaryAction = useMemo(() => {
+    if (currentStage === 'review') {
+      return {
+        label: language === 'ar' ? 'اعتمد المراجعة' : 'Approve review',
+        onClick: onApproveReview,
+        disabled: loading,
+        icon: Sparkles,
+      };
+    }
+    if (currentStage === 'ready_to_start') {
+      return {
+        label: language === 'ar' ? 'ابدأ المحاكاة' : 'Start simulation',
+        onClick: onStartSimulation,
+        disabled: loading || simulationStatus === 'running',
+        icon: Play,
+      };
+    }
+    return null;
+  }, [
+    activeClarificationQuestion,
+    activeClarificationQuestions.length,
+    activeSchemaStep,
+    clarificationAnswers,
+    clarificationStepIndex,
+    currentStage,
+    draftInput,
+    loading,
+    language,
+    onApproveReview,
+    onStartSimulation,
+    onSubmitSchema,
+    schemaStepIndex,
+    schemaSteps.length,
+    simulationStatus,
+    submitClarifications,
+  ]);
+  const PrimaryActionIcon = primaryAction?.icon;
+  const showReasoningAction = Boolean(reasoningCount || debateReady || simulationStatus !== 'idle');
+  const showCorrectionAction = Boolean(
+    lastCorrection
+    || workflow?.pause_reason
+    || simulationStatus !== 'idle'
+    || currentStage === 'review'
+    || currentStage === 'ready_to_start',
+  );
+  const runningCopy = runningStageCopy(
+    currentStage,
+    language,
+    workflow?.location_research?.place_label || draftInput.placeName || draftInput.city || undefined,
+  );
+  const reviewPersonas = (workflow?.persona_snapshot?.personas || []).slice(0, 2);
+  const reviewWarnings = useMemo(() => {
+    const warnings: string[] = [];
+    if (workflow?.review?.ready_to_start === false && workflow?.pause_reason) {
+      warnings.push(workflow.pause_reason);
+    } else if (workflow?.verification?.ok === false && currentStage === 'review') {
+      warnings.push(
+        language === 'ar'
+          ? 'هناك ملاحظة بسيطة تحتاج مراجعة قبل الانتقال للبدء.'
+          : 'A quick validation check still needs attention before you move to start.',
+      );
+    }
+    return warnings;
+  }, [currentStage, language, workflow?.pause_reason, workflow?.review?.ready_to_start, workflow?.verification?.ok]);
+  const reviewNextStepCopy = currentStage === 'ready_to_start'
+    ? (language === 'ar'
+      ? 'الخطوة التالية ستنقلك مباشرة إلى طور المحاكاة الحية.'
+      : 'The next action will switch the page into the live simulation workspace.')
+    : (language === 'ar'
+      ? 'بعد الاعتماد ستنتقل مباشرة إلى خطوة بدء المحاكاة.'
+      : 'After approval, the flow moves directly to the start step.');
+  const openMinorEditComposer = () => {
+    setCorrectionText('');
+    setShowCorrectionComposer(true);
+  };
+  const requestPersonaRefresh = () => {
+    const suggestion = language === 'ar'
+      ? 'أعد توليد الشخصيات مع تنويع أوضح بين الأدوار والدوافع.'
+      : 'Regenerate the personas with clearer role variety and better audience coverage.';
+    onSubmitCorrection(suggestion);
+    setCorrectionText('');
+    setShowCorrectionComposer(false);
+  };
+  const correctionActionLabel = currentStage === 'review' || currentStage === 'ready_to_start'
+    ? (language === 'ar' ? 'تعديل بسيط' : 'Minor edit')
+    : (language === 'ar' ? 'تصحيح' : 'Correction');
+
+  useEffect(() => {
+    setSchemaStepIndex(0);
+  }, [currentStage, workflow?.required_fields?.join('|'), draftInput.contextScope]);
+
+  useEffect(() => {
+    setClarificationStepIndex(0);
+  }, [currentStage, activeClarificationQuestions.length]);
 
   const submitCorrection = () => {
     const text = correctionText.trim();
@@ -403,17 +669,87 @@ export function GuidedSimulationPanel({
 
   return (
     <ChatShell className="guided-chat-shell">
-      <ChatTopProgress
-        steps={progressSteps}
-        headline={
-          language === 'ar'
-            ? `نحن الآن في: ${stageLabel(currentStage, language)}`
-            : `Now in: ${stageLabel(currentStage, language)}`
-        }
-        detail={`${language === 'ar' ? 'المرحلة الحالية' : 'Current'}: ${stageLabel(currentStage, language)} • ${language === 'ar' ? 'المتبقي' : 'ETA'}: ${formatEta(workflow?.estimated_total_seconds, language)}`}
-      />
-
       <div className="messages-container guided-chat-thread">
+        <GuideBubble
+          tone={workflow?.status === 'paused' ? 'warning' : 'default'}
+          wide
+          className="guided-chat-stage-summary"
+          kicker={language === 'ar' ? 'ملخص المرحلة' : 'Stage summary'}
+        >
+          <div className="space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="guided-chat-message-title">{stageLabel(currentStage, language)}</div>
+                <div className="guided-chat-secondary-copy">
+                  {language === 'ar'
+                    ? 'هذا هو الموضع الحالي داخل المسار الموجّه.'
+                    : 'This is the current point in the guided flow.'}
+                </div>
+              </div>
+              <div className="guided-chat-mini-chip">
+                {currentStatusText}
+                {stageStatusText ? ` · ${stageStatusText}` : ''}
+              </div>
+            </div>
+
+            <div className="guided-stage-progress" role="list" aria-label={language === 'ar' ? 'تقدم المسار' : 'Flow progress'}>
+              {progressSteps.map((step) => (
+                <div
+                  key={step.key}
+                  role="listitem"
+                  className={cn(
+                    'guided-stage-progress-item',
+                    step.state === 'completed' && 'is-completed',
+                    step.state === 'current' && 'is-current',
+                  )}
+                >
+                  <span className="guided-stage-progress-dot" aria-hidden="true" />
+                  <span className="guided-stage-progress-label">{step.label}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <div className="chat-inline-stat">
+                <div className="chat-inline-stat-label">{language === 'ar' ? 'الآن' : 'Now'}</div>
+                <div className="chat-inline-stat-value">{stageLabel(currentStage, language)}</div>
+              </div>
+              <div className="chat-inline-stat">
+                <div className="chat-inline-stat-label">{language === 'ar' ? 'المعوق' : 'Blocked by'}</div>
+                <div className="chat-inline-stat-value text-[13px]">
+                  {blockingReason ||
+                    (language === 'ar'
+                      ? 'لا يوجد تعويق صريح الآن.'
+                      : 'No explicit blocker right now.')}
+                </div>
+              </div>
+              <div className="chat-inline-stat">
+                <div className="chat-inline-stat-label">{language === 'ar' ? 'التالي' : 'Next'}</div>
+                <div className="chat-inline-stat-value text-[13px]">
+                  {nextStage ? stageLabel(nextStage, language) : language === 'ar' ? 'المراجعة النهائية' : 'Final review'}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="guided-chat-mini-chip">
+                {language === 'ar' ? 'الخطوة' : 'Step'} {currentProgressIndex + 1}/{progressSteps.length}
+              </div>
+              {updatedAtLabel ? (
+                <div className="guided-chat-mini-chip">
+                  <Clock3 className="h-3.5 w-3.5" />
+                  {language === 'ar' ? 'آخر تحديث' : 'Updated'} {updatedAtLabel}
+                </div>
+              ) : null}
+              {usingFastPersonas && (currentStage === 'persona_synthesis' || currentStage === 'review' || currentStage === 'ready_to_start') ? (
+                <div className="guided-chat-mini-chip">
+                  {language === 'ar' ? 'شخصيات سريعة التوليد' : 'Using fast-generated personas'}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </GuideBubble>
+
         {workflow?.verification ? (
           <div className="guided-chat-inline-note">
             <ShieldCheck className="h-3.5 w-3.5" />
@@ -426,21 +762,6 @@ export function GuidedSimulationPanel({
                 : 'Needs review'}
           </div>
         ) : null}
-
-        <div className="guided-chat-identity">
-          <div className="guided-chat-avatar" aria-hidden="true">
-            <span className="guided-chat-avatar-face">
-              <span className="guided-chat-avatar-eye" />
-              <span className="guided-chat-avatar-eye" />
-            </span>
-          </div>
-          <div className="guided-chat-identity-copy">
-            <div className="guided-chat-identity-title">GuideAgent</div>
-            <div className="guided-chat-identity-subtitle">
-              {language === 'ar' ? 'دليل المحاكاة' : 'Simulation guide'}
-            </div>
-          </div>
-        </div>
 
         {guideMessages.map((message) => (
           <GuideBubble key={message.id} kicker={null}>
@@ -643,6 +964,45 @@ export function GuidedSimulationPanel({
                 <Eye className="mr-2 h-4 w-4" />
                 {language === 'ar' ? 'افتح التفكير' : 'Open reasoning'}
               </Button>
+            </div>
+          </GuideBubble>
+        ) : null}
+
+        {(currentStage === 'idea_research' || currentStage === 'location_research' || currentStage === 'persona_synthesis') ? (
+          <GuideBubble tone="muted" wide kicker={language === 'ar' ? 'نشاط جارٍ' : 'Active work'}>
+            <div className="space-y-3">
+              <div className="guided-chat-message-title">{runningCopy.title}</div>
+              <div className="guided-chat-secondary-copy">{runningCopy.detail}</div>
+              <div className="guided-chat-mini-chip">
+                {language === 'ar' ? 'المتبقي التقريبي' : 'Estimated remaining'}: {formatEta(workflow?.stage_eta_seconds || workflow?.estimated_total_seconds, language)}
+              </div>
+              {currentStage === 'idea_research' && workflow?.idea_research?.highlights?.length ? (
+                <div className="space-y-2">
+                  {workflow.idea_research.highlights.slice(0, 3).map((item) => (
+                    <div key={item} className="guided-chat-quote guided-chat-quote-muted">
+                      <div className="guided-chat-quote-body">{item}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {currentStage === 'location_research' && workflow?.location_research?.summary ? (
+                <div className="guided-chat-quote guided-chat-quote-muted">
+                  <div className="guided-chat-quote-body">{workflow.location_research.summary}</div>
+                </div>
+              ) : null}
+              {currentStage === 'persona_synthesis' && workflow?.persona_snapshot?.personas?.length ? (
+                <div className="space-y-2">
+                  <div className="guided-chat-mini-chip">
+                    {language === 'ar' ? 'الشخصيات الجاهزة الآن' : 'Personas ready so far'}: {workflow.persona_snapshot.personas.length}
+                  </div>
+                  {workflow.persona_snapshot.personas.slice(0, 2).map((persona) => (
+                    <div key={persona.id} className="guided-chat-quote guided-chat-quote-muted">
+                      <div className="guided-chat-quote-label">{persona.label}</div>
+                      <div className="guided-chat-quote-body">{persona.summary}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </div>
           </GuideBubble>
         ) : null}
@@ -900,60 +1260,152 @@ export function GuidedSimulationPanel({
         {(currentStage === 'review' || currentStage === 'ready_to_start') && workflow?.review ? (
           <>
             <GuideBubble kicker={null}>
-              <div className="guided-chat-message-title">
-                {workflow.review.title ||
-                  (language === 'ar' ? 'مراجعة قبل البدء' : 'Review before launch')}
+              <div className="space-y-2">
+                <div className="guided-chat-message-title">
+                  {workflow.review.title ||
+                    (language === 'ar' ? 'مراجعة قبل البدء' : 'Review before launch')}
+                </div>
+                <div className="guided-chat-secondary-copy">{workflow.review.summary}</div>
+                <div className="guided-chat-tertiary-copy">
+                  {language === 'ar'
+                    ? 'هذه الشخصيات ستشارك مباشرة في المحاكاة.'
+                    : 'These personas will participate directly in the simulation.'}
+                </div>
               </div>
-              <div className="guided-chat-secondary-copy">{workflow.review.summary}</div>
             </GuideBubble>
 
             <GuideBubble tone="success" wide kicker={null}>
-              <div className="space-y-3">
-                <div className="guided-chat-mini-chip">
-                  {language === 'ar' ? 'الوقت المتوقع' : 'Estimated runtime'}:{' '}
-                  {formatEta(workflow.review.estimated_runtime_seconds, language)}
+              <div className="space-y-4">
+                <div className="flex flex-wrap gap-2">
+                  <div className="guided-chat-mini-chip">
+                    {language === 'ar' ? 'الوقت المتوقع' : 'Estimated runtime'}:{' '}
+                    {formatEta(workflow.review.estimated_runtime_seconds, language)}
+                  </div>
+                  <div className="guided-chat-mini-chip">
+                    {language === 'ar' ? 'عدد الشخصيات' : 'Persona count'}:{' '}
+                    {workflow.review.persona_count || workflow.persona_snapshot?.personas?.length || 0}
+                  </div>
+                  {updatedAtLabel ? (
+                    <div className="guided-chat-mini-chip">
+                      <Clock3 className="h-3.5 w-3.5" />
+                      {language === 'ar' ? 'تم التحديث' : 'Updated'} {updatedAtLabel}
+                    </div>
+                  ) : null}
+                  {usingFastPersonas ? (
+                    <div className="guided-chat-mini-chip">
+                      {language === 'ar' ? 'شخصيات سريعة التوليد' : 'Using fast-generated personas'}
+                    </div>
+                  ) : null}
                 </div>
-                {(workflow.review.research_highlights || []).slice(0, 3).map((item) => (
+
+                {reviewWarnings.length ? (
+                  <div className="space-y-2">
+                    {reviewWarnings.map((warning) => (
+                      <div key={warning} className="guided-chat-quote guided-chat-quote-muted">
+                        <div className="guided-chat-quote-label">
+                          {language === 'ar' ? 'ملاحظة قبل البدء' : 'Before you start'}
+                        </div>
+                        <div className="guided-chat-quote-body">{warning}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <div className="chat-inline-stat">
+                    <div className="chat-inline-stat-label">{language === 'ar' ? 'المرحلة الحالية' : 'Current step'}</div>
+                    <div className="chat-inline-stat-value">
+                      {currentStage === 'ready_to_start'
+                        ? (language === 'ar' ? 'جاهز للتشغيل' : 'Ready to start')
+                        : (language === 'ar' ? 'بانتظار الاعتماد' : 'Waiting for approval')}
+                    </div>
+                  </div>
+                  <div className="chat-inline-stat">
+                    <div className="chat-inline-stat-label">{language === 'ar' ? 'التحقق' : 'Validation'}</div>
+                    <div className="chat-inline-stat-value">
+                      {workflow?.verification?.ok
+                        ? (language === 'ar' ? 'جاهز' : 'Ready')
+                        : (language === 'ar' ? 'قيد المراجعة' : 'Needs attention')}
+                    </div>
+                  </div>
+                  <div className="guided-chat-tertiary-copy">
+                    {reviewNextStepCopy}
+                  </div>
+                </div>
+
+                {(workflow.review.research_highlights || []).slice(0, 2).map((item) => (
                   <div key={item} className="guided-chat-quote guided-chat-quote-muted">
+                    <div className="guided-chat-quote-label">{language === 'ar' ? 'إشارة بحث' : 'Research signal'}</div>
                     <div className="guided-chat-quote-body">{item}</div>
                   </div>
                 ))}
                 {workflow.review.location_summary ? (
                   <div className="guided-chat-quote guided-chat-quote-muted">
+                    <div className="guided-chat-quote-label">{language === 'ar' ? 'ملخص المكان' : 'Location summary'}</div>
                     <div className="guided-chat-quote-body">{workflow.review.location_summary}</div>
                   </div>
                 ) : null}
-                {(workflow.persona_snapshot?.personas || []).slice(0, 2).map((persona) => (
-                  <div key={persona.id} className="guided-chat-quote">
-                    <div className="guided-chat-quote-label">{persona.label}</div>
-                    <div className="guided-chat-quote-body">{persona.summary}</div>
-                  </div>
-                ))}
+
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {reviewPersonas.map((persona) => (
+                    <div key={persona.id} className="guided-chat-quote guided-chat-review-card">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="guided-chat-quote-label">{persona.label}</div>
+                        <div className="guided-chat-mini-chip">
+                          {persona.stance || (language === 'ar' ? 'محايد' : 'Neutral')}
+                        </div>
+                      </div>
+                      <div className="guided-chat-quote-body">{persona.summary}</div>
+                      {persona.motivations?.[0] ? (
+                        <div className="guided-chat-tertiary-copy">
+                          <span className="font-semibold">{language === 'ar' ? 'الدافع:' : 'Motivation:'}</span>{' '}
+                          {persona.motivations[0]}
+                        </div>
+                      ) : null}
+                      {persona.concerns?.[0] ? (
+                        <div className="guided-chat-tertiary-copy">
+                          <span className="font-semibold">{language === 'ar' ? 'التحفظ:' : 'Concern:'}</span>{' '}
+                          {persona.concerns[0]}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+
                 <ChatActionRow className="guided-chat-actions">
-                  {currentStage === 'review' ? (
+                  {primaryAction ? (
                     <Button
                       type="button"
                       size="sm"
-                      variant="outline"
-                      onClick={onApproveReview}
-                      disabled={loading}
-                      className="guided-chat-button"
-                    >
-                      {language === 'ar' ? 'اعتمد المراجعة' : 'Approve review'}
-                    </Button>
-                  ) : null}
-                  {currentStage === 'ready_to_start' ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      onClick={onStartSimulation}
-                      disabled={loading || simulationStatus === 'running'}
+                      onClick={primaryAction.onClick}
+                      disabled={primaryAction.disabled}
                       className="guided-chat-button guided-chat-button-primary"
                     >
-                      <Play className="mr-2 h-4 w-4" />
-                      {language === 'ar' ? 'تابع إلى المحاكاة' : 'Continue to simulation'}
+                      {PrimaryActionIcon ? <PrimaryActionIcon className="mr-2 h-4 w-4" /> : null}
+                      {primaryAction.label}
                     </Button>
                   ) : null}
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={requestPersonaRefresh}
+                    disabled={loading}
+                    className="guided-chat-button"
+                  >
+                    <RefreshCw className="mr-2 h-4 w-4" />
+                    {language === 'ar' ? 'أعد توليد الشخصيات' : 'Regenerate personas'}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={openMinorEditComposer}
+                    disabled={loading}
+                    className="guided-chat-button"
+                  >
+                    {language === 'ar' ? 'تعديل بسيط' : 'Minor edit'}
+                  </Button>
                 </ChatActionRow>
               </div>
             </GuideBubble>
@@ -975,26 +1427,30 @@ export function GuidedSimulationPanel({
             {canResume ? (language === 'ar' ? 'استكمل' : 'Resume') : language === 'ar' ? 'أوقف' : 'Pause'}
           </Button>
 
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            onClick={onOpenReasoning}
-            className="guided-chat-button"
-          >
-            <Eye className="mr-2 h-4 w-4" />
-            {language === 'ar' ? `التفكير (${reasoningCount})` : `Reasoning (${reasoningCount})`}
-          </Button>
+          {showReasoningAction ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={onOpenReasoning}
+              className="guided-chat-button"
+            >
+              <Eye className="mr-2 h-4 w-4" />
+              {language === 'ar' ? `التفكير (${reasoningCount})` : `Reasoning (${reasoningCount})`}
+            </Button>
+          ) : null}
 
-          <Button
-            type="button"
-            size="sm"
-            variant={showCorrectionComposer ? 'default' : 'outline'}
-            onClick={() => setShowCorrectionComposer((current) => !current)}
-            className={cn('guided-chat-button', showCorrectionComposer && 'guided-chat-button-primary')}
-          >
-            {language === 'ar' ? 'تصحيح' : 'Correction'}
-          </Button>
+          {showCorrectionAction ? (
+            <Button
+              type="button"
+              size="sm"
+              variant={showCorrectionComposer ? 'default' : 'outline'}
+              onClick={() => setShowCorrectionComposer((current) => !current)}
+              className={cn('guided-chat-button', showCorrectionComposer && 'guided-chat-button-primary')}
+            >
+              {correctionActionLabel}
+            </Button>
+          ) : null}
 
           {onApplyCorrectionToSimulation &&
           lastCorrection?.apply_mode === 'factual_update' &&

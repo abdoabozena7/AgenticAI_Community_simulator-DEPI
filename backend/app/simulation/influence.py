@@ -110,6 +110,7 @@ def decide_opinion_change(
     stubbornness: float = 0.0,
     phase_intensity: float = 1.0,
     inertia: float = 0.0,
+    evidence_summary: Optional[Dict[str, float]] = None,
 ) -> Tuple[str, bool]:
 
     weights = {
@@ -127,6 +128,11 @@ def decide_opinion_change(
     intensity = max(0.6, min(1.4, phase_intensity))
     # Harder to sway: higher base_threshold
     base_threshold = (0.25 + (0.3 * skepticism) + (0.1 * stubbornness)) / intensity
+    if isinstance(evidence_summary, dict):
+        direct_ratio = float(evidence_summary.get("direct_ratio") or 0.0)
+        estimate_ratio = float(evidence_summary.get("estimate_ratio") or 0.0)
+        contradiction_count = int(evidence_summary.get("contradiction_count") or 0)
+        base_threshold += (0.10 * estimate_ratio) + (0.05 * contradiction_count) - (0.08 * direct_ratio)
     base_threshold = min(0.8, max(0.05, base_threshold))
 
     candidate = max(shares, key=shares.get)

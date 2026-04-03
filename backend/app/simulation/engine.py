@@ -18,6 +18,7 @@ from typing import Callable, Dict, List, Any, Tuple, Optional
 
 from ..core.dataset_loader import Dataset
 from ..models.schemas import ReasoningStep
+from ..services.evidence_ladder import summarize_evidence_confidence
 from .agent import Agent
 from .influence import compute_pairwise_influences, decide_opinion_change
 from .aggregator import compute_metrics
@@ -218,6 +219,7 @@ class SimulationEngine:
             "emit_message": bool(task.get("emit_message")),
             "evidence_hint": task.get("evidence_hint"),
             "evidence_hints": task.get("evidence_hints") or [],
+            "evidence_confidence": task.get("evidence_confidence"),
         }
 
 
@@ -791,6 +793,12 @@ class SimulationEngine:
         idea_text = str(user_context.get("idea") or "")
         research_summary = str(user_context.get("research_summary") or "")
         research_structured = user_context.get("research_structured") or {}
+        research_evidence_ladder = (
+            research_structured.get("evidence_ladder")
+            if isinstance(research_structured, dict) and isinstance(research_structured.get("evidence_ladder"), list)
+            else []
+        )
+        overall_evidence_summary = summarize_evidence_confidence(research_evidence_ladder)
         search_quality = user_context.get("search_quality") if isinstance(user_context.get("search_quality"), dict) else None
         preflight_summary = str(user_context.get("preflight_summary") or "").strip()
         preflight_answers_raw = user_context.get("preflight_answers") if isinstance(user_context.get("preflight_answers"), dict) else {}
@@ -1186,6 +1194,8 @@ class SimulationEngine:
             "regeneration_attempts": 0,
             "autorepair_attempts": 0,
             "autorepair_success": 0,
+            "low_quality_steps": 0,
+            "quality_flags": {},
             "rejections": {},
         }
 
@@ -2202,12 +2212,70 @@ class SimulationEngine:
         }
 
         def _build_evidence_cards() -> List[str]:
+            def _type_rank(summary: Dict[str, Any]) -> int:
+                if int(summary.get("direct_count") or 0) > 0:
+                    return 0
+                if int(summary.get("derived_count") or 0) > 0:
+                    return 1
+                if int(summary.get("estimate_count") or 0) > 0:
+                    return 2
+                return 3
+
+            def _matching_ladder_items(text: str) -> List[Dict[str, Any]]:
+                normalized = str(text or "").strip().lower()
+                if not normalized:
+                    return []
+                exact = [
+                    item
+                    for item in research_evidence_ladder
+                    if isinstance(item, dict) and str(item.get("text") or "").strip().lower() == normalized
+                ]
+                if exact:
+                    return exact
+                if len(normalized) < 18:
+                    return []
+                return [
+                    item
+                    for item in research_evidence_ladder
+                    if isinstance(item, dict)
+                    and (
+                        normalized in str(item.get("text") or "").strip().lower()
+                        or str(item.get("text") or "").strip().lower() in normalized
+                    )
+                ][:3]
+
+            card_summary_map: Dict[str, Dict[str, Any]] = {}
+
+            def _register(card: str) -> Optional[str]:
+                text = str(card or "").strip()
+                if not text:
+                    return None
+                matched = _matching_ladder_items(text)
+                card_summary_map[text] = summarize_evidence_confidence(matched) if matched else dict(overall_evidence_summary)
+                return text
+
             cards: List[str] = []
+            ordered_ladder_rows = sorted(
+                [item for item in research_evidence_ladder if isinstance(item, dict) and str(item.get("text") or "").strip()],
+                key=lambda item: (
+                    _type_rank(summarize_evidence_confidence([item])),
+                    -float((summarize_evidence_confidence([item]) or {}).get("score") or 0.0),
+                ),
+            )
+            for item in ordered_ladder_rows:
+                text = _register(str(item.get("text") or ""))
+                if text:
+                    cards.append(text)
             raw_cards = user_context.get("evidence_cards") or user_context.get("reports") or []
             if isinstance(raw_cards, list):
-                cards.extend([str(c).strip() for c in raw_cards if str(c).strip()])
+                for card in raw_cards:
+                    text = _register(str(card))
+                    if text:
+                        cards.append(text)
             elif raw_cards:
-                cards.append(str(raw_cards).strip())
+                text = _register(str(raw_cards))
+                if text:
+                    cards.append(text)
 
             structured = user_context.get("research_structured") or {}
             if isinstance(structured, dict):
@@ -2216,20 +2284,29 @@ class SimulationEngine:
                     for sentence in re.split(r"[.!?]", summary):
                         sentence = sentence.strip()
                         if len(sentence) > 12:
-                            cards.append(sentence)
+                            text = _register(sentence)
+                            if text:
+                                cards.append(text)
                 signals = structured.get("signals") or []
                 if isinstance(signals, list):
-                    cards.extend([str(s).strip() for s in signals if str(s).strip()])
+                    for signal in signals:
+                        text = _register(str(signal))
+                        if text:
+                            cards.append(text)
                 for key in ("competition_level", "demand_level", "regulatory_risk", "price_sensitivity"):
                     value = structured.get(key)
                     if value:
-                        cards.append(f"{key.replace('_', ' ')}: {value}")
+                        text = _register(f"{key.replace('_', ' ')}: {value}")
+                        if text:
+                            cards.append(text)
 
             if research_summary:
                 for sentence in re.split(r"[.!?]", research_summary):
                     sentence = sentence.strip()
                     if len(sentence) > 12:
-                        cards.append(sentence)
+                        text = _register(sentence)
+                        if text:
+                            cards.append(text)
 
             seen = set()
             unique_cards = []
@@ -2237,9 +2314,43 @@ class SimulationEngine:
                 if card and card not in seen:
                     seen.add(card)
                     unique_cards.append(card)
-            return unique_cards[:8]
+            ranked_cards = sorted(
+                unique_cards,
+                key=lambda card: (
+                    _type_rank(card_summary_map.get(card, {})),
+                    -float((card_summary_map.get(card, {}) or {}).get("score") or 0.0),
+                    card,
+                ),
+            )
+            return ranked_cards[:8]
 
         evidence_cards = _build_evidence_cards()
+
+        def _evidence_summary_for_cards(cards: List[str]) -> Dict[str, Any]:
+            normalized_cards = [str(card).strip().lower() for card in cards if str(card).strip()]
+            if not normalized_cards:
+                return dict(overall_evidence_summary)
+            matched: List[Dict[str, Any]] = []
+            for item in research_evidence_ladder:
+                if not isinstance(item, dict):
+                    continue
+                item_text = str(item.get("text") or "").strip().lower()
+                if not item_text:
+                    continue
+                for card in normalized_cards:
+                    if item_text == card or (len(card) >= 18 and (card in item_text or item_text in card)):
+                        matched.append(item)
+                        break
+            return summarize_evidence_confidence(matched) if matched else dict(overall_evidence_summary)
+
+        def _evidence_type_rank(summary: Dict[str, Any]) -> int:
+            if int(summary.get("direct_count") or 0) > 0:
+                return 0
+            if int(summary.get("derived_count") or 0) > 0:
+                return 1
+            if int(summary.get("estimate_count") or 0) > 0:
+                return 2
+            return 3
 
         role_guidance_map = {
             "tech": "architecture, latency, security, backend, APIs",
@@ -2389,7 +2500,15 @@ class SimulationEngine:
 
             for role in evidence_by_role:
                 combined = _dedupe(evidence_by_role[role] + general)
-                ranked = sorted(combined, key=_score_card, reverse=True)
+                ranked = sorted(
+                    combined,
+                    key=lambda card: (
+                        _evidence_type_rank(_evidence_summary_for_cards([card])),
+                        -float((_evidence_summary_for_cards([card]) or {}).get("score") or 0.0),
+                        -_score_card(card)[0],
+                        -_score_card(card)[1],
+                    ),
+                )
                 selected = [card for card in ranked if _score_card(card)[0] > 0][:6]
                 if len(selected) < 2:
                     contextual_card = (
@@ -3335,6 +3454,126 @@ class SimulationEngine:
                 return repaired, "repaired"
             return _fallback_message(role_label, stance, evidence_hint, task=task), "fallback"
 
+        def _evaluate_reasoning_quality(
+            *,
+            persona: Agent,
+            task: Dict[str, Any],
+            previous_stance: str,
+            new_stance: str,
+            message: str,
+            evidence_summary: Dict[str, Any],
+            confidence_value: float,
+            current_relevance: Optional[float],
+        ) -> Dict[str, Any]:
+            text = str(message or "").strip()
+            if not text:
+                return {
+                    "low_quality_reasoning": False,
+                    "quality_score": 1.0,
+                    "confidence_penalty": 0.0,
+                    "flags": [],
+                    "relevance_score": current_relevance if isinstance(current_relevance, (int, float)) else None,
+                }
+
+            relevance_score = (
+                float(current_relevance)
+                if isinstance(current_relevance, (int, float))
+                else _compute_relevance_score(text, task)
+            )
+            normalized = _normalized(text)
+            words = _extract_words(text)
+            unique_ratio = (len(set(words)) / max(1, len(words))) if words else 0.0
+            generic_markers = {
+                "more data",
+                "need more data",
+                "depends on execution",
+                "depends on the execution",
+                "there are pros and cons",
+                "it depends",
+                "hard to say",
+                "غير واضح",
+                "يعتمد على التنفيذ",
+                "الأمر يعتمد",
+            }
+            flags: List[str] = []
+            penalty = 0.0
+
+            is_generic = (
+                self._is_template_message(text)
+                or relevance_score < 0.16
+                or len(words) < 10
+                or (len(words) >= 10 and unique_ratio < 0.42)
+                or any(marker in normalized for marker in generic_markers)
+            )
+            if is_generic:
+                flags.append("generic_reasoning")
+                penalty += 0.18
+
+            persona_terms = _extract_words(
+                " ".join(
+                    [
+                        str(task.get("role_label") or ""),
+                        str(task.get("traits_summary") or ""),
+                        str(task.get("bias_summary") or ""),
+                        str(task.get("role_guidance") or ""),
+                        str(persona.archetype_name or ""),
+                        " ".join(str(item) for item in (persona.biases or [])[:2]),
+                    ]
+                )
+            )
+            persona_overlap = len(set(words) & set(persona_terms))
+            if persona_terms and persona_overlap == 0 and relevance_score < 0.28:
+                flags.append("persona_inconsistent")
+                penalty += 0.12
+
+            contradiction_count = int(evidence_summary.get("contradiction_count") or 0)
+            estimate_ratio = float(evidence_summary.get("estimate_ratio") or 0.0)
+            direct_ratio = float(evidence_summary.get("direct_ratio") or 0.0)
+            proxy_ratio = float(evidence_summary.get("proxy_ratio") or 0.0)
+            evidence_score = float(
+                evidence_summary.get("score")
+                or task.get("evidence_confidence")
+                or 0.5
+            )
+            certainty_markers = {
+                "definitely",
+                "certainly",
+                "clearly",
+                "obviously",
+                "without question",
+                "بالتأكيد",
+                "من الواضح",
+                "أكيد",
+            }
+            unsupported_reason = _detect_unsupported_specifics(text, task)
+            if unsupported_reason or (contradiction_count > 0 and any(marker in normalized for marker in certainty_markers)):
+                flags.append("evidence_contradiction")
+                penalty += 0.14
+
+            if (
+                confidence_value > max(0.78, evidence_score + 0.20)
+                or (confidence_value > 0.72 and estimate_ratio > 0.55)
+                or (confidence_value > 0.68 and contradiction_count > 0)
+                or (confidence_value > 0.65 and previous_stance != new_stance and evidence_score < 0.35)
+                or (confidence_value > 0.74 and direct_ratio < 0.20 and proxy_ratio > 0.50)
+            ):
+                flags.append("confidence_unjustified")
+                penalty += 0.10
+
+            quality_score = max(0.0, min(1.0, 1.0 - penalty))
+            low_quality = bool(flags) and (
+                quality_score < 0.90
+                or "generic_reasoning" in flags
+                or "persona_inconsistent" in flags
+            )
+            return {
+                "low_quality_reasoning": low_quality,
+                "quality_score": quality_score,
+                "confidence_penalty": min(0.32, penalty),
+                "flags": flags,
+                "relevance_score": relevance_score,
+            }
+
         async def _infer_stance_from_llm(text: str) -> str | None:
             if stance_classifier is None:
                 return None
@@ -3498,6 +3737,7 @@ class SimulationEngine:
                 "emit_message": bool(raw_task.get("emit_message", True)),
                 "evidence_hint": str(raw_task.get("evidence_hint") or ""),
                 "evidence_hints": raw_task.get("evidence_hints") or [],
+                "evidence_confidence": float(raw_task.get("evidence_confidence") or 0.0) if raw_task.get("evidence_confidence") is not None else None,
             }
 
         async def _emit_checkpoint(
@@ -3713,6 +3953,7 @@ class SimulationEngine:
                             stubbornness=agent.stubbornness,
                             phase_intensity=phase_intensity,
                             inertia=agent.confidence * 0.35,
+                            evidence_summary=overall_evidence_summary,
                         )
                     # Keep state transitions tied to emitted reasoning messages.
                     opinion_changes[agent.agent_id] = (prev_opinion, new_opinion, changed)
@@ -3745,6 +3986,8 @@ class SimulationEngine:
                     evidence_pool = evidence_by_role.get(role_key) or evidence_cards
                     evidence_hint = _clip_text(str(evidence_pool[0]), 120) if evidence_pool else ""
                     evidence_hints = [_clip_text(str(item), 120) for item in (evidence_pool[:2] if evidence_pool else [])]
+                    task_evidence_summary = _evidence_summary_for_cards(evidence_hints or ([evidence_hint] if evidence_hint else []))
+                    task_evidence_confidence = float(task_evidence_summary.get("score") or overall_evidence_summary.get("score") or 0.5)
                     tasks.append(
                         {
                             "agent": agent,
@@ -3763,6 +4006,7 @@ class SimulationEngine:
                             "emit_message": emit_message,
                             "evidence_hint": evidence_hint,
                             "evidence_hints": evidence_hints,
+                            "evidence_confidence": task_evidence_confidence,
                         }
                     )
 
@@ -3815,6 +4059,10 @@ class SimulationEngine:
                 task["reply_to_message"] = reply_to_msg
                 message = ""
                 confidence = 0.58
+                evidence_confidence = float(task.get("evidence_confidence") or overall_evidence_summary.get("score") or 0.5)
+                task_evidence_summary = _evidence_summary_for_cards(
+                    list(task.get("evidence_hints") or []) or ([str(task.get("evidence_hint") or "").strip()] if str(task.get("evidence_hint") or "").strip() else [])
+                )
                 stance = task["math_opinion"]
                 opinion_source = "llm"
                 fallback_reason: Optional[str] = None
@@ -3826,6 +4074,9 @@ class SimulationEngine:
                 reason_tag: Optional[str] = None
                 clarification_triggered = False
                 clarification_payload: Optional[Dict[str, Any]] = None
+                low_quality_reasoning = False
+                reasoning_quality_score = 1.0
+                reasoning_quality_flags: List[str] = []
 
                 if emit_message:
                     reasoning_stats["total_steps"] = int(reasoning_stats.get("total_steps", 0)) + 1
@@ -3906,6 +4157,20 @@ class SimulationEngine:
                     confidence = max(0.25, min(1.0, float(agent.confidence)))
                     opinion_source = "llm"
 
+                confidence = max(0.0, min(1.0, (0.7 * confidence) + (0.3 * evidence_confidence)))
+                confidence = max(
+                    0.2,
+                    min(
+                        1.0,
+                        confidence
+                        - (0.12 * float(task_evidence_summary.get("estimate_ratio") or 0.0))
+                        - (0.08 * float(task_evidence_summary.get("proxy_ratio") or 0.0))
+                        - (0.05 * int(task_evidence_summary.get("contradiction_count") or 0)),
+                    ),
+                )
+                if opinion_source == "fallback":
+                    confidence = min(confidence, 0.35)
+
                 stance, policy_guard, policy_reason, stance_locked = _apply_policy_guard(stance)
 
                 limit = full_limit if length_mode == "full" else short_limit
@@ -3942,6 +4207,41 @@ class SimulationEngine:
                                 reasoning_stats["fallback_steps"] = int(reasoning_stats.get("fallback_steps", 0)) + 1
                         except Exception:
                             pass
+
+                if emit_message and message and opinion_source != "fallback":
+                    quality_eval = _evaluate_reasoning_quality(
+                        persona=agent,
+                        task=task,
+                        previous_stance=prev_opinion,
+                        new_stance=stance,
+                        message=message,
+                        evidence_summary=task_evidence_summary,
+                        confidence_value=confidence,
+                        current_relevance=relevance_score,
+                    )
+                    low_quality_reasoning = bool(quality_eval.get("low_quality_reasoning"))
+                    reasoning_quality_score = float(quality_eval.get("quality_score") or 1.0)
+                    reasoning_quality_flags = [str(item) for item in (quality_eval.get("flags") or []) if str(item).strip()]
+                    if quality_eval.get("relevance_score") is not None:
+                        try:
+                            relevance_score = float(quality_eval.get("relevance_score"))
+                        except Exception:
+                            pass
+                    confidence = max(
+                        0.2,
+                        min(
+                            1.0,
+                            confidence - float(quality_eval.get("confidence_penalty") or 0.0),
+                        ),
+                    )
+                    if low_quality_reasoning:
+                        reasoning_stats["low_quality_steps"] = int(reasoning_stats.get("low_quality_steps", 0)) + 1
+                        quality_flags_counter = reasoning_stats.get("quality_flags")
+                        if not isinstance(quality_flags_counter, dict):
+                            quality_flags_counter = {}
+                            reasoning_stats["quality_flags"] = quality_flags_counter
+                        for flag in reasoning_quality_flags:
+                            quality_flags_counter[flag] = int(quality_flags_counter.get(flag, 0)) + 1
 
                 agent.current_opinion = stance
                 changed = prev_opinion != stance
@@ -4037,6 +4337,9 @@ class SimulationEngine:
                             "stance_locked": stance_locked,
                             "reason_tag": reason_tag,
                             "clarification_triggered": clarification_triggered,
+                            "low_quality_reasoning": low_quality_reasoning,
+                            "reasoning_quality_score": reasoning_quality_score,
+                            "reasoning_quality_flags": reasoning_quality_flags,
                         },
                     )
                     last_reasoning_step_uid = step_uid

@@ -61,6 +61,7 @@ class LLMGateway:
         system: Optional[str] = None,
         temperature: float = 0.2,
         fallback_json: Optional[Dict[str, Any]] = None,
+        timeout_seconds: float = 10.0,
     ) -> Dict[str, Any]:
         messages = []
         if system:
@@ -69,31 +70,51 @@ class LLMGateway:
 
         providers = self._provider_chain()
         last_error = ""
+        budget_seconds = max(0.1, float(timeout_seconds))
+        deadline = asyncio.get_running_loop().time() + budget_seconds
         for provider in providers:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                last_error = "llm_timeout"
+                break
             try:
+                request_timeout = max(0.1, min(budget_seconds, remaining))
                 if provider == "openai":
-                    raw = await asyncio.to_thread(
-                        self._call_openai,
-                        messages,
-                        temperature,
-                        True,
+                    raw = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self._call_openai,
+                            messages,
+                            temperature,
+                            True,
+                            request_timeout,
+                        ),
+                        timeout=remaining,
                     )
                 else:
-                    raw = await asyncio.to_thread(
-                        self._call_ollama,
-                        prompt,
-                        system,
-                        temperature,
-                        True,
+                    raw = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self._call_ollama,
+                            prompt,
+                            system,
+                            temperature,
+                            True,
+                            request_timeout,
+                        ),
+                        timeout=remaining,
                     )
                 parsed = self._extract_json(raw)
                 if isinstance(parsed, dict):
                     return parsed
+            except asyncio.TimeoutError:
+                last_error = "llm_timeout"
+                break
             except Exception as exc:  # noqa: BLE001
                 last_error = str(exc)
                 continue
 
-        return dict(fallback_json or {"fallback": True, "error": last_error or "llm_unavailable"})
+        if fallback_json is not None:
+            return dict(fallback_json)
+        return {"fallback": True, "error": last_error or "llm_unavailable"}
 
     def _provider_chain(self) -> list[str]:
         if self._provider_mode == "openai":
@@ -109,6 +130,7 @@ class LLMGateway:
         messages: list[Dict[str, str]],
         temperature: float,
         json_mode: bool,
+        timeout_seconds: float,
     ) -> str:
         if not self._openai_api_key:
             raise RuntimeError("OPENAI_API_KEY is not configured")
@@ -126,7 +148,7 @@ class LLMGateway:
                 "Content-Type": "application/json",
             },
             json=payload,
-            timeout=45,
+            timeout=timeout_seconds,
         )
         response.raise_for_status()
         data = response.json()
@@ -144,6 +166,7 @@ class LLMGateway:
         system: Optional[str],
         temperature: float,
         json_mode: bool,
+        timeout_seconds: float,
     ) -> str:
         payload: Dict[str, Any] = {
             "model": self._ollama_model,
@@ -159,7 +182,7 @@ class LLMGateway:
             f"{self._ollama_base_url}/api/generate",
             headers={"Content-Type": "application/json"},
             json=payload,
-            timeout=90,
+            timeout=timeout_seconds,
         )
         response.raise_for_status()
         data = response.json()

@@ -17,11 +17,19 @@ from ..models.orchestration import (
     classify_idea_context,
     context_location_label,
 )
+from ..services.evidence_ladder import (
+    build_proxy_evidence_ladder,
+    build_research_evidence_ladder,
+    ensure_evidence_ladder,
+    merge_evidence_ladder,
+    summarize_evidence_confidence,
+)
 from .base import BaseAgent
 
 
 class SearchAgent(BaseAgent):
     name = "search_agent"
+    MAX_PROXY_QUERIES = 2
 
     def _merge_quality_snapshot(self, current: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
         merged = dict(current or {})
@@ -67,6 +75,9 @@ class SearchAgent(BaseAgent):
         search_finished = False
         research_ready = False
         research_estimated = False
+        proxy_search_used = False
+        proxy_query_plan: List[ResearchQuery] = []
+        proxy_search_evidence_count = 0
 
         for index, planned_query in enumerate(query_plan, start=1):
             cycle_id = f"search-{index}"
@@ -299,6 +310,115 @@ class SearchAgent(BaseAgent):
 
         initial_research_insufficient = self._research_is_insufficient(report)
         estimation_mode = None
+        if self._should_run_proxy_search(report, estimation_started=False):
+            proxy_query_plan = self._build_proxy_query_plan(context=context, structured=structured_accumulator)
+            if proxy_query_plan:
+                proxy_search_used = True
+                state.schema["proxy_search_query_plan"] = [item.to_dict() for item in proxy_query_plan]
+                proxy_structured_accumulator = self._empty_structured_schema(context=context, context_type=context_type)
+                proxy_candidate_pages: List[Dict[str, Any]] = []
+                seen_proxy_urls = {
+                    str(item.get("url") or "").strip()
+                    for item in structured_accumulator.get("sources") or []
+                    if isinstance(item, dict) and str(item.get("url") or "").strip()
+                }
+                for planned_query in proxy_query_plan:
+                    result = await search_web(
+                        query=planned_query.query,
+                        max_results=5,
+                        language=context.get("language") or "en",
+                        strict_web_only=True,
+                    )
+                    search_finished = search_finished or bool(result.get("search_finished"))
+                    research_ready = research_ready or bool(result.get("research_ready"))
+                    research_estimated = research_estimated or bool(result.get("research_estimated"))
+                    for health in result.get("provider_health") or []:
+                        provider = str(health.get("provider") or "").strip()
+                        if not provider:
+                            continue
+                        current = provider_health_map.setdefault(
+                            provider,
+                            {"provider": provider, "ok": 0, "empty": 0, "timeout": 0, "error": 0, "last_status": ""},
+                        )
+                        for key in ("ok", "empty", "timeout", "error"):
+                            current[key] = int(current.get(key) or 0) + int(health.get(key) or 0)
+                        current["last_status"] = str(health.get("last_status") or current.get("last_status") or "")
+                    provider_attempts_all.extend(list(result.get("provider_attempts") or []))
+                    report.quality = self._merge_quality_snapshot(report.quality, dict(result.get("quality") or {}))
+                    proxy_structured = self._normalize_proxy_structured(result.get("structured") or {})
+                    if proxy_structured:
+                        proxy_structured_accumulator = self._merge_structured_schema(proxy_structured_accumulator, proxy_structured)
+                    top_results = result.get("results") if isinstance(result.get("results"), list) else []
+                    for item in top_results[:2]:
+                        url = str(item.get("url") or "").strip()
+                        if not url or url in seen_proxy_urls:
+                            continue
+                        seen_proxy_urls.add(url)
+                        proxy_candidate_pages.append(
+                            {
+                                "query": planned_query.query,
+                                "item": item,
+                            }
+                        )
+
+                proxy_evidence: List[EvidenceItem] = []
+                for candidate in proxy_candidate_pages:
+                    item = candidate["item"]
+                    url = str(item.get("url") or "").strip()
+                    page = await fetch_page(url)
+                    evidence = EvidenceItem(
+                        query=candidate["query"],
+                        title=str(item.get("title") or page.get("title") or "").strip(),
+                        url=url,
+                        domain=str(item.get("domain") or "").strip(),
+                        snippet=str(item.get("snippet") or "").strip(),
+                        content=str(page.get("content") or "").strip(),
+                        relevance_score=self._relevance_score(
+                            query=candidate["query"],
+                            title=str(item.get("title") or ""),
+                            snippet=str(item.get("snippet") or ""),
+                            content=str(page.get("content") or ""),
+                        ),
+                        http_status=page.get("http_status"),
+                    )
+                    if page.get("ok") and (evidence.content or evidence.snippet):
+                        proxy_evidence.append(evidence)
+
+                proxy_search_evidence_count = len(proxy_evidence)
+                proxy_sources = proxy_structured_accumulator.get("sources") if isinstance(proxy_structured_accumulator.get("sources"), list) else []
+                seen_proxy_source_urls = {
+                    str(item.get("url") or "").strip()
+                    for item in proxy_sources
+                    if isinstance(item, dict) and str(item.get("url") or "").strip()
+                }
+                for item in proxy_evidence:
+                    if not item.url or item.url in seen_proxy_source_urls:
+                        continue
+                    seen_proxy_source_urls.add(item.url)
+                    proxy_sources.append(
+                        {
+                            "title": item.title,
+                            "url": item.url,
+                            "domain": item.domain,
+                        }
+                    )
+                proxy_structured_accumulator["sources"] = proxy_sources[:12]
+                proxy_structured_accumulator["evidence_ladder"] = build_proxy_evidence_ladder(
+                    evidence=proxy_evidence,
+                    structured=proxy_structured_accumulator,
+                    timestamp_ms=state.updated_at,
+                )
+                structured_accumulator = self._merge_structured_schema(structured_accumulator, proxy_structured_accumulator)
+                structured_accumulator["evidence_ladder"] = merge_evidence_ladder(
+                    ensure_evidence_ladder(structured_accumulator),
+                    proxy_structured_accumulator.get("evidence_ladder") if isinstance(proxy_structured_accumulator.get("evidence_ladder"), list) else [],
+                )
+                report.structured_schema = structured_accumulator
+                report.summary = str(structured_accumulator.get("summary") or "").strip() or report.summary or self._fallback_summary(report)
+                report.findings = self._structured_findings(structured_accumulator) or report.findings or self._fallback_findings(report)
+                report.gaps = [str(item) for item in structured_accumulator.get("gaps") or [] if str(item).strip()] or report.gaps or self._fallback_gaps(state)
+                initial_research_insufficient = self._research_is_insufficient(report)
+
         if self._allow_ai_estimation(state) and initial_research_insufficient:
             estimated = await self._estimate_human_signals(state, report)
             structured_accumulator = self._merge_structured_schema(structured_accumulator, estimated)
@@ -315,6 +435,14 @@ class SearchAgent(BaseAgent):
             report.findings = self._structured_findings(structured_accumulator) or report.findings
             report.gaps = [str(item) for item in structured_accumulator.get("gaps") or [] if str(item).strip()] or report.gaps
             estimation_mode = "ai_estimation"
+
+        structured_accumulator["evidence_ladder"] = build_research_evidence_ladder(
+            evidence=report.evidence,
+            structured=structured_accumulator,
+            timestamp_ms=state.updated_at,
+            estimated=bool(estimation_mode == "ai_estimation" or research_estimated),
+        )
+        report.structured_schema = structured_accumulator
 
         research_insufficient = self._research_is_insufficient(report)
         fatal_search_failure = self._fatal_search_failure(report)
@@ -360,6 +488,9 @@ class SearchAgent(BaseAgent):
                 "search_provider_health": list(provider_health_map.values()),
                 "search_provider_attempts": provider_attempts_all[-60:],
                 "search_query_variants": state.schema.get("search_query_variants") or list(result.get("query_variants") or []),
+                "proxy_search_used": proxy_search_used,
+                "proxy_search_query_plan": [item.to_dict() for item in proxy_query_plan],
+                "proxy_search_evidence_count": proxy_search_evidence_count,
             }
         )
         state.set_pipeline_step(
@@ -406,6 +537,13 @@ class SearchAgent(BaseAgent):
             await self._pause_for_research_review(state, report)
         return state
 
+    def _should_run_proxy_search(self, report: ResearchReport, *, estimation_started: bool) -> bool:
+        if estimation_started:
+            return False
+        if self._research_contract_satisfied(report):
+            return False
+        return self._research_is_insufficient(report) or self._fatal_search_failure(report)
+
     def _build_query_plan(self, *, context: Dict[str, Any], context_type: str) -> List[ResearchQuery]:
         idea = str(context.get("idea") or "").strip()
         category = str(context.get("category") or "").strip()
@@ -438,6 +576,31 @@ class SearchAgent(BaseAgent):
         plan: List[ResearchQuery] = []
         for suffix, reason in query_specs:
             query = " ".join(part for part in [idea, category, audience, location, suffix] if part).strip()
+            if query:
+                plan.append(ResearchQuery(query=query, reason=reason))
+        return plan
+
+    def _build_proxy_query_plan(self, *, context: Dict[str, Any], structured: Dict[str, Any]) -> List[ResearchQuery]:
+        idea = str(context.get("idea") or "").strip()
+        category = str(context.get("category") or "").strip()
+        location = context_location_label(context)
+        audience = ", ".join(context.get("targetAudience") or [])
+        hint_parts: List[str] = []
+        for key in ("complaints", "behaviors", "user_types"):
+            values = structured.get(key) if isinstance(structured.get(key), list) else []
+            first = str(values[0] if values else "").strip()
+            if first and first not in hint_parts:
+                hint_parts.append(first)
+            if len(hint_parts) >= 2:
+                break
+        proxy_specs: List[Tuple[str, str]] = [
+            ("similar markets adjacent categories adoption friction willingness to pay", "proxy analog market evidence"),
+            ("competitor behavior recurring objections switching alternatives customer behavior", "proxy objection and switching evidence"),
+        ]
+        plan: List[ResearchQuery] = []
+        base_parts = [idea, category, audience, location] + hint_parts
+        for suffix, reason in proxy_specs[: self.MAX_PROXY_QUERIES]:
+            query = " ".join(part for part in base_parts + [suffix] if part).strip()
             if query:
                 plan.append(ResearchQuery(query=query, reason=reason))
         return plan
@@ -506,7 +669,57 @@ class SearchAgent(BaseAgent):
             "sources": [],
             "evidence_count": 0,
             "quality": {},
+            "evidence_ladder": [],
         }
+
+    def _normalize_proxy_structured(self, structured: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(structured, dict):
+            return {}
+        normalized = {
+            "summary": str(structured.get("summary") or "").strip(),
+            "market_presence": str(structured.get("market_presence") or "").strip(),
+            "price_range": str(structured.get("price_range") or "").strip(),
+            "competition_level": str(structured.get("competition_level") or "").strip(),
+            "demand_level": str(structured.get("demand_level") or "").strip(),
+            "regulatory_risk": str(structured.get("regulatory_risk") or "").strip(),
+            "price_sensitivity": str(structured.get("price_sensitivity") or "").strip(),
+            "confidence_score": 0.0,
+            "sources": [],
+        }
+        for key in (
+            "signals",
+            "user_types",
+            "complaints",
+            "behaviors",
+            "competition_reactions",
+            "visible_insights",
+            "expandable_reasoning",
+        ):
+            normalized[key] = list(dict.fromkeys(str(item).strip() for item in structured.get(key) or [] if str(item).strip()))[:12]
+        sentiment = structured.get("user_sentiment") if isinstance(structured.get("user_sentiment"), dict) else {}
+        normalized["user_sentiment"] = {
+            label: list(dict.fromkeys(str(item).strip() for item in sentiment.get(label, []) if str(item).strip()))[:8]
+            for label in ("positive", "negative", "neutral")
+        }
+        for source in structured.get("sources") or []:
+            if not isinstance(source, dict):
+                continue
+            url = str(source.get("url") or "").strip()
+            if not url:
+                continue
+            normalized["sources"].append(
+                {
+                    "title": str(source.get("title") or "").strip(),
+                    "url": url,
+                    "domain": str(source.get("domain") or "").strip(),
+                }
+            )
+        normalized["sources"] = normalized["sources"][:8]
+        try:
+            normalized["confidence_score"] = min(0.48, max(0.0, float(structured.get("confidence_score") or 0.0)))
+        except (TypeError, ValueError):
+            normalized["confidence_score"] = 0.0
+        return normalized
 
     def _merge_structured_schema(self, current: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
         merged = dict(current or {})
@@ -550,6 +763,10 @@ class SearchAgent(BaseAgent):
             quality = dict(merged.get("quality") or {})
             quality.update(dict(incoming.get("quality") or {}))
             merged["quality"] = quality
+        merged["evidence_ladder"] = merge_evidence_ladder(
+            ensure_evidence_ladder(merged),
+            ensure_evidence_ladder(incoming) if isinstance(incoming, dict) else [],
+        )
         incoming_sources = incoming.get("sources") if isinstance(incoming.get("sources"), list) else []
         existing_sources = merged.get("sources") if isinstance(merged.get("sources"), list) else []
         keyed_sources = []
@@ -595,6 +812,12 @@ class SearchAgent(BaseAgent):
                 }
             )
         merged["sources"] = existing_sources[:12]
+        merged["evidence_ladder"] = build_research_evidence_ladder(
+            evidence=evidence,
+            structured=merged,
+            timestamp_ms=None,
+            estimated=bool(str(merged.get("estimation_mode") or "").strip().lower() == "ai_estimation"),
+        )
         return merged
 
     def _structured_findings(self, structured: Dict[str, Any]) -> List[str]:
@@ -627,6 +850,8 @@ class SearchAgent(BaseAgent):
 
     def _research_contract_satisfied(self, report: ResearchReport) -> bool:
         structured = report.structured_schema if isinstance(report.structured_schema, dict) else {}
+        ladder_summary = summarize_evidence_confidence(ensure_evidence_ladder(structured))
+        effective_confidence = max(float(structured.get("confidence_score") or 0.0), float(ladder_summary.get("score") or 0.0))
         if not str(structured.get("summary") or "").strip():
             return False
         required_scalars = ("competition_level", "demand_level", "price_sensitivity")
@@ -641,7 +866,13 @@ class SearchAgent(BaseAgent):
             len([str(item).strip() for item in structured.get(key) or [] if str(item).strip()])
             for key in ("signals", "complaints", "behaviors", "behavior_patterns", "gaps_in_market")
         )
-        return sentiment_count >= 1 and signal_count >= 3
+        if sentiment_count >= 1 and signal_count >= 3:
+            return True
+        return (
+            sentiment_count >= 1
+            and effective_confidence >= 0.52
+            and (int(ladder_summary.get("direct_count") or 0) + int(ladder_summary.get("derived_count") or 0)) >= 5
+        )
 
     def _fatal_search_failure(self, report: ResearchReport) -> bool:
         structured = report.structured_schema if isinstance(report.structured_schema, dict) else {}
@@ -662,7 +893,8 @@ class SearchAgent(BaseAgent):
         quality = report.quality if isinstance(report.quality, dict) else {}
         usable = int(quality.get("usable_sources") or 0)
         domains = int(quality.get("domains") or 0)
-        confidence = float(structured.get("confidence_score") or 0.0)
+        ladder_summary = summarize_evidence_confidence(ensure_evidence_ladder(structured))
+        confidence = max(float(structured.get("confidence_score") or 0.0), float(ladder_summary.get("score") or 0.0))
         estimation_mode = str(structured.get("estimation_mode") or "").strip().lower()
         signal_count = sum(
             len([str(item).strip() for item in structured.get(key) or [] if str(item).strip()])

@@ -1,0 +1,123 @@
+- generic [ref=e2]:
+  - region "Notifications (F8)":
+    - list
+  - region "Notifications alt+T"
+  - generic [ref=e5]:
+    - banner [ref=e6]:
+      - generic [ref=e7]:
+        - generic [ref=e8]:
+          - img [ref=e11]
+          - generic [ref=e14]:
+            - heading "نقطة لا العودة" [level=1] [ref=e15]:
+              - generic [ref=e16]: نقطة لا العودة
+            - paragraph [ref=e17]: اختبر أفكارك قبل إطلاقها
+        - generic [ref=e18]:
+          - button "العودة للوحة التحكم" [ref=e19] [cursor=pointer]
+          - button "تسجيل الخروج" [ref=e20] [cursor=pointer]
+          - generic [ref=e21]:
+            - img [ref=e22]
+            - generic [ref=e29]: "مباشر: غير متصل"
+          - button "الإعدادات" [ref=e30] [cursor=pointer]:
+            - img [ref=e31]
+            - text: الإعدادات
+          - generic [ref=e36]: جاهز
+    - generic [ref=e38]:
+      - generic [ref=e39]:
+        - generic [ref=e40]:
+          - generic [ref=e41]:
+            - heading "مسار تقييم الفكرة" [level=1] [ref=e42]
+            - generic [ref=e43]: استقبال الفكرة
+            - generic [ref=e44]:
+              - img [ref=e45]
+              - generic [ref=e47]: الوضع الداكن
+          - generic [ref=e50]: جاهز للمتابعة
+        - generic [ref=e51]:
+          - button "الدردشة" [ref=e52] [cursor=pointer]:
+            - img [ref=e53]
+            - generic [ref=e55]: الدردشة
+          - button "النقاش" [disabled] [ref=e56]:
+            - img [ref=e57]
+            - generic [ref=e67]: النقاش
+          - button "الإعدادات" [ref=e68] [cursor=pointer]:
+            - img [ref=e69]
+            - generic [ref=e71]: الإعدادات
+      - generic [ref=e81]: استقبال الفكرة
+    - generic [ref=e84]:
+      - generic [ref=e90]:
+        - generic [ref=e91]:
+          - generic [ref=e92]:
+            - generic [ref=e93]:
+              - img [ref=e94]
+              - generic [ref=e99]: المراحل المباشرة
+            - generic [ref=e100]:
+              - heading "خطوات التنفيذ" [level=3] [ref=e101]
+              - paragraph [ref=e102]: تابع كل اللي بيحصل في البحث، الشخصيات، النقاش، والتنفيذ لحظة بلحظة.
+          - generic [ref=e103]:
+            - generic [ref=e104]: الحالة
+            - generic [ref=e105]: جاهز للبدء
+        - generic [ref=e107]:
+          - generic [ref=e108]: لسه مفيش نشاط ظاهر
+          - generic [ref=e109]: أول ما التشغيل يبدأ، هتشوف البحث، بناء الشخصيات، النقاش، والتنفيذ خطوة بخطوة.
+      - separator [ref=e110]:
+        - img [ref=e112]
+      - generic [ref=e123]:
+        - generic [ref=e124]:
+          - list "Conversation progress" [ref=e125]:
+            - listitem [ref=e126]:
+              - generic [ref=e128]: نوع السياق
+            - listitem [ref=e129]:
+              - generic [ref=e131]: تجميع البيانات
+            - listitem [ref=e132]:
+              - generic [ref=e134]: توضيح ذكي
+            - listitem [ref=e135]:
+              - generic [ref=e137]: بحث الفكرة
+            - listitem [ref=e207]:
+              - generic [ref=e209]: بحث المكان
+            - listitem [ref=e138]:
+              - generic [ref=e140]: بناء الشخصيات
+            - listitem [ref=e141]:
+              - generic [ref=e143]: المراجعة
+            - listitem [ref=e144]:
+              - generic [ref=e146]: جاهز للتشغيل
+          - status [ref=e147]:
+            - generic [ref=e148]: "نحن الآن في: تجميع البيانات"
+            - generic [ref=e149]: "المرحلة الحالية: تجميع البيانات • المتبقي: 9 دقيقة تقريبًا"
+        - generic [ref=e150]:
+          - generic [ref=e151]:
+            - img [ref=e152]
+            - text: يحتاج مراجعة
+          - generic [ref=e160]:
+            - generic [ref=e161]: GuideAgent
+            - generic [ref=e162]: دليل المحاكاة
+          - generic [ref=e213]: "تم تثبيت نوع السياق: specific place."
+          - generic [ref=e217]: أجمع الآن فقط الحقول الناقصة من الـschema بدون تكرار ما هو موجود.
+          - generic [ref=e220]:
+            - generic [ref=e221]: اجمع فقط الحقول الناقصة
+            - generic [ref=e222]: لن نكرر ما هو موجود بالفعل.
+          - generic [ref=e226]:
+            - generic [ref=e227]: سؤال 1 / 5
+            - generic [ref=e228]:
+              - generic [ref=e229]: ما الفكرة الأساسية؟
+              - generic [ref=e230]: اكتبها في جملة واحدة واضحة.
+              - 'textbox "مثال: مطعم كريب سريع يخدم العاملين وقت الزحمة." [ref=e231]'
+            - generic [ref=e232]: "المطلوب الآن: idea, category, targetAudience, goals, placeName"
+            - generic [ref=e233]:
+              - button "التالي" [disabled]:
+                - img
+                - text: التالي
+              - button "افتح الإعدادات" [ref=e234] [cursor=pointer]
+        - generic [ref=e185]:
+          - button "أوقف" [ref=e186] [cursor=pointer]:
+            - img
+            - text: أوقف
+          - button "التفكير (0)" [ref=e187] [cursor=pointer]:
+            - img
+            - text: التفكير (0)
+          - button "تصحيح" [ref=e188] [cursor=pointer]
+      - separator [ref=e189]:
+        - img [ref=e191]
+      - generic [ref=e201]:
+        - generic [ref=e202]:
+          - heading "مؤشرات القرار" [level=2] [ref=e203]
+          - paragraph [ref=e204]: ملخص سريع يساعدك على فهم اتجاه التقييم الآن.
+        - generic [ref=e206]: بانتظار البيانات

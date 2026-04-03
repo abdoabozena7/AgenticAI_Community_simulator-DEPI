@@ -453,8 +453,6 @@ const Index = () => {
   const guidedWorkflowAttachRequestRef = useRef<string | null>(null);
   const guidedWorkflowScopeRequestRef = useRef<string | null>(null);
   const guidedWorkflowStartingSimulationRef = useRef(false);
-  const guidedWorkflowAutoApproveRef = useRef<string | null>(null);
-  const guidedWorkflowAutoStartRef = useRef<string | null>(null);
   const autoReasoningSwitchedRef = useRef(false);
   const userOverrodeAutoRef = useRef(false);
   const configLockHintAtRef = useRef(0);
@@ -464,6 +462,11 @@ const Index = () => {
   const [uiBusyStage, setUiBusyStage] = useState<UiBusyStage | null>(null);
   const [uiBusyStartedAt, setUiBusyStartedAt] = useState<number | null>(null);
   const [uiBusyClock, setUiBusyClock] = useState(() => Date.now());
+  const [guidedPhaseNotice, setGuidedPhaseNotice] = useState<{
+    mode: 'starting' | 'started';
+    simulationId?: string;
+    at: number;
+  } | null>(null);
   const [searchState, setSearchState] = useState<{
     status: 'idle' | 'searching' | 'complete' | 'timeout' | 'error';
     stage?: UiBusyStage;
@@ -593,6 +596,14 @@ const Index = () => {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [searchState.startedAt, searchState.status]);
+
+  useEffect(() => {
+    if (!guidedPhaseNotice || guidedPhaseNotice.mode !== 'started') return;
+    const timer = window.setTimeout(() => {
+      setGuidedPhaseNotice((current) => (current?.mode === 'started' ? null : current));
+    }, 7000);
+    return () => window.clearTimeout(timer);
+  }, [guidedPhaseNotice]);
 
   useEffect(() => {
     const simulationId = simulation.simulationId;
@@ -2696,6 +2707,9 @@ const Index = () => {
     const config = buildGuidedSimulationConfig(userInput);
     setHasStarted(true);
     setDebateInviteVisible(false);
+    setReasoningActive(false);
+    setActivePanel('chat');
+    setGuidedPhaseNotice({ mode: 'starting', at: Date.now() });
     const startBusyToken = beginUiBusy('starting_simulation');
     guidedWorkflowStartingSimulationRef.current = true;
     try {
@@ -2709,10 +2723,12 @@ const Index = () => {
         ? String(response.simulation_id || '')
         : '';
       if (simulationId) {
+        setGuidedPhaseNotice({ mode: 'started', simulationId, at: Date.now() });
         await guidedWorkflow.attachSimulation(simulationId).catch(() => undefined);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to start simulation';
+      setGuidedPhaseNotice(null);
       addSystemMessage(`${settings.language === 'ar' ? 'تعذر بدء المحاكاة الموجهة.' : 'Failed to start guided simulation.'} ${msg}`.trim());
     } finally {
       guidedWorkflowStartingSimulationRef.current = false;
@@ -2727,49 +2743,6 @@ const Index = () => {
     settings.language,
     simulation,
     userInput,
-  ]);
-
-  useEffect(() => {
-    const workflowId = guidedWorkflowState?.workflow_id;
-    if (!workflowId) {
-      guidedWorkflowAutoApproveRef.current = null;
-      return;
-    }
-    if (guidedWorkflowLoading || guidedWorkflowStartingSimulationRef.current) return;
-    if (guidedWorkflowState?.current_stage !== 'review' || guidedWorkflowState?.review_approved) {
-      guidedWorkflowAutoApproveRef.current = null;
-      return;
-    }
-    const autoApproveKey = `${workflowId}:review`;
-    if (guidedWorkflowAutoApproveRef.current === autoApproveKey) return;
-    guidedWorkflowAutoApproveRef.current = autoApproveKey;
-    void guidedWorkflow.approveReview().catch(() => undefined);
-  }, [
-    guidedWorkflow.approveReview,
-    guidedWorkflowLoading,
-    guidedWorkflowState?.current_stage,
-    guidedWorkflowState?.review_approved,
-    guidedWorkflowState?.workflow_id,
-  ]);
-
-  useEffect(() => {
-    const workflowId = guidedWorkflowState?.workflow_id;
-    if (!workflowId || !guidedWorkflow.canStartSimulation) {
-      guidedWorkflowAutoStartRef.current = null;
-      return;
-    }
-    if (guidedWorkflowLoading || guidedWorkflowStartingSimulationRef.current) return;
-    if (simulation.status === 'running') return;
-    const autoStartKey = `${workflowId}:ready_to_start`;
-    if (guidedWorkflowAutoStartRef.current === autoStartKey) return;
-    guidedWorkflowAutoStartRef.current = autoStartKey;
-    void handleGuidedStartSimulation();
-  }, [
-    guidedWorkflow.canStartSimulation,
-    guidedWorkflowLoading,
-    guidedWorkflowState?.workflow_id,
-    handleGuidedStartSimulation,
-    simulation.status,
   ]);
 
   const handleApplyGuidedCorrectionToSimulation = useCallback(async () => {
@@ -5354,10 +5327,11 @@ If rejection is about competition or location, suggest searching for a better lo
     settings,
   };
 
+  const isGuidedWorkflowActive = Boolean(guidedWorkflowState) && !simulation.simulationId;
   const showGuidedWorkflowPanel =
-    activePanel === 'chat'
-    && (guidedPanelVisible || Boolean(guidedWorkflowState))
-    && !simulation.simulationId;
+    isGuidedWorkflowActive
+    && activePanel !== 'config'
+    && (guidedPanelVisible || Boolean(guidedWorkflowState));
 
   const showSearchSidePanel = searchPanelModel.visible;
   const sidePanelMode = showSearchSidePanel ? 'search' : 'simulation';
@@ -5551,6 +5525,38 @@ If rejection is about competition or location, suggest searching for a better lo
         reasoningDisabledReason={reasoningPanelLockedReason}
         onPanelChange={handleManualPanelSwitch}
       />
+      {guidedPhaseNotice && (
+        <div
+          className={cn(
+            'mx-4 mt-3 rounded-2xl border px-4 py-3 text-sm',
+            guidedPhaseNotice.mode === 'started'
+              ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-100'
+              : 'border-sky-400/30 bg-sky-500/10 text-sky-100',
+          )}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full border border-current/20 px-2 py-0.5 text-[11px] font-semibold">
+              {settings.language === 'ar'
+                ? (guidedPhaseNotice.mode === 'started' ? 'طور حي' : 'طور الانتقال')
+                : (guidedPhaseNotice.mode === 'started' ? 'Live phase' : 'Transition')}
+            </span>
+            <span className="font-semibold">
+              {settings.language === 'ar'
+                ? (guidedPhaseNotice.mode === 'started' ? 'بدأت المحاكاة بنجاح' : 'جارٍ بدء المحاكاة...')
+                : (guidedPhaseNotice.mode === 'started' ? 'Simulation started successfully' : 'Simulation is starting...')}
+            </span>
+          </div>
+          <p className="mt-1 text-xs leading-5 text-current/80">
+            {guidedPhaseNotice.mode === 'started'
+              ? (settings.language === 'ar'
+                ? 'تم الانتقال من الإعداد إلى واجهة المحاكاة الحية.'
+                : 'The page has switched from setup into the live simulation workspace.')
+              : (settings.language === 'ar'
+                ? 'نغلق طور الإعداد الآن ونحوّل الصفحة إلى طور المحاكاة الحية.'
+                : 'Closing the setup phase and switching the page into live simulation mode.')}
+          </p>
+        </div>
+      )}
       {creditNotice && (
         <div className="mx-4 mt-3 rounded-2xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-100 flex flex-wrap items-center justify-between gap-3">
           <span>{creditNotice}</span>
@@ -5776,28 +5782,41 @@ If rejection is about competition or location, suggest searching for a better lo
           </div>
         </div>
       )}
-      <div className="min-h-0 flex-1 overflow-y-auto p-3 md:p-4 xl:overflow-hidden">
-        <div className="flex min-h-full flex-col gap-4 xl:hidden">
-          <div className="h-[68dvh] min-h-[420px]">{sidePanel}</div>
-          <div className="h-[74dvh] min-h-[420px]">{arenaPanel}</div>
-          <div className="h-[62dvh] min-h-[360px]">{metricsPane}</div>
-        </div>
+      <div
+        className={cn(
+          'min-h-0 flex-1 overflow-y-auto xl:overflow-hidden',
+          isGuidedWorkflowActive ? 'px-2 py-2 md:px-3 md:py-3' : 'p-3 md:p-4',
+        )}
+      >
+        {isGuidedWorkflowActive ? (
+          <div className="mx-auto flex min-h-full w-full max-w-6xl flex-col gap-4">
+            <div className="min-h-0 flex-1">{sidePanel}</div>
+          </div>
+        ) : (
+          <>
+            <div className="flex min-h-full flex-col gap-4 xl:hidden">
+              <div className="h-[68dvh] min-h-[420px]">{sidePanel}</div>
+              <div className="h-[74dvh] min-h-[420px]">{arenaPanel}</div>
+              <div className="h-[62dvh] min-h-[360px]">{metricsPane}</div>
+            </div>
 
-        <div className="hidden h-full min-h-0 xl:block">
-          <ResizablePanelGroup direction="horizontal" className="gap-0 rounded-[36px] border border-border/60 bg-card/20 p-3">
-            <ResizablePanel defaultSize={34} minSize={24}>
-              <div className="h-full min-h-0 pe-3">{arenaPanel}</div>
-            </ResizablePanel>
-            <ResizableHandle withHandle className="mx-1.5 rounded-full bg-border/70" />
-            <ResizablePanel defaultSize={42} minSize={30}>
-              <div className="h-full min-h-0 px-3">{sidePanel}</div>
-            </ResizablePanel>
-            <ResizableHandle withHandle className="mx-1.5 rounded-full bg-border/70" />
-            <ResizablePanel defaultSize={24} minSize={18}>
-              <div className="h-full min-h-0 ps-3">{metricsPane}</div>
-            </ResizablePanel>
-          </ResizablePanelGroup>
-        </div>
+            <div className="hidden h-full min-h-0 xl:block">
+              <ResizablePanelGroup direction="horizontal" className="gap-0 rounded-[36px] border border-border/60 bg-card/20 p-3">
+                <ResizablePanel defaultSize={34} minSize={24}>
+                  <div className="h-full min-h-0 pe-3">{arenaPanel}</div>
+                </ResizablePanel>
+                <ResizableHandle withHandle className="mx-1.5 rounded-full bg-border/70" />
+                <ResizablePanel defaultSize={42} minSize={30}>
+                  <div className="h-full min-h-0 px-3">{sidePanel}</div>
+                </ResizablePanel>
+                <ResizableHandle withHandle className="mx-1.5 rounded-full bg-border/70" />
+                <ResizablePanel defaultSize={24} minSize={18}>
+                  <div className="h-full min-h-0 ps-3">{metricsPane}</div>
+                </ResizablePanel>
+              </ResizablePanelGroup>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

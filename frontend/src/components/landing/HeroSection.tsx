@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { RippleButton } from '@/components/ui/ripple-button';
 import { ArrowRight, Play } from 'lucide-react';
 import { useLanguage } from '@/contexts/LanguageContext';
+import { useTheme } from '@/contexts/ThemeContext';
+import SoftAurora from '@/components/landing/SoftAurora';
 
 interface HeroSectionProps {
   onGetStarted: () => void;
@@ -9,6 +11,7 @@ interface HeroSectionProps {
 
 export function HeroSection({ onGetStarted }: HeroSectionProps) {
   const { t, isRTL } = useLanguage();
+  const { theme } = useTheme();
   const [typedTitle1, setTypedTitle1] = useState('');
   const [typedTitle2, setTypedTitle2] = useState('');
   const [showSupportingContent, setShowSupportingContent] = useState(false);
@@ -74,12 +77,37 @@ export function HeroSection({ onGetStarted }: HeroSectionProps) {
     <section
       className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden px-6 pb-16 pt-28 md:pt-32"
     >
-      {/* Background */}
-      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_50%_8%,rgba(120,72,190,0.34),transparent_46%),radial-gradient(ellipse_at_24%_28%,rgba(71,35,146,0.22),transparent_26%),radial-gradient(ellipse_at_76%_34%,rgba(141,93,255,0.18),transparent_24%),linear-gradient(180deg,rgba(0,0,0,0.01),rgba(0,0,0,0.16))]" />
+      <SoftAurora
+        className={`absolute inset-0 ${
+          theme === 'dark' ? 'opacity-[0.72] mix-blend-screen' : 'opacity-[0.5] mix-blend-multiply'
+        }`}
+        speed={0.22}
+        scale={1.55}
+        brightness={theme === 'dark' ? 0.82 : 0.52}
+        color1={theme === 'dark' ? '#f7f4ff' : '#ffffff'}
+        color2={theme === 'dark' ? '#8a3ffc' : '#5d55f7'}
+        noiseFrequency={2.2}
+        noiseAmplitude={0.82}
+        bandHeight={0.64}
+        bandSpread={1.28}
+        octaveDecay={0.42}
+        layerOffset={0.78}
+        colorSpeed={0.42}
+        enableMouseInteraction
+        mouseInfluence={0.08}
+      />
+
+      <div
+        className={`absolute inset-0 ${
+          theme === 'dark'
+            ? 'bg-[radial-gradient(ellipse_at_50%_18%,rgba(255,255,255,0.08),transparent_42%),radial-gradient(ellipse_at_50%_50%,rgba(105,68,255,0.16),transparent_52%),linear-gradient(180deg,rgba(4,4,12,0.38),rgba(5,5,10,0.72))]'
+            : 'bg-[radial-gradient(ellipse_at_50%_18%,rgba(255,255,255,0.8),transparent_36%),radial-gradient(ellipse_at_50%_54%,rgba(95,90,255,0.12),transparent_52%),linear-gradient(180deg,rgba(247,248,252,0.42),rgba(238,241,247,0.78))]'
+        }`}
+      />
 
       {/* Animated grid pattern */}
       <div
-        className="absolute inset-0 opacity-[0.04]"
+        className="absolute inset-0 opacity-[0.05]"
         style={{
           backgroundImage:
             'linear-gradient(hsl(var(--foreground) / 0.1) 1px, transparent 1px), linear-gradient(90deg, hsl(var(--foreground) / 0.1) 1px, transparent 1px)',
@@ -87,31 +115,8 @@ export function HeroSection({ onGetStarted }: HeroSectionProps) {
         }}
       />
 
-      {/* Ambient glow */}
-      <div className="pointer-events-none absolute left-1/2 top-[40%] h-[720px] w-[720px] -translate-x-1/2 -translate-y-1/2 opacity-[0.28] blur-3xl">
-        <div 
-          className="h-full w-full rounded-full"
-          style={{
-            background: 'radial-gradient(circle, rgba(82, 39, 255, 0.92) 0%, rgba(38, 22, 86, 0.72) 48%, transparent 76%)',
-          }}
-        />
-      </div>
-      <div className="pointer-events-none absolute left-[28%] top-[34%] h-[420px] w-[420px] -translate-x-1/2 -translate-y-1/2 opacity-[0.16] blur-3xl">
-        <div
-          className="h-full w-full rounded-full"
-          style={{
-            background: 'radial-gradient(circle, rgba(94, 61, 214, 0.8) 0%, rgba(36, 20, 82, 0.54) 54%, transparent 78%)',
-          }}
-        />
-      </div>
-      <div className="pointer-events-none absolute left-[72%] top-[36%] h-[420px] w-[420px] -translate-x-1/2 -translate-y-1/2 opacity-[0.14] blur-3xl">
-        <div
-          className="h-full w-full rounded-full"
-          style={{
-            background: 'radial-gradient(circle, rgba(153, 111, 255, 0.76) 0%, rgba(45, 26, 91, 0.46) 54%, transparent 78%)',
-          }}
-        />
-      </div>
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-40 bg-gradient-to-b from-background/50 via-background/10 to-transparent" />
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-background/40 via-background/10 to-transparent" />
 
       <div className="relative z-10 mx-auto flex w-full max-w-6xl flex-col items-center text-center">
         {/* Badge */}

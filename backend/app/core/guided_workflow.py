@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..agents.base import AgentRuntime
 from ..agents.persona_agent import PersonaAgent
+from ..agents.search_agent import SearchAgent
 from ..core.dataset_loader import load_dataset
 from ..models.orchestration import (
     EvidenceItem,
@@ -34,6 +35,7 @@ _WORKFLOW_LOCKS_GUARD = asyncio.Lock()
 _WORKFLOW_PROGRESS_TASKS: Dict[str, asyncio.Task[None]] = {}
 _WORKFLOW_PROGRESS_TASKS_GUARD = asyncio.Lock()
 _WORKFLOW_PERSONA_AGENT: Optional[PersonaAgent] = None
+_WORKFLOW_SEARCH_AGENT: Optional[SearchAgent] = None
 
 WORKFLOW_STAGES = [
     "context_scope",
@@ -326,7 +328,119 @@ def _summarize_results(results: List[Dict[str, Any]], fallback: str) -> str:
     return fallback
 
 
-async def _run_idea_research(state: Dict[str, Any]) -> Dict[str, Any]:
+def _dedupe_texts(values: List[Any], *, limit: int = 0) -> List[str]:
+    unique: List[str] = []
+    seen = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(text)
+        if limit and len(unique) >= limit:
+            break
+    return unique
+
+
+def _guided_sources_from_report(report: ResearchReport) -> List[Dict[str, Any]]:
+    mapped: List[Dict[str, Any]] = []
+    for item in report.evidence[:6]:
+        mapped.append(
+            {
+                "title": item.title,
+                "url": item.url,
+                "domain": item.domain,
+                "snippet": item.snippet,
+                "score": item.relevance_score,
+                "query": item.query,
+            }
+        )
+    if mapped:
+        return mapped
+    rows = report.structured_schema.get("sources") if isinstance(report.structured_schema, dict) else []
+    return [dict(row) for row in rows[:6] if isinstance(row, dict)]
+
+
+def _guided_highlights_from_report(report: ResearchReport) -> List[str]:
+    structured = report.structured_schema if isinstance(report.structured_schema, dict) else {}
+    candidates: List[Any] = []
+    for key in ("visible_insights", "signals", "expandable_reasoning"):
+        values = structured.get(key)
+        if isinstance(values, list):
+            candidates.extend(values)
+    candidates.extend(report.findings or [])
+    return [text[:220] for text in _dedupe_texts(candidates, limit=4)]
+
+
+def _guided_quality_from_report(report: ResearchReport, schema: Dict[str, Any]) -> Dict[str, Any]:
+    mapped = dict(report.quality or {})
+    evidence = list(report.evidence or [])
+    mapped["usable_sources"] = len(evidence) or int(mapped.get("usable_sources") or 0)
+    mapped["domains"] = len({item.domain for item in evidence if str(item.domain or "").strip()}) or int(mapped.get("domains") or 0)
+    mapped["confidence_score"] = float((report.structured_schema or {}).get("confidence_score") or 0.0)
+    mapped["proxy_search_used"] = bool(schema.get("proxy_search_used"))
+    mapped["proxy_search_evidence_count"] = int(schema.get("proxy_search_evidence_count") or 0)
+    if schema.get("research_estimation_mode"):
+        mapped["estimation_mode"] = schema.get("research_estimation_mode")
+    return mapped
+
+
+def _idea_research_from_report(report: ResearchReport, schema: Dict[str, Any], fallback_query: str) -> Dict[str, Any]:
+    highlights = _guided_highlights_from_report(report)
+    summary = str(report.summary or "").strip() or (highlights[0] if highlights else fallback_query)
+    query = str((report.query_plan[0].query if report.query_plan else "") or fallback_query).strip()
+    return {
+        "query": query,
+        "summary": summary,
+        "highlights": highlights,
+        "sources": _guided_sources_from_report(report),
+        "provider": "search_agent",
+        "quality": _guided_quality_from_report(report, schema),
+        "research_report": report.to_dict(),
+    }
+
+
+def _research_report_from_payload(payload: Dict[str, Any]) -> Optional[ResearchReport]:
+    raw = payload.get("research_report")
+    if not isinstance(raw, dict):
+        return None
+    query_plan = [
+        ResearchQuery(
+            query=str(item.get("query") or "").strip(),
+            reason=str(item.get("reason") or "").strip(),
+        )
+        for item in raw.get("query_plan") or []
+        if isinstance(item, dict) and str(item.get("query") or "").strip()
+    ]
+    evidence = [
+        EvidenceItem(
+            query=str(item.get("query") or "").strip(),
+            title=str(item.get("title") or "").strip(),
+            url=str(item.get("url") or "").strip(),
+            domain=str(item.get("domain") or "").strip(),
+            snippet=str(item.get("snippet") or "").strip(),
+            content=str(item.get("content") or "").strip(),
+            relevance_score=float(item.get("relevance_score") or 0.0),
+            http_status=item.get("http_status"),
+        )
+        for item in raw.get("evidence") or []
+        if isinstance(item, dict)
+    ]
+    return ResearchReport(
+        query_plan=query_plan,
+        evidence=evidence,
+        summary=str(raw.get("summary") or "").strip(),
+        findings=[str(item).strip() for item in raw.get("findings") or [] if str(item).strip()],
+        gaps=[str(item).strip() for item in raw.get("gaps") or [] if str(item).strip()],
+        quality=dict(raw.get("quality") or {}),
+        structured_schema=dict(raw.get("structured_schema") or {}),
+    )
+
+
+async def _run_idea_research_fallback(state: Dict[str, Any]) -> Dict[str, Any]:
     draft = state.get("draft_context") or {}
     idea = str(draft.get("idea") or "").strip()
     category = str(draft.get("category") or "").strip()
@@ -343,6 +457,40 @@ async def _run_idea_research(state: Dict[str, Any]) -> Dict[str, Any]:
         "provider": search.get("provider") or "web",
         "quality": search.get("quality") if isinstance(search.get("quality"), dict) else {},
     }
+
+
+async def _run_idea_research(state: Dict[str, Any]) -> Dict[str, Any]:
+    draft = state.get("draft_context") or {}
+    idea = str(draft.get("idea") or "").strip()
+    category = str(draft.get("category") or "").strip()
+    audience = ", ".join(draft.get("targetAudience") or [])
+    fallback_query = " ".join(part for part in [idea, category, audience] if part).strip()
+    schema = state.setdefault("schema", {})
+    try:
+        search_agent = _guided_search_agent()
+        search_state = OrchestrationState(
+            simulation_id=str(uuid.uuid4()),
+            user_id=state.get("user_id"),
+            user_context=_workflow_user_context(state),
+        )
+        search_state.idea_context_type = classify_idea_context(search_state.user_context).value
+        search_state = await search_agent.run(search_state)
+        report = search_state.research
+        if (
+            report is None
+            or search_state.pending_input
+            or str(search_state.status_reason or "").strip() == "paused_research_review"
+        ):
+            raise RuntimeError("guided_search_agent_returned_no_report")
+        if not (str(report.summary or "").strip() or report.findings or report.evidence):
+            raise RuntimeError("guided_search_agent_returned_empty_report")
+        schema.update(dict(search_state.schema or {}))
+        schema["guided_research_backend"] = "search_agent"
+        return _idea_research_from_report(report, schema, fallback_query)
+    except Exception as exc:
+        schema["guided_research_backend"] = "search_web_fallback"
+        schema["guided_research_error"] = str(exc).strip() or "guided_search_failed"
+        return await _run_idea_research_fallback(state)
 
 
 async def _run_location_research(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -402,6 +550,21 @@ def _guided_persona_agent() -> PersonaAgent:
     return _WORKFLOW_PERSONA_AGENT
 
 
+def _guided_search_agent() -> SearchAgent:
+    global _WORKFLOW_SEARCH_AGENT
+    if _WORKFLOW_SEARCH_AGENT is None:
+        data_dir = Path(__file__).resolve().parents[1] / "data"
+        runtime = AgentRuntime(
+            dataset=load_dataset(str(data_dir)),
+            llm=LLMGateway(),
+            event_bus=_WorkflowEventBus(),
+            repository=SimulationRepository(),
+            memory_provider=build_memory_provider(),
+        )
+        _WORKFLOW_SEARCH_AGENT = SearchAgent(runtime)
+    return _WORKFLOW_SEARCH_AGENT
+
+
 def _workflow_user_context(state: Dict[str, Any]) -> Dict[str, Any]:
     draft = state.get("draft_context") or {}
     payload = {
@@ -422,42 +585,45 @@ def _workflow_research_report(state: Dict[str, Any]) -> ResearchReport:
     draft = state.get("draft_context") or {}
     idea_research = state.get("idea_research") or {}
     location_research = state.get("location_research") or {}
-    query_plan: List[ResearchQuery] = []
-    evidence: List[EvidenceItem] = []
-    findings: List[str] = []
+    base_report = _research_report_from_payload(idea_research)
+    query_plan: List[ResearchQuery] = list(base_report.query_plan or []) if base_report else []
+    evidence: List[EvidenceItem] = list(base_report.evidence or []) if base_report else []
+    findings: List[str] = list(base_report.findings or []) if base_report else []
 
     idea_query = str(idea_research.get("query") or "").strip()
-    if idea_query:
+    if idea_query and not any(str(item.query or "").strip() == idea_query for item in query_plan):
         query_plan.append(ResearchQuery(query=idea_query, reason="General idea and market research"))
     for query in location_research.get("query_plan") or []:
         text = str(query or "").strip()
         if text:
             query_plan.append(ResearchQuery(query=text, reason="Local sentiment and place context research"))
 
-    for item in idea_research.get("highlights") or []:
-        text = str(item).strip()
-        if text and text not in findings:
-            findings.append(text)
+    if not base_report:
+        for item in idea_research.get("highlights") or []:
+            text = str(item).strip()
+            if text and text not in findings:
+                findings.append(text)
     for item in location_research.get("signals") or []:
         text = str(item).strip()
         if text and text not in findings:
             findings.append(text)
 
-    for row in idea_research.get("sources") or []:
-        if not isinstance(row, dict):
-            continue
-        evidence.append(
-            EvidenceItem(
-                query=idea_query or str(draft.get("idea") or "").strip(),
-                title=str(row.get("title") or row.get("url") or "").strip(),
-                url=str(row.get("url") or "").strip(),
-                domain=str(row.get("domain") or "").strip(),
-                snippet=str(row.get("snippet") or row.get("reason") or "").strip(),
-                content="",
-                relevance_score=float(row.get("score") or 0.0),
-                http_status=None,
+    if not base_report:
+        for row in idea_research.get("sources") or []:
+            if not isinstance(row, dict):
+                continue
+            evidence.append(
+                EvidenceItem(
+                    query=idea_query or str(draft.get("idea") or "").strip(),
+                    title=str(row.get("title") or row.get("url") or "").strip(),
+                    url=str(row.get("url") or "").strip(),
+                    domain=str(row.get("domain") or "").strip(),
+                    snippet=str(row.get("snippet") or row.get("reason") or "").strip(),
+                    content="",
+                    relevance_score=float(row.get("score") or 0.0),
+                    http_status=None,
+                )
             )
-        )
 
     place_query = str((location_research.get("query_plan") or [""])[0] or "").strip()
     for row in location_research.get("sources") or []:
@@ -477,31 +643,40 @@ def _workflow_research_report(state: Dict[str, Any]) -> ResearchReport:
         )
 
     summary_parts = [
-        str(idea_research.get("summary") or "").strip(),
+        str((base_report.summary if base_report else idea_research.get("summary")) or "").strip(),
         str(location_research.get("summary") or "").strip(),
     ]
     summary = " | ".join(part for part in summary_parts if part)
-    quality = {
-        "idea_research": dict(idea_research.get("quality") or {}),
-        "location_source_count": len(location_research.get("sources") or []),
-        "workflow_scope": _normalize_scope(draft.get("contextScope")),
-    }
+    quality = dict(base_report.quality or {}) if base_report else {}
+    quality["idea_research"] = dict(idea_research.get("quality") or quality.get("idea_research") or {})
+    quality["location_source_count"] = len(location_research.get("sources") or [])
+    quality["workflow_scope"] = _normalize_scope(draft.get("contextScope"))
     gaps: List[str] = []
     if _normalize_scope(draft.get("contextScope")) == "specific_place" and not (location_research.get("sources") or []):
         gaps.append("No local sources were found for the requested place.")
+    if base_report:
+        for item in base_report.gaps or []:
+            text = str(item).strip()
+            if text and text not in gaps:
+                gaps.append(text)
+    structured_schema = dict(base_report.structured_schema or {}) if base_report else {}
+    signal_values = [
+        str(item).strip()
+        for item in list(structured_schema.get("signals") or []) + findings
+        if str(item).strip()
+    ]
+    structured_schema["signals"] = _dedupe_texts(signal_values, limit=12)
+    structured_schema["place_context"] = str(location_research.get("place_label") or draft.get("placeName") or "").strip()
+    structured_schema["target_audiences"] = list(draft.get("targetAudience") or [])
+    structured_schema["default_audience_dataset_used"] = not bool(draft.get("placeName") or draft.get("city") or draft.get("country"))
     return ResearchReport(
         query_plan=query_plan,
         evidence=evidence,
-        summary=summary or str(draft.get("idea") or "").strip(),
+        summary=summary or str((base_report.summary if base_report else draft.get("idea")) or "").strip(),
         findings=findings[:12],
         gaps=gaps,
         quality=quality,
-        structured_schema={
-            "signals": findings[:12],
-            "place_context": str(location_research.get("place_label") or draft.get("placeName") or "").strip(),
-            "target_audiences": list(draft.get("targetAudience") or []),
-            "default_audience_dataset_used": not bool(draft.get("placeName") or draft.get("city") or draft.get("country")),
-        },
+        structured_schema=structured_schema,
     )
 
 
@@ -698,6 +873,7 @@ def _invalidate_downstream(state: Dict[str, Any], *, field_updates: Dict[str, An
         state["persona_validation_errors"] = []
         state["review"] = None
     if affected_keys:
+        state["schema"] = {}
         state["review_approved"] = False
 
 
@@ -743,6 +919,7 @@ def _long_stage_snapshot(state: Dict[str, Any], stage: str) -> Dict[str, Any]:
         "user_id": state.get("user_id"),
         "language": state.get("language") or "en",
         "draft_context": _clone(state.get("draft_context") or {}),
+        "schema": _clone(state.get("schema") or {}),
         "idea_research": _clone(state.get("idea_research") or {}),
         "location_research": _clone(state.get("location_research") or {}),
         "simulation": _clone(state.get("simulation") or {}),
@@ -754,7 +931,10 @@ def _long_stage_snapshot(state: Dict[str, Any], stage: str) -> Dict[str, Any]:
 
 async def _run_long_stage(stage: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if stage == "idea_research":
-        return {"idea_research": await _run_idea_research(snapshot)}
+        return {
+            "idea_research": await _run_idea_research(snapshot),
+            "schema": dict(snapshot.get("schema") or {}),
+        }
     if stage == "location_research":
         return {"location_research": await _run_location_research(snapshot)}
     if stage == "persona_synthesis":
@@ -1052,6 +1232,7 @@ async def _continue_workflow_progress(workflow_id: str, user_id: Optional[int]) 
 
             if stage == "idea_research":
                 state["idea_research"] = dict(result.get("idea_research") or {})
+                state["schema"] = dict(result.get("schema") or state.get("schema") or {})
                 state["verification"] = _verify_stage(state, "idea_research")
                 _mark_stage(state, "idea_research", "completed", "Idea research complete.")
             elif stage == "location_research":
@@ -1120,6 +1301,7 @@ async def start_workflow(
             "created_at": _now_ms(),
             "updated_at": _now_ms(),
             "draft_context": _normalize_draft_context(draft_context, safe_language),
+            "schema": {},
             "guide_messages": [],
             "stage_history": [],
             "clarification_questions": None,

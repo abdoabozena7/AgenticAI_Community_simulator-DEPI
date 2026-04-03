@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 from app.agents.search_agent import SearchAgent  # noqa: E402
 from app.core import web_search as web_search_core  # noqa: E402
-from app.models.orchestration import OrchestrationState, SimulationPhase  # noqa: E402
+from app.models.orchestration import OrchestrationState, ResearchQuery, SimulationPhase  # noqa: E402
 from app.orchestrator import SimulationOrchestrator  # noqa: E402
 from app.services.translation_bridge import SearchQueryVariant  # noqa: E402
 
@@ -76,6 +76,116 @@ def _low_signal_result() -> dict:
             "expandable_reasoning": ["المعطيات الحالية جاية من مصدر واحد فقط."],
             "confidence_score": 0.22,
             "sources": [{"title": "Example result", "url": "https://example.com/1", "domain": "example.com"}],
+        },
+    }
+
+
+def _proxy_ready_result() -> dict:
+    return {
+        "provider": "proxy",
+        "quality": {"usable_sources": 2, "domains": 2, "extraction_success_rate": 0.7},
+        "results": [
+            {
+                "title": "Analog market evidence",
+                "url": "https://proxy.example.com/analog",
+                "domain": "proxy.example.com",
+                "snippet": "Customers compare total cost, react to fees, and switch to cheaper alternatives.",
+            }
+        ],
+        "structured": {
+            "summary": "Analog buyers compare price, resist fees, and need clearer value before conversion.",
+            "market_presence": "common",
+            "price_range": "medium",
+            "user_sentiment": {
+                "positive": ["there is interest when the offer is clear"],
+                "negative": ["fees create pushback"],
+                "neutral": ["some buyers keep comparing alternatives"],
+            },
+            "signals": ["buyers compare total cost before purchase", "clear pricing improves trust"],
+            "user_types": ["budget-conscious families"],
+            "complaints": ["delivery fees", "unclear pricing"],
+            "behaviors": ["comparison shopping", "waiting for discounts"],
+            "competition_reactions": ["switch to cheaper alternatives"],
+            "competition_level": "high",
+            "demand_level": "medium",
+            "regulatory_risk": "medium",
+            "price_sensitivity": "high",
+            "visible_insights": ["adjacent buyers are highly price sensitive"],
+            "expandable_reasoning": ["proxy search found repeated fee objections and switching behavior in similar markets"],
+            "confidence_score": 0.63,
+            "sources": [{"title": "Analog market evidence", "url": "https://proxy.example.com/analog", "domain": "proxy.example.com"}],
+        },
+    }
+
+
+def _very_low_signal_result() -> dict:
+    return {
+        "provider": "stub",
+        "quality": {"usable_sources": 1, "domains": 1, "extraction_success_rate": 0.1},
+        "results": [
+            {
+                "title": "Thin result",
+                "url": "https://example.com/thin",
+                "domain": "example.com",
+                "snippet": "Limited direct evidence exists.",
+            }
+        ],
+        "structured": {
+            "summary": "المعطيات المباشرة ضعيفة جدًا.",
+            "market_presence": "common",
+            "competition_level": "high",
+            "price_range": "",
+            "user_sentiment": {"positive": [], "negative": ["الإشارات المباشرة محدودة"], "neutral": []},
+            "signals": ["إشارة مباشرة واحدة فقط"],
+            "user_types": [],
+            "complaints": [],
+            "behaviors": [],
+            "competition_reactions": [],
+            "behavior_patterns": [],
+            "gaps_in_market": [],
+            "demand_level": "medium",
+            "regulatory_risk": "medium",
+            "price_sensitivity": "high",
+            "notable_locations": ["الهرم"],
+            "gaps": ["لا توجد إشارات مباشرة كافية بعد"],
+            "visible_insights": ["البحث المباشر لا يزال ضعيفًا"],
+            "expandable_reasoning": ["المعطيات الحالية لا تكفي لبناء صورة قوية بدون دعم إضافي."],
+            "confidence_score": 0.15,
+            "sources": [{"title": "Thin result", "url": "https://example.com/thin", "domain": "example.com"}],
+        },
+    }
+
+
+def _proxy_weak_result() -> dict:
+    return {
+        "provider": "proxy",
+        "quality": {"usable_sources": 1, "domains": 1, "extraction_success_rate": 0.2},
+        "results": [
+            {
+                "title": "Thin analog note",
+                "url": "https://proxy.example.com/thin",
+                "domain": "proxy.example.com",
+                "snippet": "Some nearby analog discussion exists but evidence is limited.",
+            }
+        ],
+        "structured": {
+            "summary": "Proxy evidence is still limited.",
+            "market_presence": "common",
+            "price_range": "",
+            "user_sentiment": {"positive": [], "negative": [], "neutral": []},
+            "signals": ["proxy evidence is limited"],
+            "user_types": [],
+            "complaints": [],
+            "behaviors": [],
+            "competition_reactions": [],
+            "competition_level": "high",
+            "demand_level": "medium",
+            "regulatory_risk": "medium",
+            "price_sensitivity": "high",
+            "visible_insights": ["proxy results are still thin"],
+            "expandable_reasoning": ["proxy search did not materially improve direct evidence coverage"],
+            "confidence_score": 0.2,
+            "sources": [{"title": "Thin analog note", "url": "https://proxy.example.com/thin", "domain": "proxy.example.com"}],
         },
     }
 
@@ -162,6 +272,183 @@ class ResearchIntelligenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.research.structured_schema.get("estimation_mode"), "ai_estimation")
         self.assertIn("user_sentiment", state.research.structured_schema)
         self.assertIn("behavior_patterns", state.research.structured_schema)
+
+    async def test_search_agent_populates_additive_evidence_ladder_with_all_types(self) -> None:
+        llm = SimpleNamespace(
+            generate_json=AsyncMock(
+                return_value={
+                    "summary": "الناس في الهرم بتدور على بديل أوضح سعرًا وأسهل في الطلب.",
+                    "market_presence": "common",
+                    "price_range": "متوسط إلى مرتفع",
+                    "user_sentiment": {
+                        "positive": ["فيه اهتمام بسرعة التوصيل"],
+                        "negative": ["الناس بتضايق من الرسوم"],
+                        "neutral": ["فيه ناس لسه بتقارن"],
+                    },
+                    "signals": ["فيه حساسية واضحة للسعر"],
+                    "user_types": ["أسر", "شباب شغالين"],
+                    "complaints": ["الرسوم", "عدم وضوح السعر النهائي"],
+                    "behaviors": ["مقارنة الأسعار", "انتظار الخصومات"],
+                    "competition_reactions": ["الناس بتروح للأرخص"],
+                    "behavior_patterns": ["مقارنة الأسعار", "طلب متكرر وقت العروض"],
+                    "gaps_in_market": ["عروض أوضح ورسوم أبسط"],
+                    "competition_level": "high",
+                    "demand_level": "medium",
+                    "regulatory_risk": "medium",
+                    "price_sensitivity": "high",
+                    "notable_locations": ["الهرم"],
+                    "gaps": ["لسه محتاجين إشارات مباشرة أكتر"],
+                    "visible_insights": ["الناس حساسة للسعر في الهرم"],
+                    "expandable_reasoning": ["النتائج المباشرة قليلة، فتم استخدام تقدير منطقي مبني على السياق المحلي."],
+                    "confidence_score": 0.5,
+                    "sources": [],
+                }
+            )
+        )
+        agent = SearchAgent(_runtime(llm=llm))
+        state = _state()
+        state.user_context["researchEstimationMode"] = "ai_estimation"
+        with patch("app.agents.search_agent.search_web", AsyncMock(return_value=_low_signal_result())), patch(
+            "app.agents.search_agent.fetch_page",
+            AsyncMock(return_value={"ok": True, "title": "Example", "content": "limited content", "http_status": 200}),
+        ):
+            await agent.run(state)
+
+        structured = state.research.structured_schema
+        ladder = structured.get("evidence_ladder")
+
+        self.assertIsInstance(ladder, list)
+        self.assertTrue(ladder)
+        self.assertIn("signals", structured)
+        self.assertIn("sources", structured)
+        self.assertIn("visible_insights", structured)
+        self.assertTrue(structured["signals"])
+        self.assertTrue(structured["sources"])
+        self.assertTrue(structured["visible_insights"])
+
+        evidence_types = {str(item.get("evidence_type") or "") for item in ladder if isinstance(item, dict)}
+        self.assertTrue({"direct_evidence", "derived_signal", "model_estimate"}.issubset(evidence_types))
+
+        self.assertTrue(
+            any(
+                item.get("evidence_type") == "direct_evidence"
+                and isinstance(item.get("source"), dict)
+                and str(item["source"].get("url") or "").strip()
+                for item in ladder
+                if isinstance(item, dict)
+            )
+        )
+        self.assertTrue(
+            any(
+                item.get("evidence_type") == "derived_signal"
+                and isinstance(item.get("source"), dict)
+                and item["source"].get("kind") == "research_structured"
+                for item in ladder
+                if isinstance(item, dict)
+            )
+        )
+        self.assertTrue(
+            any(
+                item.get("evidence_type") == "model_estimate"
+                and item.get("source") == "ai_estimation"
+                for item in ladder
+                if isinstance(item, dict)
+            )
+        )
+
+    async def test_proxy_search_can_rescue_weak_direct_search_without_estimation(self) -> None:
+        agent = SearchAgent(_runtime())
+        state = _state()
+        proxy_direct = ResearchQuery(query="proxy analog market", reason="proxy analog market evidence")
+
+        async def search_side_effect(*args: object, **kwargs: object) -> dict:
+            query = str(kwargs.get("query") or args[0])
+            return _proxy_ready_result() if query == proxy_direct.query else _very_low_signal_result()
+
+        with patch.object(SearchAgent, "_build_query_plan", return_value=[ResearchQuery(query="direct weak", reason="direct")]), patch.object(
+            SearchAgent,
+            "_build_proxy_query_plan",
+            return_value=[proxy_direct],
+        ), patch("app.agents.search_agent.search_web", AsyncMock(side_effect=search_side_effect)), patch(
+            "app.agents.search_agent.fetch_page",
+            AsyncMock(return_value={"ok": True, "title": "Example", "content": "proxy content", "http_status": 200}),
+        ):
+            await agent.run(state)
+
+        self.assertTrue(state.search_completed)
+        self.assertIsNone(state.schema.get("research_estimation_mode"))
+        self.assertTrue(state.schema.get("proxy_search_used"))
+        self.assertEqual(state.schema.get("proxy_search_evidence_count"), 1)
+        ladder = state.research.structured_schema.get("evidence_ladder") or []
+        self.assertTrue(
+            any(
+                item.get("evidence_type") == "direct_evidence"
+                and isinstance(item.get("source"), dict)
+                and item["source"].get("kind") == "proxy_search"
+                for item in ladder
+                if isinstance(item, dict)
+            )
+        )
+        self.assertTrue(
+            any(
+                item.get("evidence_type") == "derived_signal"
+                and isinstance(item.get("source"), dict)
+                and item["source"].get("kind") == "proxy_structured"
+                for item in ladder
+                if isinstance(item, dict)
+            )
+        )
+
+    async def test_proxy_search_still_allows_estimation_as_last_resort(self) -> None:
+        agent = SearchAgent(_runtime())
+        state = _state()
+        proxy_direct = ResearchQuery(query="proxy analog market", reason="proxy analog market evidence")
+
+        async def search_side_effect(*args: object, **kwargs: object) -> dict:
+            query = str(kwargs.get("query") or args[0])
+            return _proxy_weak_result() if query == proxy_direct.query else _very_low_signal_result()
+
+        with patch.object(SearchAgent, "_build_query_plan", return_value=[ResearchQuery(query="direct weak", reason="direct")]), patch.object(
+            SearchAgent,
+            "_build_proxy_query_plan",
+            return_value=[proxy_direct],
+        ), patch("app.agents.search_agent.search_web", AsyncMock(side_effect=search_side_effect)), patch(
+            "app.agents.search_agent.fetch_page",
+            AsyncMock(return_value={"ok": True, "title": "Example", "content": "thin proxy content", "http_status": 200}),
+        ):
+            await agent.run(state)
+
+        self.assertTrue(state.schema.get("proxy_search_used"))
+        self.assertEqual(state.schema.get("research_estimation_mode"), "ai_estimation")
+        ladder = state.research.structured_schema.get("evidence_ladder") or []
+        self.assertTrue(
+            any(item.get("evidence_type") == "model_estimate" for item in ladder if isinstance(item, dict))
+        )
+
+    async def test_proxy_search_runs_before_pause_when_ai_estimation_is_disabled(self) -> None:
+        agent = SearchAgent(_runtime())
+        state = _state()
+        state.user_context["researchEstimationMode"] = "retry"
+        proxy_direct = ResearchQuery(query="proxy analog market", reason="proxy analog market evidence")
+
+        async def search_side_effect(*args: object, **kwargs: object) -> dict:
+            query = str(kwargs.get("query") or args[0])
+            return _proxy_weak_result() if query == proxy_direct.query else _very_low_signal_result()
+
+        with patch.object(SearchAgent, "_build_query_plan", return_value=[ResearchQuery(query="direct weak", reason="direct")]), patch.object(
+            SearchAgent,
+            "_build_proxy_query_plan",
+            return_value=[proxy_direct],
+        ), patch("app.agents.search_agent.search_web", AsyncMock(side_effect=search_side_effect)), patch(
+            "app.agents.search_agent.fetch_page",
+            AsyncMock(return_value={"ok": True, "title": "Example", "content": "thin proxy content", "http_status": 200}),
+        ):
+            await agent.run(state)
+
+        self.assertTrue(state.schema.get("proxy_search_used"))
+        self.assertEqual(state.pending_input_kind, "research_review")
+        self.assertEqual(state.status_reason, "paused_research_review")
+        self.assertFalse(state.search_completed)
 
     async def test_search_agent_pauses_only_when_retry_mode_disables_ai_estimation(self) -> None:
         agent = SearchAgent(_runtime())

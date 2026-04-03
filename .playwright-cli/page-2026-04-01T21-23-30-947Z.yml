@@ -1,0 +1,114 @@
+- generic [ref=e2]:
+  - region "Notifications (F8)":
+    - list
+  - region "Notifications alt+T"
+  - generic [ref=e410]:
+    - complementary [ref=e411]:
+      - generic [ref=e413]:
+        - img [ref=e415]
+        - generic [ref=e417]: ASSET
+      - navigation [ref=e418]:
+        - button "الرئيسية" [ref=e419] [cursor=pointer]:
+          - img [ref=e420]
+          - generic [ref=e423]: الرئيسية
+        - button "المحاكاة" [ref=e424] [cursor=pointer]:
+          - img [ref=e425]
+          - generic [ref=e435]: المحاكاة
+        - button "البحث" [ref=e436] [cursor=pointer]:
+          - img [ref=e437]
+          - generic [ref=e440]: البحث
+        - button "مختبر الشخصيات" [ref=e441] [cursor=pointer]:
+          - img [ref=e442]
+          - generic [ref=e444]: مختبر الشخصيات
+        - button "محكمة الأفكار" [ref=e445] [cursor=pointer]:
+          - img [ref=e446]
+          - generic [ref=e450]: محكمة الأفكار
+        - button "التحليلات" [ref=e451] [cursor=pointer]:
+          - img [ref=e452]
+          - generic [ref=e454]: التحليلات
+        - button "الإعدادات" [ref=e455] [cursor=pointer]:
+          - img [ref=e456]
+          - generic [ref=e459]: الإعدادات
+      - generic [ref=e461]:
+        - generic [ref=e462]: U
+        - generic [ref=e463]:
+          - paragraph [ref=e464]: user
+          - paragraph [ref=e465]: Pro Plan
+        - button "Logout" [ref=e466] [cursor=pointer]:
+          - img [ref=e467]
+    - main [ref=e470]:
+      - generic [ref=e471]:
+        - generic [ref=e473]:
+          - img [ref=e474]
+          - textbox "بحث..." [ref=e478]
+        - generic [ref=e479]:
+          - button [ref=e480] [cursor=pointer]:
+            - img
+          - button [ref=e481] [cursor=pointer]:
+            - img
+          - button [ref=e483] [cursor=pointer]:
+            - img [ref=e484]
+          - button "جديد" [ref=e487] [cursor=pointer]:
+            - img
+            - text: جديد
+      - generic [ref=e491]:
+        - generic [ref=e492]:
+          - generic [ref=e493]:
+            - generic [ref=e494]:
+              - generic [ref=e495]:
+                - img [ref=e496]
+                - text: الهوية المعمارية البسيطة
+              - heading "ابدأ محاكاة جديدة" [level=2] [ref=e498]
+              - paragraph [ref=e499]: اكتب الفكرة، حدّد المكان والتصنيف، ثم انتقل مباشرة إلى البحث أو المحاكاة.
+            - generic [ref=e501]: الوضع الداكن يعتمد على الأسود
+          - generic [ref=e502]:
+            - generic [ref=e503]:
+              - text: فكرتك
+              - 'textbox "مثال: كشك قهوة سريع بجوار جامعة" [ref=e504]'
+            - generic [ref=e505]:
+              - generic [ref=e506]:
+                - text: المكان / المنطقة (اختياري)
+                - generic [ref=e507]:
+                  - img
+                  - 'textbox "مثال: مدينة نصر، القاهرة" [ref=e508]'
+              - generic [ref=e509]:
+                - text: التصنيف
+                - combobox [ref=e510] [cursor=pointer]:
+                  - generic: التكنولوجيا
+                  - img [ref=e511]
+            - generic [ref=e513]: لم يتم تحديد مكان بعد. الأفكار العامة ستطلب مصدرًا للشخصيات قبل بدء المحاكاة.
+            - generic [ref=e514]:
+              - button "شغّل المسار الإلزامي" [disabled]:
+                - img
+                - text: شغّل المسار الإلزامي
+                - img
+              - button "عرض البحث فقط" [disabled]:
+                - img
+                - text: عرض البحث فقط
+            - generic [ref=e515]:
+              - button "اختر مصدر الشخصيات" [disabled]
+              - button "افتح مختبر الشخصيات" [ref=e516] [cursor=pointer]
+        - complementary [ref=e517]:
+          - generic [ref=e518]:
+            - generic [ref=e519]:
+              - generic [ref=e520]:
+                - paragraph [ref=e521]: حالة الشخصيات
+                - heading "المسودة الحالية" [level=3] [ref=e522]
+              - generic [ref=e523]: جاهز
+            - generic [ref=e524]:
+              - generic [ref=e525]:
+                - paragraph [ref=e526]: طول الفكرة
+                - paragraph [ref=e527]: لا توجد فكرة بعد
+              - generic [ref=e528]:
+                - paragraph [ref=e529]: المكان
+                - paragraph [ref=e530]: غير محدد
+              - generic [ref=e531]:
+                - paragraph [ref=e532]: التصنيف
+                - paragraph [ref=e533]: التكنولوجيا
+          - generic [ref=e534]:
+            - generic [ref=e535]:
+              - img [ref=e536]
+              - heading "كود الخصم" [level=3] [ref=e539]
+            - generic [ref=e540]:
+              - textbox "أدخل كود الخصم" [ref=e541]
+              - button "استرداد" [ref=e542] [cursor=pointer]

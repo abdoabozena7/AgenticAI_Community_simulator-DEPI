@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import os
@@ -15,6 +16,7 @@ from ..models.orchestration import (
     apply_persona_dynamic_defaults,
     context_location_label,
 )
+from ..services.evidence_ladder import ensure_evidence_ladder, find_evidence_by_text, summarize_evidence_confidence
 from .base import BaseAgent
 
 
@@ -127,6 +129,7 @@ class PersonaAgent(BaseAgent):
     HARD_MAX_PERSONAS = 50
     TARGET_MIN_PERSONAS = 30
     BATCH_SIZE = 10
+    LLM_CALL_BUDGET_SECONDS = 10.0
 
     async def run(self, state: OrchestrationState) -> OrchestrationState:
         if not state.search_completed or state.research is None:
@@ -551,6 +554,7 @@ class PersonaAgent(BaseAgent):
         enough_data = self._has_enough_data(state)
         target_count = min(self.HARD_MAX_PERSONAS, requested_count)
         batch_count = max(1, math.ceil(target_count / self.BATCH_SIZE))
+        oversample = self._oversample_padding(signal_plan.get("confidence_score"))
         personas: List[PersonaProfile] = []
         duplicate_rejection_count = 0
         weak_rejection_count = 0
@@ -581,7 +585,7 @@ class PersonaAgent(BaseAgent):
                 signal_plan=signal_plan,
                 batch_number=batch_index + 1,
                 batch_count=batch_count,
-                batch_goal=batch_goal + 2,
+                batch_goal=batch_goal + oversample,
                 existing_names=sorted(used_names)[:20],
             )
             batch_personas, rejected = self._materialize_personas(
@@ -636,6 +640,15 @@ class PersonaAgent(BaseAgent):
             min(0.95, max(0.32, 0.4 + (0.2 if enough_data else 0.0) + min(0.22, len(signal_plan.get("evidence_signals") or []) * 0.02))),
             3,
         )
+        confidence_score = round(
+            self._clamp(
+                (0.7 * confidence_score) + (0.3 * float(signal_plan.get("confidence_score") or 0.0)),
+                0.32,
+                0.95,
+                fallback=confidence_score,
+            ),
+            3,
+        )
         if enough_data and actual_count < self.TARGET_MIN_PERSONAS:
             message = f"Only {actual_count} personas passed validation despite sufficient research. Validation will block simulation."
         elif actual_count < self.TARGET_MIN_PERSONAS:
@@ -675,6 +688,7 @@ class PersonaAgent(BaseAgent):
         structured_inputs = self._structured_persona_inputs(state)
         memory_context = memory_context or {}
         saved_persona_hints = list(saved_persona_hints or [])
+        ladder_confidence = float((structured_inputs.get("evidence_confidence") or {}).get("score") or 0.0)
         evidence_signals = list(structured_inputs.get("evidence_signals") or [])
         evidence_signals.extend(str(item).strip() for item in memory_context.get("confirmed_signals") or [] if str(item).strip())
         social_sentiment = dict(structured_inputs.get("social_sentiment") or {})
@@ -713,15 +727,21 @@ class PersonaAgent(BaseAgent):
             "archetype_guardrails_used": list(segment_payload.get("archetype_guardrails_used") or [cluster["cluster"] for cluster in audience_clusters[:6]]),
             "signal_catalog": list(structured_inputs.get("signal_catalog") or [])[:24],
             "market_grounding": market_grounding,
-            "confidence_score": min(
+            "confidence_score": self._clamp(
+                (0.7 * min(
+                    0.95,
+                    max(
+                        0.24,
+                        (
+                            float(segment_payload.get("confidence_score") or 0.0)
+                            + (0.45 if self._has_enough_data(state) else 0.32)
+                        ) / 2.0,
+                    ),
+                ))
+                + (0.3 * ladder_confidence),
+                0.24,
                 0.95,
-                max(
-                    0.24,
-                    (
-                        float(segment_payload.get("confidence_score") or 0.0)
-                        + (0.45 if self._has_enough_data(state) else 0.32)
-                    ) / 2.0,
-                ),
+                fallback=0.32,
             ),
         }
         prompt = (
@@ -762,14 +782,12 @@ class PersonaAgent(BaseAgent):
             "Infer realistic audience clusters from research, market grounding, place context, target audience, and explicit archetype guardrails. "
             "Do not invent unsupported demographics, complaints, or behaviors."
         )
-        raw = await self.runtime.llm.generate_json(
+        raw = await self._generate_json_with_budget(
             prompt=prompt,
             system=system,
             temperature=0.2,
             fallback_json=fallback,
         )
-        if not isinstance(raw, dict):
-            return fallback
         clusters_out = self._normalize_dynamic_clusters(
             state=state,
             place_label=place_label,
@@ -937,6 +955,7 @@ class PersonaAgent(BaseAgent):
             influence_weight = self._clamp(item.get("influence_weight"), 0.3, 2.0, fallback=round(category_weight * float(getattr(template, "influence_susceptibility", 1.0) or 1.0), 3))
             opinion = self._normalize_opinion(item.get("stance"))
             source_kind = self._normalize_source_kind(item.get("source_mode"), state, place_label)
+            matched_signal_confidence = self._matched_signal_confidence(signal_plan, evidence_signals)
             traits = self._merge_traits(
                 template_traits,
                 skepticism=skepticism,
@@ -982,7 +1001,17 @@ class PersonaAgent(BaseAgent):
                     purchase_trigger=purchase_trigger,
                     rejection_trigger=rejection_trigger,
                     opinion=opinion,
-                    confidence=round(self._clamp(item.get("confidence_score"), 0.38, 0.94, fallback=0.56 + rng.uniform(-0.06, 0.1)), 3),
+                    confidence=round(
+                        self._clamp(
+                            (0.55 * (matched_signal_confidence if matched_signal_confidence is not None else float(signal_plan.get("confidence_score") or 0.0)))
+                            + (0.25 * float(signal_plan.get("confidence_score") or 0.0))
+                            + (0.20 * self._clamp(item.get("confidence_score"), 0.0, 1.0, fallback=0.56 + rng.uniform(-0.06, 0.1))),
+                            0.38,
+                            0.94,
+                            fallback=0.56 + rng.uniform(-0.06, 0.1),
+                        ),
+                        3,
+                    ),
                     influence_weight=round(influence_weight, 3),
                     traits=traits,
                     biases=self._string_list(item.get("biases"), fallback=list(getattr(template, "biases", []) or []), limit=4),
@@ -1134,6 +1163,7 @@ class PersonaAgent(BaseAgent):
         used_names = {str(persona.name or "").strip().lower() for persona in initial_personas if str(persona.name or "").strip()}
         completed = list(initial_personas)
         rounds = max(1, math.ceil(max(0, completion_target - len(initial_personas)) / self.BATCH_SIZE) + 1)
+        oversample = self._oversample_padding(augmented_signal_plan.get("confidence_score"))
         duplicate_rejections = 0
         weak_rejections = 0
 
@@ -1159,7 +1189,7 @@ class PersonaAgent(BaseAgent):
                 signal_plan=augmented_signal_plan,
                 batch_number=round_index + 1,
                 batch_count=rounds,
-                batch_goal=batch_goal + 2,
+                batch_goal=batch_goal + oversample,
                 existing_names=sorted(used_names)[:20],
             )
             batch_personas, rejected = self._materialize_personas(
@@ -1174,7 +1204,7 @@ class PersonaAgent(BaseAgent):
             )
             if not batch_personas:
                 fallback_blueprint = {
-                    "personas": self._signal_fitted_blueprints(state, augmented_signal_plan, batch_goal + 2),
+                    "personas": self._signal_fitted_blueprints(state, augmented_signal_plan, batch_goal + oversample),
                 }
                 batch_personas, rejected = self._materialize_personas(
                     state=state,
@@ -1350,8 +1380,16 @@ class PersonaAgent(BaseAgent):
             market_grounding=market_grounding,
         )
         normalized = normalized[: max(minimum_segments, len(current_clusters), 1)]
+        prioritized_catalog_signals = [
+            str(item.get("text") or "").strip()
+            for item in self._prioritized_signal_catalog(
+                structured_inputs.get("signal_catalog") or [],
+                ladder_summary=structured_inputs.get("evidence_confidence") if isinstance(structured_inputs.get("evidence_confidence"), dict) else None,
+            )
+            if isinstance(item, dict) and str(item.get("text") or "").strip()
+        ]
         evidence_signals = self._string_list(
-            list(signal_plan.get("evidence_signals") or []) + self._evidence_signals(state),
+            list(signal_plan.get("evidence_signals") or []) + prioritized_catalog_signals + self._evidence_signals(state),
             fallback=self._research_signal_texts(state),
             limit=24,
         )
@@ -1441,17 +1479,22 @@ class PersonaAgent(BaseAgent):
     def _structured_persona_inputs(self, state: OrchestrationState) -> Dict[str, Any]:
         structured = state.research.structured_schema if state.research else {}
         signal_catalog = self._signal_catalog_from_state(state)
+        evidence_ladder = ensure_evidence_ladder(structured) if isinstance(structured, dict) else []
+        evidence_confidence = summarize_evidence_confidence(evidence_ladder)
+        prioritized_catalog = self._prioritized_signal_catalog(signal_catalog, ladder_summary=evidence_confidence)
         audience_clusters = self._audience_clusters(state)
         return {
             "signal_catalog": signal_catalog,
-            "evidence_signals": [item["text"] for item in signal_catalog if item.get("source_kind") == "research_signal"][:18]
-            or [item["text"] for item in signal_catalog][:18],
+            "evidence_signals": [item["text"] for item in prioritized_catalog if item.get("source_kind") == "research_signal"][:18]
+            or [item["text"] for item in prioritized_catalog][:18],
             "user_types": self._string_list(structured.get("user_types"), fallback=[], limit=10),
             "complaints": self._string_list(structured.get("complaints"), fallback=[], limit=10),
             "behaviors": self._string_list(structured.get("behaviors"), fallback=[], limit=10),
             "competition_reactions": self._string_list(structured.get("competition_reactions"), fallback=[], limit=10),
             "social_sentiment": self._social_sentiment(state),
             "audience_clusters": audience_clusters,
+            "evidence_ladder": evidence_ladder,
+            "evidence_confidence": evidence_confidence,
         }
 
     def build_market_grounding(
@@ -1564,14 +1607,12 @@ class PersonaAgent(BaseAgent):
             "Derive current audience segments from live research, place context, objections, and likely usage patterns. "
             "Avoid generic canned segments unless the research is weak."
         )
-        raw = await self.runtime.llm.generate_json(
+        raw = await self._generate_json_with_budget(
             prompt=prompt,
             system=system,
             temperature=0.25,
             fallback_json=fallback,
         )
-        if not isinstance(raw, dict):
-            return fallback
         clusters = raw.get("audience_clusters") if isinstance(raw.get("audience_clusters"), list) and raw.get("audience_clusters") else fallback_clusters
         return {
             "audience_clusters": self._normalize_dynamic_clusters(
@@ -1586,13 +1627,48 @@ class PersonaAgent(BaseAgent):
             "confidence_score": self._clamp(raw.get("confidence_score"), 0.2, 0.95, fallback=float(fallback["confidence_score"])),
         }
 
-    def _signal_catalog_from_state(self, state: OrchestrationState) -> List[Dict[str, str]]:
+    async def _generate_json_with_budget(
+        self,
+        *,
+        prompt: str,
+        system: Optional[str],
+        temperature: float,
+        fallback_json: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        try:
+            raw = await asyncio.wait_for(
+                self.runtime.llm.generate_json(
+                    prompt=prompt,
+                    system=system,
+                    temperature=temperature,
+                    fallback_json=fallback_json,
+                ),
+                timeout=self.LLM_CALL_BUDGET_SECONDS,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            return dict(fallback_json)
+        except Exception:
+            return dict(fallback_json)
+        return raw if isinstance(raw, dict) else dict(fallback_json)
+
+    def _signal_catalog_from_state(self, state: OrchestrationState) -> List[Dict[str, Any]]:
         structured = state.research.structured_schema if state.research else {}
-        signal_catalog: List[Dict[str, str]] = []
+        evidence_ladder = ensure_evidence_ladder(structured) if isinstance(structured, dict) else []
+        signal_catalog: List[Dict[str, Any]] = []
         seen: set[str] = set()
         evidence_urls = [item.url for item in (state.research.evidence if state.research else [])[:6] if item.url]
 
-        def _add_signal(signal_type: str, value: Any, source_kind: str, source_ref: str) -> None:
+        def _add_catalog_entry(
+            signal_type: str,
+            value: Any,
+            source_kind: str,
+            source_ref: str,
+            *,
+            evidence_type: str = "",
+            evidence_refs: Optional[Sequence[str]] = None,
+            confidence: Optional[float] = None,
+            why_it_matters: str = "",
+        ) -> None:
             text = str(value or "").strip()
             if not text:
                 return
@@ -1606,14 +1682,101 @@ class PersonaAgent(BaseAgent):
                     "type": signal_type,
                     "text": text,
                     "source_kind": source_kind,
-                    "source_ref": source_ref,
+                    "source_ref": str(source_ref or "").strip() or "research",
+                    "evidence_type": str(evidence_type or "").strip() or ("derived_signal" if source_kind == "research_signal" else "model_estimate"),
+                    "evidence_refs": list(dict.fromkeys(str(ref).strip() for ref in (evidence_refs or []) if str(ref).strip()))[:3],
+                    "confidence": round(float(confidence), 3) if isinstance(confidence, (int, float)) else None,
+                    "why_it_matters": str(why_it_matters or "").strip(),
                 }
+            )
+
+        def _add_signal(signal_type: str, value: Any, source_kind: str, source_ref: str) -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            matching_evidence = find_evidence_by_text(evidence_ladder, text)
+            evidence_refs = [
+                str(item.get("id") or "").strip()
+                for item in matching_evidence
+                if str(item.get("id") or "").strip()
+            ]
+            evidence_types = list(
+                dict.fromkeys(
+                    str(item.get("evidence_type") or "").strip()
+                    for item in matching_evidence
+                    if str(item.get("evidence_type") or "").strip()
+                )
+            )
+            confidence_values = [
+                float(item.get("confidence"))
+                for item in matching_evidence
+                if isinstance(item.get("confidence"), (int, float))
+            ]
+            source_ref_value = source_ref
+            if matching_evidence:
+                source_ref_value = self._evidence_source_ref(matching_evidence[0], fallback=source_ref)
+            _add_catalog_entry(
+                signal_type,
+                text,
+                source_kind,
+                source_ref_value,
+                evidence_type=evidence_types[0] if evidence_types else ("derived_signal" if source_kind == "research_signal" else "model_estimate"),
+                evidence_refs=evidence_refs[:3],
+                confidence=max(confidence_values) if confidence_values else None,
+                why_it_matters=str(matching_evidence[0].get("why_it_matters") or "").strip() if matching_evidence else "",
             )
 
         for signal_type in ("signals", "user_types", "complaints", "behaviors", "competition_reactions"):
             for value in structured.get(signal_type) or []:
                 _add_signal(signal_type, value, "research_signal", evidence_urls[0] if evidence_urls else "research")
+
+        def _ladder_priority(item: Dict[str, Any]) -> Tuple[int, float]:
+            source = item.get("source") if isinstance(item.get("source"), dict) else {}
+            kind = str(source.get("kind") or "").strip().lower()
+            kind_rank = 0 if kind == "proxy_structured" else 1 if kind == "proxy_search" else 2
+            confidence = float(item.get("confidence")) if isinstance(item.get("confidence"), (int, float)) else 0.0
+            return kind_rank, -confidence
+
+        def _promote_ladder_rows(evidence_type: str) -> None:
+            for item in sorted(
+                [
+                    row
+                    for row in evidence_ladder
+                    if isinstance(row, dict) and str(row.get("evidence_type") or "").strip() == evidence_type
+                ],
+                key=_ladder_priority,
+            ):
+                if len(signal_catalog) >= 32:
+                    break
+                text = " ".join(str(item.get("text") or "").split()).strip()
+                if not text:
+                    continue
+                if evidence_type == "direct_evidence" and len(text) > 180:
+                    continue
+                source = item.get("source") if isinstance(item.get("source"), dict) else {}
+                signal_type = str(source.get("field") or "").strip() or "signals"
+                source_kind = str(source.get("kind") or "").strip().lower()
+                source_ref = source_kind if source_kind in {"proxy_structured", "proxy_search"} else self._evidence_source_ref(item, fallback="research")
+                _add_catalog_entry(
+                    signal_type,
+                    text,
+                    "research_signal",
+                    source_ref,
+                    evidence_type=evidence_type,
+                    evidence_refs=[str(item.get("id") or "").strip()],
+                    confidence=item.get("confidence") if isinstance(item.get("confidence"), (int, float)) else None,
+                    why_it_matters=str(item.get("why_it_matters") or "").strip(),
+                )
+
+        _promote_ladder_rows("derived_signal")
+        _promote_ladder_rows("direct_evidence")
+        research_signal_count = sum(1 for item in signal_catalog if str(item.get("source_kind") or "").strip() == "research_signal")
+        if research_signal_count < 18:
+            _promote_ladder_rows("model_estimate")
+
         for cluster in self._audience_clusters(state):
+            if len(signal_catalog) >= 32:
+                break
             cluster_name = str(cluster.get("cluster") or "").strip()
             source_ref = cluster_name or "audience_fallback"
             for role in cluster.get("roles") or []:
@@ -1623,6 +1786,165 @@ class PersonaAgent(BaseAgent):
             for behavior in list(cluster.get("speaking_styles") or []) + list(cluster.get("motivations") or []):
                 _add_signal("behaviors", behavior, "audience_fallback", source_ref)
         return signal_catalog[:32]
+
+    def _default_signal_confidence(self, evidence_type: str) -> float:
+        normalized = str(evidence_type or "").strip()
+        if normalized == "direct_evidence":
+            return 0.85
+        if normalized == "derived_signal":
+            return 0.62
+        if normalized == "model_estimate":
+            return 0.35
+        return 0.5
+
+    def _signal_priority(
+        self,
+        signal: Dict[str, Any],
+        *,
+        index: int,
+        ladder_summary: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[int, float, int]:
+        source_kind = str(signal.get("source_kind") or "").strip()
+        evidence_type = str(signal.get("evidence_type") or "").strip()
+        source_ref = str(signal.get("source_ref") or "").strip().lower()
+        evidence_refs = signal.get("evidence_refs") if isinstance(signal.get("evidence_refs"), list) else []
+        explicit_confidence = float(signal.get("confidence")) if isinstance(signal.get("confidence"), (int, float)) else self._default_signal_confidence(evidence_type)
+        source_modifier = -0.08 if "proxy_structured" in source_ref else -0.05 if "proxy_search" in source_ref else 0.0
+        summary = ladder_summary if isinstance(ladder_summary, dict) else {}
+        signal_score = explicit_confidence + source_modifier
+        if evidence_type in {"direct_evidence", "derived_signal"}:
+            signal_score += 0.04 * float(summary.get("direct_ratio") or 0.0)
+        if evidence_type == "model_estimate":
+            signal_score -= 0.08 * float(summary.get("estimate_ratio") or 0.0)
+        if "proxy_" in source_ref or bool(evidence_refs):
+            signal_score -= 0.05 * float(summary.get("proxy_ratio") or 0.0)
+        signal_score -= 0.03 * int(summary.get("contradiction_count") or 0)
+        signal_score = self._clamp(signal_score, 0.1, 1.0, fallback=0.5)
+        source_kind_rank = 0 if source_kind == "research_signal" else 1
+        return source_kind_rank, -signal_score, index
+
+    def _prioritized_signal_catalog(
+        self,
+        signal_catalog: Sequence[Dict[str, Any]],
+        *,
+        ladder_summary: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        indexed = [
+            (index, item)
+            for index, item in enumerate(signal_catalog or [])
+            if isinstance(item, dict) and str(item.get("text") or "").strip()
+        ]
+        return [
+            item
+            for index, item in sorted(
+                indexed,
+                key=lambda row: self._signal_priority(row[1], index=row[0], ladder_summary=ladder_summary),
+            )
+        ]
+
+    def _oversample_padding(self, confidence_score: Any) -> int:
+        try:
+            score = float(confidence_score)
+        except (TypeError, ValueError):
+            score = 0.0
+        return 4 if score < 0.45 else 2
+
+    def _matched_signal_confidence(self, signal_plan: Dict[str, Any], evidence_signals: Sequence[str]) -> Optional[float]:
+        normalized_signals = {
+            str(item).strip().lower()
+            for item in evidence_signals or []
+            if str(item).strip()
+        }
+        if not normalized_signals:
+            return None
+        matches: List[float] = []
+        for item in signal_plan.get("signal_catalog") or []:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or "").strip().lower()
+            if text not in normalized_signals:
+                continue
+            matches.append(
+                float(item.get("confidence"))
+                if isinstance(item.get("confidence"), (int, float))
+                else self._default_signal_confidence(str(item.get("evidence_type") or ""))
+            )
+        if not matches:
+            return None
+        return round(sum(matches) / len(matches), 3)
+
+    def _ladder_theme_pool(self, signal_catalog: Sequence[Dict[str, Any]]) -> Dict[str, List[str]]:
+        roles: List[str] = []
+        concerns: List[str] = []
+        motivations: List[str] = []
+        for item in self._prioritized_signal_catalog(signal_catalog):
+            if str(item.get("source_kind") or "").strip() != "research_signal":
+                continue
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            signal_type = str(item.get("type") or "").strip()
+            evidence_type = str(item.get("evidence_type") or "").strip()
+            if signal_type == "user_types" and text not in roles:
+                roles.append(text)
+            if signal_type == "complaints" and text not in concerns:
+                concerns.append(text)
+            if signal_type in {"behaviors", "signals"} and evidence_type != "model_estimate" and text not in motivations:
+                motivations.append(text)
+            if len(roles) >= 4 and len(concerns) >= 4 and len(motivations) >= 4:
+                break
+        return {"roles": roles[:4], "concerns": concerns[:4], "motivations": motivations[:4]}
+
+    def _cluster_theme_terms(self, cluster: Dict[str, Any]) -> List[str]:
+        values: List[str] = []
+        for value in [cluster.get("cluster"), *(cluster.get("roles") or []), *(cluster.get("concerns") or []), *(cluster.get("motivations") or [])]:
+            text = str(value or "").strip().lower()
+            if len(text) >= 4 and text not in values:
+                values.append(text)
+        return values[:10]
+
+    def _select_cluster_persona_signals(
+        self,
+        *,
+        cluster: Dict[str, Any],
+        signal_plan: Dict[str, Any],
+        fallback_signals: Sequence[str],
+    ) -> List[str]:
+        prioritized_catalog = self._prioritized_signal_catalog(signal_plan.get("signal_catalog") or [])
+        cluster_signal_refs = {str(item).strip().lower() for item in cluster.get("signal_refs") or [] if str(item).strip()}
+        cluster_terms = self._cluster_theme_terms(cluster)
+        selected: List[str] = []
+        for item in prioritized_catalog:
+            text = str(item.get("text") or "").strip()
+            lowered = text.lower()
+            if not text or text in selected:
+                continue
+            item_id = str(item.get("id") or "").strip().lower()
+            item_ref = str(item.get("source_ref") or "").strip().lower()
+            matches_ref = bool(cluster_signal_refs and (item_id in cluster_signal_refs or item_ref in cluster_signal_refs))
+            matches_theme = any(term in lowered for term in cluster_terms)
+            if matches_ref or matches_theme:
+                selected.append(text)
+            if len(selected) >= 2:
+                break
+        if len(selected) < 2:
+            for value in fallback_signals:
+                text = str(value or "").strip()
+                if text and text not in selected:
+                    selected.append(text)
+                if len(selected) >= 2:
+                    break
+        return selected[:2]
+
+    def _evidence_source_ref(self, evidence_item: Dict[str, Any], *, fallback: str = "") -> str:
+        source = evidence_item.get("source")
+        if isinstance(source, dict):
+            for key in ("url", "title", "kind", "query", "domain"):
+                value = str(source.get(key) or "").strip()
+                if value:
+                    return value
+        text = str(source or "").strip()
+        return text or fallback
 
     def _approved_signal_texts(self, signal_plan: Dict[str, Any]) -> set[str]:
         approved: set[str] = set()
@@ -1670,6 +1992,8 @@ class PersonaAgent(BaseAgent):
         approved_catalog = signal_plan.get("signal_catalog") if isinstance(signal_plan.get("signal_catalog"), list) else []
         signal_refs = []
         source_refs = []
+        evidence_refs = []
+        evidence_types = []
         for signal in approved_catalog:
             if not isinstance(signal, dict):
                 continue
@@ -1680,6 +2004,14 @@ class PersonaAgent(BaseAgent):
             source_ref = str(signal.get("source_ref") or "").strip()
             if source_ref:
                 source_refs.append(source_ref)
+            evidence_refs.extend(
+                str(ref).strip()
+                for ref in (signal.get("evidence_refs") or [])
+                if str(ref).strip()
+            )
+            evidence_type = str(signal.get("evidence_type") or "").strip()
+            if evidence_type:
+                evidence_types.append(evidence_type)
         kind = self._normalize_source_kind(raw_kind, state, context_location_label(state.user_context))
         return {
             "kind": kind,
@@ -1688,6 +2020,8 @@ class PersonaAgent(BaseAgent):
             "signal_refs": list(dict.fromkeys(ref for ref in signal_refs if ref)),
             "source_ref": list(dict.fromkeys(ref for ref in source_refs if ref))[:3],
             "evidence_signals": list(evidence_signals)[:4],
+            "evidence_refs": list(dict.fromkeys(ref for ref in evidence_refs if ref))[:4],
+            "evidence_type": evidence_types[0] if evidence_types else "",
         }
 
     def _source_type_label(self, state: OrchestrationState, *, saved_persona_hints: Optional[Sequence[PersonaProfile]] = None) -> str:
@@ -1757,6 +2091,7 @@ class PersonaAgent(BaseAgent):
         base_clusters = list(structured_inputs.get("audience_clusters") or self._audience_clusters(state))
         user_types = [str(item).strip() for item in market_grounding.get("user_types") or [] if str(item).strip()]
         objections = [str(item).strip() for item in market_grounding.get("local_objections") or [] if str(item).strip()]
+        ladder_themes = self._ladder_theme_pool(structured_inputs.get("signal_catalog") or [])
         price_bucket = "high" if str(market_grounding.get("price_sensitivity") or "").lower() == "high" else "low" if str(market_grounding.get("price_sensitivity") or "").lower() == "low" else "medium"
         hint_clusters = [persona.target_audience_cluster for persona in saved_persona_hints if persona.target_audience_cluster]
         results: List[Dict[str, Any]] = []
@@ -1767,6 +2102,16 @@ class PersonaAgent(BaseAgent):
             roles = self._string_list(cluster.get("roles"), fallback=user_types, limit=4)
             motivations = self._string_list(cluster.get("motivations"), fallback=list(structured_inputs.get("behaviors") or []), limit=4)
             concerns = self._string_list(cluster.get("concerns"), fallback=objections, limit=4)
+            if len(roles) < 3:
+                roles = self._string_list(roles + user_types + ladder_themes.get("roles", []), fallback=roles + user_types + ladder_themes.get("roles", []), limit=4)
+            if len(concerns) < 3:
+                concerns = self._string_list(concerns + objections + ladder_themes.get("concerns", []), fallback=concerns + objections + ladder_themes.get("concerns", []), limit=4)
+            if len(motivations) < 3:
+                motivations = self._string_list(
+                    motivations + list(structured_inputs.get("behaviors") or []) + ladder_themes.get("motivations", []),
+                    fallback=motivations + list(structured_inputs.get("behaviors") or []) + ladder_themes.get("motivations", []),
+                    limit=4,
+                )
             speaking_styles = self._string_list(cluster.get("speaking_styles"), fallback=["clear", "practical"], limit=4)
             age_bands = self._string_list(cluster.get("age_bands"), fallback=["25-34", "30-44"], limit=3)
             life_stages = self._string_list(cluster.get("life_stages"), fallback=["early career", "habit builder"], limit=3)
@@ -1958,10 +2303,17 @@ class PersonaAgent(BaseAgent):
         if not clusters or not signals:
             return []
         rows: List[Dict[str, Any]] = []
+        approved_catalog = signal_plan.get("signal_catalog") if isinstance(signal_plan.get("signal_catalog"), list) else []
+        cluster_iterations: Dict[str, int] = {}
         for index in range(max(0, count)):
             cluster = clusters[index % len(clusters)]
             if not isinstance(cluster, dict):
                 continue
+            cluster_name = str(cluster.get("cluster") or "").strip()
+            segment_id = str(cluster.get("segment_id") or self._slug(f"{cluster_name}-{index + 1}")[:64]).strip()
+            cluster_key = f"{cluster_name.lower()}::{segment_id.lower()}"
+            cluster_iteration = cluster_iterations.get(cluster_key, 0)
+            cluster_iterations[cluster_key] = cluster_iteration + 1
             roles = [str(item).strip() for item in cluster.get("roles") or [] if str(item).strip()]
             age_bands = [str(item).strip() for item in cluster.get("age_bands") or [] if str(item).strip()]
             life_stages = [str(item).strip() for item in cluster.get("life_stages") or [] if str(item).strip()]
@@ -1969,21 +2321,49 @@ class PersonaAgent(BaseAgent):
             motivations = [str(item).strip() for item in cluster.get("motivations") or [] if str(item).strip()]
             concerns = [str(item).strip() for item in cluster.get("concerns") or [] if str(item).strip()]
             signal_refs = [str(item).strip() for item in cluster.get("signal_refs") or [] if str(item).strip()]
-            role = str((roles[index % len(roles)] if roles else "") or "").strip()
-            cluster_name = str(cluster.get("cluster") or "").strip()
+            role = str((roles[cluster_iteration % len(roles)] if roles else "") or "").strip()
             if not all([role, cluster_name, age_bands, life_stages, styles, motivations, concerns]):
                 continue
-            persona_signals = signals[index % len(signals): index % len(signals) + 2] or signals[:2]
+            rotated_concerns = concerns[cluster_iteration % len(concerns):] + concerns[: cluster_iteration % len(concerns)]
+            rotated_motivations = motivations[cluster_iteration % len(motivations):] + motivations[: cluster_iteration % len(motivations)]
+            persona_signals = self._select_cluster_persona_signals(
+                cluster=cluster,
+                signal_plan=signal_plan,
+                fallback_signals=signals[index % len(signals): index % len(signals) + 2] or signals[:2],
+            )
             source_kind = str(cluster.get("source_kind") or self._normalize_source_kind(None, state, place_label)).strip()
+            catalog_matches = [
+                item
+                for item in approved_catalog
+                if isinstance(item, dict)
+                and str(item.get("text") or "").strip().lower() in {
+                    str(signal).strip().lower() for signal in persona_signals if str(signal).strip()
+                }
+            ]
+            evidence_refs = list(
+                dict.fromkeys(
+                    str(ref).strip()
+                    for item in catalog_matches
+                    for ref in (item.get("evidence_refs") or [])
+                    if str(ref).strip()
+                )
+            )
+            evidence_types = list(
+                dict.fromkeys(
+                    str(item.get("evidence_type") or "").strip()
+                    for item in catalog_matches
+                    if str(item.get("evidence_type") or "").strip()
+                )
+            )
             rows.append(
                 {
                     "display_name": f"{place_label.split(',')[0]} {role.title()} {index + 1}",
                     "source_mode": source_kind,
                     "target_audience_cluster": cluster_name,
-                    "segment_id": str(cluster.get("segment_id") or self._slug(f"{cluster_name}-{index + 1}")[:64]),
+                    "segment_id": segment_id,
                     "location_context": place_label,
-                    "age_band": age_bands[index % len(age_bands)],
-                    "life_stage": life_stages[index % len(life_stages)],
+                    "age_band": age_bands[cluster_iteration % len(age_bands)],
+                    "life_stage": life_stages[cluster_iteration % len(life_stages)],
                     "profession_role": role,
                     "attitude_baseline": f"reacts through {persona_signals[0][:48]}".strip(),
                     "skepticism_level": round(0.28 + ((index % 5) * 0.11), 2),
@@ -1991,13 +2371,13 @@ class PersonaAgent(BaseAgent):
                     "stubbornness_level": round(0.24 + ((index % 6) * 0.09), 2),
                     "innovation_openness": round(0.34 + ((index % 5) * 0.1), 2),
                     "financial_sensitivity": round(0.45 + ((index % 4) * 0.11), 2),
-                    "style_of_speaking": styles[index % len(styles)],
-                    "main_concerns": concerns[:3],
-                    "probable_motivations": motivations[:3],
+                    "style_of_speaking": styles[cluster_iteration % len(styles)],
+                    "main_concerns": rotated_concerns[:3],
+                    "probable_motivations": rotated_motivations[:3],
                     "influence_weight": round(0.85 + ((index % 5) * 0.12), 2),
                     "tags": self._fallback_tags(cluster_name, state),
                     "stance": ["accept", "neutral", "reject"][index % 3],
-                    "summary": self._persona_summary(cluster_name, role, concerns[:2], motivations[:2], place_label),
+                    "summary": self._persona_summary(cluster_name, role, rotated_concerns[:2], rotated_motivations[:2], place_label),
                     "evidence_signals": persona_signals[:2],
                     "price_sensitivity_bucket": str(cluster.get("price_sensitivity_bucket") or "medium"),
                     "decision_style": str(cluster.get("decision_style") or "comparison-led"),
@@ -2011,6 +2391,8 @@ class PersonaAgent(BaseAgent):
                         "signal_refs": signal_refs[:3],
                         "source_ref": signal_refs[:3],
                         "evidence_signals": persona_signals[:2],
+                        "evidence_refs": evidence_refs[:4],
+                        "evidence_type": evidence_types[0] if evidence_types else "",
                     },
                 }
             )

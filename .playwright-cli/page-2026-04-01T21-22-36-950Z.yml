@@ -1,0 +1,259 @@
+- generic [ref=e2]:
+  - region "Notifications (F8)":
+    - list
+  - region "Notifications alt+T"
+  - generic [ref=e5]:
+    - navigation [ref=e6]:
+      - generic [ref=e7]:
+        - generic [ref=e8]:
+          - generic [ref=e10]: AS
+          - generic [ref=e11]: ASSET
+        - generic [ref=e12]:
+          - link "المميزات" [ref=e13] [cursor=pointer]:
+            - /url: "#features"
+          - link "كيف يعمل" [ref=e14] [cursor=pointer]:
+            - /url: "#how-it-works"
+          - link "الأسعار" [ref=e15] [cursor=pointer]:
+            - /url: "#pricing"
+        - generic [ref=e16]:
+          - generic [ref=e17]:
+            - button "ابدأ مجانًا" [ref=e18] [cursor=pointer]
+            - button "تسجيل الدخول" [ref=e19] [cursor=pointer]
+          - generic [ref=e21]:
+            - button [ref=e22] [cursor=pointer]:
+              - img
+            - button [ref=e23] [cursor=pointer]:
+              - img
+    - generic [ref=e27]:
+      - generic [ref=e29]:
+        - generic [ref=e31]: AS
+        - generic [ref=e32]: ASSET
+      - heading "شوف مست" [level=1] [ref=e33]:
+        - generic [ref=e34]: شوف مست
+      - paragraph [ref=e36]: بيئة آمنة لاختبار الفكرة قبل أن تواجه الواقع.
+      - generic [ref=e37]:
+        - button "ابدأ تجربة مجانية" [ref=e38] [cursor=pointer]:
+          - text: ابدأ تجربة مجانية
+          - img
+        - button "شاهد العرض" [ref=e39] [cursor=pointer]:
+          - img
+          - text: شاهد العرض
+    - button "شاهد المقدمة" [ref=e50] [cursor=pointer]:
+      - generic [ref=e51]:
+        - img [ref=e52]
+        - text: شاهد المقدمة
+    - generic [ref=e55]:
+      - generic [ref=e56]:
+        - text: المشكلة
+        - heading "ليه أغلب الأفكار بتفشل" [level=2] [ref=e57]
+        - paragraph [ref=e58]: الردود العامة من أدوات الدردشة مش تقييم حقيقي. أنت محتاج آراء متنوعة وواقعية.
+      - generic [ref=e59]:
+        - generic [ref=e60]:
+          - img [ref=e62]
+          - heading "مفيش رد فعل سوق حقيقي" [level=3] [ref=e64]
+          - paragraph [ref=e65]: غالبًا بتسمع اللي عاوز تسمعه، مش اللي السوق هيعمله فعلًا.
+        - generic [ref=e66]:
+          - img [ref=e68]
+          - heading "الخوف من الإحراج" [level=3] [ref=e71]
+          - paragraph [ref=e72]: اختبار الفكرة على ناس حقيقيين بدري ممكن يكون مكلف.
+        - generic [ref=e73]:
+          - img [ref=e75]
+          - heading "غياب التنوع في الآراء" [level=3] [ref=e80]
+          - paragraph [ref=e81]: لازم متشكك ومتفائل وعملي، مش صوت واحد.
+    - generic [ref=e84]:
+      - generic:
+        - img
+        - text: الحل
+      - generic [ref=e85]:
+        - heading "تعرّف على ASSET" [level=2] [ref=e86]
+        - paragraph [ref=e87]: أداة محاكاة اجتماعية بالذكاء الاصطناعي
+        - paragraph [ref=e88]: اختبر الفكرة افتراضيًا أولًا، ثم طوّرها بثقة.
+    - generic [ref=e93]:
+      - generic [ref=e95]:
+        - generic [ref=e98]:
+          - generic [ref=e99]: Accepted
+          - generic [ref=e101]: Rejected
+          - generic [ref=e103]: Neutral
+        - generic [ref=e105]: "Nodes: 25 • Connections: 42"
+      - generic [ref=e106]:
+        - generic [ref=e107]: كيف يعمل
+        - heading "شاهد الوكلاء وهم يختبرون فكرتك" [level=2] [ref=e108]
+        - paragraph [ref=e109]: مجتمع افتراضي من وكلاء بسمات وخلفيات مختلفة.
+        - generic [ref=e110]:
+          - generic [ref=e111] [cursor=pointer]:
+            - generic [ref=e113]: "1"
+            - generic [ref=e114]:
+              - heading "شخصيات مختلفة" [level=3] [ref=e115]
+              - paragraph [ref=e116]: أدوار وعقليات متنوعة لتقييم متوازن.
+          - generic [ref=e117] [cursor=pointer]:
+            - generic [ref=e119]: "2"
+            - generic [ref=e120]:
+              - heading "سمات نفسية" [level=3] [ref=e121]
+              - paragraph [ref=e122]: درجات مختلفة من التفاؤل والشك وتحمّل المخاطر.
+          - generic [ref=e123] [cursor=pointer]:
+            - generic [ref=e125]: "3"
+            - generic [ref=e126]:
+              - heading "نقاشات حية" [level=3] [ref=e127]
+              - paragraph [ref=e128]: الوكلاء يناقشون ويؤثرون على بعضهم مباشرة.
+          - generic [ref=e129] [cursor=pointer]:
+            - generic [ref=e131]: "4"
+            - generic [ref=e132]:
+              - heading "اعتماد على بيانات حقيقية" [level=3] [ref=e133]
+              - paragraph [ref=e134]: ربط بحث ويب عند توفر مصادر مناسبة.
+    - generic [ref=e138]:
+      - generic [ref=e139]:
+        - text: المميزات
+        - heading "كل اللي تحتاجه" [level=2] [ref=e140]
+        - paragraph [ref=e141]: أدوات قوية للتحقق من فكرتك بثقة.
+      - generic [ref=e142]:
+        - generic [ref=e143] [cursor=pointer]:
+          - img [ref=e145]
+          - heading "نتائج سريعة" [level=3] [ref=e147]
+          - paragraph [ref=e148]: حلقة تقييم سريعة وواضحة.
+        - generic [ref=e149] [cursor=pointer]:
+          - img [ref=e151]
+          - heading "نسبة القبول" [level=3] [ref=e155]
+          - paragraph [ref=e156]: اعرف رد فعل الجمهور المتوقع.
+        - generic [ref=e157] [cursor=pointer]:
+          - img [ref=e159]
+          - heading "مؤشر الاستقطاب" [level=3] [ref=e164]
+          - paragraph [ref=e165]: قياس الاختلاف والاتفاق حول الفكرة.
+        - generic [ref=e166] [cursor=pointer]:
+          - img [ref=e168]
+          - heading "تحليل عميق" [level=3] [ref=e170]
+          - paragraph [ref=e171]: نقاط قوة ومخاطر واقتراحات.
+        - generic [ref=e172] [cursor=pointer]:
+          - img [ref=e174]
+          - heading "أسواق متعددة" [level=3] [ref=e177]
+          - paragraph [ref=e178]: اختبر عبر مناطق وسياقات مختلفة.
+        - generic [ref=e179] [cursor=pointer]:
+          - img [ref=e181]
+          - heading "تفكير لحظي" [level=3] [ref=e188]
+          - paragraph [ref=e189]: تابع تغيّر الآراء مع الوقت.
+    - generic [ref=e191]:
+      - generic [ref=e192]:
+        - text: الأسعار
+        - heading "ابدأ مجانًا اليوم" [level=2] [ref=e193]
+        - paragraph [ref=e194]: جرّب أولًا بدون تعقيد.
+      - generic [ref=e195]:
+        - generic [ref=e197]:
+          - img [ref=e199]
+          - heading "Starter" [level=3] [ref=e201]
+          - generic [ref=e202]:
+            - generic [ref=e203]: $0
+            - generic [ref=e204]: /month
+          - paragraph [ref=e205]: مثالي لتجربة المنصة لأول مرة
+          - list [ref=e206]:
+            - listitem [ref=e207]:
+              - img [ref=e209]
+              - generic [ref=e211]: 3 محاكاة يوميًا
+            - listitem [ref=e212]:
+              - img [ref=e214]
+              - generic [ref=e216]: 50 وكيل ذكاء اصطناعي لكل محاكاة
+            - listitem [ref=e217]:
+              - img [ref=e219]
+              - generic [ref=e221]: تحليلات أساسية
+            - listitem [ref=e222]:
+              - img [ref=e224]
+              - generic [ref=e226]: دعم عبر البريد الإلكتروني
+            - listitem [ref=e227]:
+              - img [ref=e229]
+              - generic [ref=e231]: وصول مجتمعي
+          - button "ابدأ مجانًا" [ref=e232] [cursor=pointer]
+        - generic [ref=e233]:
+          - generic [ref=e235]:
+            - img [ref=e236]
+            - text: الأكثر شيوعًا
+          - generic [ref=e238]:
+            - img [ref=e240]
+            - heading "Pro" [level=3] [ref=e242]
+            - generic [ref=e243]:
+              - generic [ref=e244]: $29
+              - generic [ref=e245]: /month
+            - paragraph [ref=e246]: لرواد الأعمال والفرق الجادة
+            - list [ref=e247]:
+              - listitem [ref=e248]:
+                - img [ref=e250]
+                - generic [ref=e252]: محاكاة غير محدودة
+              - listitem [ref=e253]:
+                - img [ref=e255]
+                - generic [ref=e257]: 500 وكيل ذكاء اصطناعي لكل محاكاة
+              - listitem [ref=e258]:
+                - img [ref=e260]
+                - generic [ref=e262]: تحليلات وتقارير متقدمة
+              - listitem [ref=e263]:
+                - img [ref=e265]
+                - generic [ref=e267]: دعم ذو أولوية
+              - listitem [ref=e268]:
+                - img [ref=e270]
+                - generic [ref=e272]: وصول API
+              - listitem [ref=e273]:
+                - img [ref=e275]
+                - generic [ref=e277]: شخصيات وكلاء مخصصة
+            - button "ابدأ تجربة 7 أيام" [ref=e278] [cursor=pointer]
+        - generic [ref=e280]:
+          - img [ref=e282]
+          - heading "Enterprise" [level=3] [ref=e284]
+          - generic [ref=e286]: مخصص
+          - paragraph [ref=e287]: للشركات والمؤسسات الكبيرة
+          - list [ref=e288]:
+            - listitem [ref=e289]:
+              - img [ref=e291]
+              - generic [ref=e293]: كل ما في Pro
+            - listitem [ref=e294]:
+              - img [ref=e296]
+              - generic [ref=e298]: وكلاء غير محدودين
+            - listitem [ref=e299]:
+              - img [ref=e301]
+              - generic [ref=e303]: حل White-label
+            - listitem [ref=e304]:
+              - img [ref=e306]
+              - generic [ref=e308]: مدير حساب مخصص
+            - listitem [ref=e309]:
+              - img [ref=e311]
+              - generic [ref=e313]: تكاملات مخصصة
+            - listitem [ref=e314]:
+              - img [ref=e316]
+              - generic [ref=e318]: ضمان SLA
+            - listitem [ref=e319]:
+              - img [ref=e321]
+              - generic [ref=e323]: نشر داخلي On-premise
+          - button "تواصل مع المبيعات" [ref=e324] [cursor=pointer]
+      - paragraph [ref=e325]: جميع الخطط تتضمن تجربة مجانية لمدة 7 أيام. لا حاجة لبطاقة ائتمان.
+    - generic [ref=e329]:
+      - img [ref=e332]
+      - heading "جاهز تختبر فكرتك؟" [level=2] [ref=e337]
+      - paragraph [ref=e338]: طوّر الفكرة داخل بيئة افتراضية قبل الإطلاق.
+      - button "جرّب ASSET مجانًا" [ref=e339] [cursor=pointer]:
+        - text: جرّب ASSET مجانًا
+        - img
+    - contentinfo [ref=e340]:
+      - generic [ref=e341]:
+        - generic [ref=e342]:
+          - generic [ref=e343]:
+            - generic [ref=e345]: AS
+            - generic [ref=e346]: ASSET
+          - navigation [ref=e347]:
+            - link "المميزات" [ref=e348] [cursor=pointer]:
+              - /url: "#"
+            - link "الأسعار" [ref=e349] [cursor=pointer]:
+              - /url: "#"
+            - link "كيف يعمل" [ref=e350] [cursor=pointer]:
+              - /url: "#"
+          - generic [ref=e351]:
+            - link [ref=e352] [cursor=pointer]:
+              - /url: "#"
+              - img [ref=e353]
+            - link [ref=e356] [cursor=pointer]:
+              - /url: "#"
+              - img [ref=e357]
+            - link [ref=e359] [cursor=pointer]:
+              - /url: "#"
+              - img [ref=e360]
+        - generic [ref=e364]:
+          - paragraph [ref=e365]: © 2024 ASSET. جميع الحقوق محفوظة.
+          - generic [ref=e366]:
+            - link "سياسة الخصوصية" [ref=e367] [cursor=pointer]:
+              - /url: "#"
+            - link "شروط الخدمة" [ref=e368] [cursor=pointer]:
+              - /url: "#"

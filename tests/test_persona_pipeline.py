@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time
 import sys
 import unittest
 from pathlib import Path
@@ -24,6 +26,7 @@ from app.models.orchestration import (  # noqa: E402
     normalize_context,
     resolve_persona_source_mode,
 )
+from app.services.evidence_ladder import build_research_evidence_ladder  # noqa: E402
 
 
 def _agent() -> PersonaAgent:
@@ -252,6 +255,122 @@ class PersonaPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(row.get("purchase_trigger") for row in rows))
         self.assertTrue(all(row.get("rejection_trigger") for row in rows))
 
+    def test_signal_catalog_and_source_attribution_support_optional_evidence_ladder(self) -> None:
+        agent = _agent()
+        state = _state()
+        state.research = _research_report()
+
+        with self.subTest("with evidence ladder"):
+            state.research.structured_schema["evidence_ladder"] = build_research_evidence_ladder(
+                evidence=state.research.evidence,
+                structured=state.research.structured_schema,
+                timestamp_ms=1234567890,
+                estimated=False,
+            )
+            structured_inputs = agent._structured_persona_inputs(state)
+            signal_catalog = agent._signal_catalog_from_state(state)
+            source_attribution = agent._build_source_attribution(
+                state=state,
+                signal_plan={**_signal_plan(), "signal_catalog": signal_catalog},
+                cluster="Working Parents",
+                evidence_signals=["delivery fees", "comparison shopping"],
+                raw_kind="research_signal",
+            )
+
+            self.assertIn("evidence_ladder", structured_inputs)
+            self.assertTrue(structured_inputs["evidence_ladder"])
+            self.assertTrue(signal_catalog)
+            self.assertTrue(any(item.get("evidence_refs") for item in signal_catalog if isinstance(item, dict)))
+            self.assertTrue(any(str(item.get("why_it_matters") or "").strip() for item in signal_catalog if isinstance(item, dict)))
+            self.assertEqual(source_attribution["kind"], "research_signal")
+            self.assertTrue(source_attribution["signal_refs"])
+            self.assertTrue(source_attribution["source_ref"])
+            self.assertEqual(source_attribution["evidence_signals"], ["delivery fees", "comparison shopping"])
+            self.assertTrue(source_attribution["evidence_refs"])
+
+        with self.subTest("without evidence ladder"):
+            state.research = _research_report()
+            self.assertNotIn("evidence_ladder", state.research.structured_schema)
+            structured_inputs = agent._structured_persona_inputs(state)
+            signal_catalog = agent._signal_catalog_from_state(state)
+            source_attribution = agent._build_source_attribution(
+                state=state,
+                signal_plan={**_signal_plan(), "signal_catalog": signal_catalog},
+                cluster="Working Parents",
+                evidence_signals=["delivery fees", "comparison shopping"],
+                raw_kind="research_signal",
+            )
+
+            self.assertIn("evidence_ladder", structured_inputs)
+            self.assertEqual(structured_inputs["evidence_ladder"], [])
+            self.assertTrue(signal_catalog)
+            self.assertTrue(all(not item.get("evidence_refs") for item in signal_catalog if isinstance(item, dict)))
+            self.assertTrue(all(not str(item.get("why_it_matters") or "").strip() for item in signal_catalog if isinstance(item, dict)))
+            self.assertEqual(source_attribution["kind"], "research_signal")
+            self.assertTrue(source_attribution["signal_refs"])
+            self.assertTrue(source_attribution["source_ref"])
+            self.assertEqual(source_attribution["evidence_signals"], ["delivery fees", "comparison shopping"])
+            self.assertEqual(source_attribution["evidence_refs"], [])
+
+    async def test_build_dynamic_segments_returns_fallback_after_budget_expires(self) -> None:
+        runtime = SimpleNamespace(
+            dataset=None,
+            llm=SimpleNamespace(generate_json=AsyncMock(side_effect=self._slow_llm_json)),
+            event_bus=None,
+            repository=None,
+        )
+        agent = PersonaAgent(runtime)
+        state = _state()
+        state.research = _research_report()
+        structured_inputs = agent._structured_persona_inputs(state)
+        market_grounding = agent.build_market_grounding(
+            state=state,
+            place_label="Cairo",
+            structured_inputs=structured_inputs,
+            memory_context={},
+            saved_persona_hints=[],
+        )
+
+        with patch.object(PersonaAgent, "LLM_CALL_BUDGET_SECONDS", 0.01):
+            started = time.perf_counter()
+            payload = await agent.build_dynamic_segments(
+                state=state,
+                place_label="Cairo",
+                structured_inputs=structured_inputs,
+                market_grounding=market_grounding,
+            )
+            elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 0.2)
+        self.assertTrue(payload["audience_clusters"])
+        self.assertGreater(payload["confidence_score"], 0.0)
+
+    async def test_build_signal_plan_returns_fallback_after_budget_expires(self) -> None:
+        runtime = SimpleNamespace(
+            dataset=None,
+            llm=SimpleNamespace(generate_json=AsyncMock(side_effect=self._slow_llm_json)),
+            event_bus=None,
+            repository=None,
+        )
+        agent = PersonaAgent(runtime)
+        state = _state()
+        state.research = _research_report()
+
+        with patch.object(PersonaAgent, "LLM_CALL_BUDGET_SECONDS", 0.01):
+            started = time.perf_counter()
+            payload = await agent._build_signal_plan(
+                state=state,
+                place_label="Cairo",
+                memory_context={},
+                saved_persona_hints=[],
+            )
+            elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 0.2)
+        self.assertTrue(payload["audience_clusters"])
+        self.assertEqual(payload["audience_clusters"], payload["dynamic_segments"])
+        self.assertTrue(payload["evidence_signals"])
+
     async def test_run_auto_completes_persona_shortfall_before_blocking_simulation(self) -> None:
         runtime = SimpleNamespace(
             dataset=None,
@@ -387,6 +506,9 @@ class PersonaPipelineTests(unittest.IsolatedAsyncioTestCase):
         mode, auto_selected = resolve_persona_source_mode(context, context_type=IdeaContextType.GENERAL_NON_LOCATION)
         self.assertEqual(mode, PersonaSourceMode.GENERATE_NEW_FROM_SEARCH.value)
         self.assertTrue(auto_selected)
+    async def _slow_llm_json(self, *args: object, **kwargs: object) -> dict:
+        await asyncio.sleep(0.05)
+        return {"audience_clusters": [], "confidence_score": 0.0}
 
 
 if __name__ == "__main__":
